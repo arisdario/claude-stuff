@@ -5,7 +5,7 @@ from the objects you label and retrains itself on the EON.
 
 **Intended for:** Tesla Model S **pre-AP** (no factory Autopilot) running openpilot on an EON, with a retrofitted
 **Bosch MRRevo14F** radar (the Tesla AP1 radar). The radar reports up to **32 tracked objects over CAN** (frame pairs
-0x310-0x36F), each with distance, lateral offset, relative speed, class, length and more - that is what radarweb
+0x310-0x36E), each with distance, lateral offset, relative speed, class, length and more - that is what radarweb
 shows and what the classifier learns from.
 
 | File | Runs on | What it does |
