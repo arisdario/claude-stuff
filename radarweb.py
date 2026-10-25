@@ -162,6 +162,45 @@ def autolabel_write(rows):
         with open(AUTOLABEL_FILE, 'a') as f:
             for r in rows: f.write(json.dumps(r, separators=(',', ':')) + '\n')
     except Exception as e: print('autolabel:', e)
+# /ml page data: label counts per class are read incrementally (only bytes added since the last call), so a big
+# autolabels.jsonl is never re-parsed; classes are pulled out with a regex instead of decoding every JSON row.
+import re as _re_ml
+_CRE = _re_ml.compile(r'[{,]\s*"c":\s*"([a-z_]+)"')
+MLSUM = {}     # file -> {'off': bytes read, 'n': {target class: count}, 'recent': [last rows]}
+def _scan_labels(fn):
+    st = MLSUM.setdefault(fn, {'off': 0, 'n': {}, 'recent': []})
+    try: sz = os.path.getsize(fn)
+    except OSError: return st
+    if sz < st['off']: st.update(off=0, n={}, recent=[])            # file was deleted/reset
+    if sz == st['off']: return st
+    with open(fn, 'rb') as f:
+        f.seek(st['off']); chunk = f.read(); st['off'] += len(chunk)
+    lines = chunk.decode('utf8', 'replace').splitlines()
+    for ln in lines:
+        m = _CRE.search(ln)
+        if m: c = radarml.TARGET.get(m.group(1), m.group(1)); st['n'][c] = st['n'].get(c, 0) + 1
+    for ln in lines[-12:]:
+        try:
+            r = json.loads(ln)
+            st['recent'].append({'c': r.get('c'), 'd': r.get('d'), 'y': r.get('y'), 'gs': r.get('gs'), 'radar_c': r.get('radar_c'), 't': r.get('t'), 'auto': bool(r.get('auto'))})
+        except ValueError: pass
+    st['recent'] = st['recent'][-12:]
+    return st
+def ml_summary():
+    man = _scan_labels(OBJLABEL_FILE); aut = _scan_labels(AUTOLABEL_FILE)
+    m = MODEL.m if MODEL is not None else None
+    model = None
+    if m:
+        model = {k: m.get(k) for k in ('algo', 'rows', 'cv_macro_f1', 'baseline_f1', 'trained', 'min_p', 'classes')}
+        model['trees'] = len(m.get('trees', [])); model['prev'] = os.path.exists(MODEL_FILE + '.prev')
+    try: last = json.load(open(MODEL_FILE + '.status.json'))
+    except Exception: last = None
+    with LOCK: objs = [{k: o.get(k) for k in ('s', 'd', 'y', 'gs', 'c', 'rc', 'pc', 'ml', 'inf')} for o in STATE['o']]
+    return {'model': model, 'last_training': last, 'status': STATE.get('ml'), 'manual': man['n'], 'auto': aut['n'],
+            'recent': sorted(man['recent'] + aut['recent'], key=lambda r: r.get('t') or 0)[-12:], 'objects': objs,
+            'files': {'manual': OBJLABEL_FILE, 'auto': AUTOLABEL_FILE, 'model': MODEL_FILE}, 'autolabel_on': AL is not None,
+            'next_at': max(radarml.AUTO_MIN_ROWS, AUTO['trained_rows'] + AUTO_NEW), 'total': AUTO['rows']}
+
 def _label_lines():
     n = 0
     for fn in (OBJLABEL_FILE, AUTOLABEL_FILE):
@@ -789,6 +828,61 @@ var es=new EventSource('/api/stream');es.onmessage=function(e){$('conn').textCon
 # velocity, length, what the radar itself guessed) paired with your label - a real (features, label) row,
 # straight to LEARN_FILE as JSONL. It also drops a plain-text mark (same mechanism as /api/label) so the
 # moment still shows up as an alert banner on replay.
+# ML: what the classifier learned - model scores, label counts (yours / automatic), recent labels, live objects with
+# the model's guess. Polls /api/ml every 2 s.
+MLPAGE = r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Radar learning</title><style>
+:root{--bg:#101215;--fg:#e6e8ea;--mut:#8b9199;--card:#1b1e22;--line:#2a2e34;--ok:#3fb950;--warn:#d29922;--bar:#2a8bf2}
+@media(prefers-color-scheme:light){:root{--bg:#f3f4f6;--fg:#1c1f23;--mut:#5b626b;--card:#fff;--line:#e1e4e8;--ok:#1a7f37;--warn:#9a6700;--bar:#1a73e8}}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif}
+#top{display:flex;gap:16px;padding:10px 16px;flex-wrap:wrap}#top a{color:inherit}
+main{display:grid;gap:12px;padding:0 16px 24px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 10px}
+.big{font-size:28px;font-weight:700}.m{color:var(--mut)}.ok{color:var(--ok)}.warn{color:var(--warn)}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}td,th{padding:4px 6px;text-align:left;border-bottom:1px solid var(--line)}
+th{color:var(--mut);font-weight:600;font-size:12px}td.n{text-align:right}
+.bar{height:8px;background:var(--bar);border-radius:4px;min-width:2px}
+.wrap{overflow-x:auto}
+</style></head><body>
+<div id=top><a href="/">road view</a><a href="/top">top-down</a><a href="/learn">label objects</a><b>What it learned</b><span id=conn class=m>loading…</span></div>
+<main>
+<section><h2>Model</h2><div id=model></div></section>
+<section><h2>Training</h2><div id=train></div></section>
+<section><h2>Labels per class</h2><div id=labels></div></section>
+<section style="grid-column:1/-1"><h2>Live objects - radar vs model</h2><div class=wrap id=objs></div></section>
+<section style="grid-column:1/-1"><h2>Latest labels</h2><div class=wrap id=recent></div></section>
+</main>
+<script>
+var $=function(i){return document.getElementById(i)};
+function esc(x){return String(x==null?'':x).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function pct(x){return x==null?'-':Math.round(x*100)+'%'}
+function ago(t){if(!t)return '-';var s=Date.now()/1000-t;return s<90?Math.round(s)+' s ago':s<5400?Math.round(s/60)+' min ago':s<172800?Math.round(s/3600)+' h ago':Math.round(s/86400)+' days ago'}
+function render(j){
+ var m=j.model;
+ $('model').innerHTML=m?('<div class=big>'+pct(m.cv_macro_f1)+'</div><div class=m>score (cross-validated macro-F1) vs <b>'+pct(m.baseline_f1)+'</b> without the model</div>'+
+  '<p>Trained on <b>'+m.rows+'</b> labels, '+ago(m.trained)+'<br>'+esc(m.algo)+' · '+m.trees+' trees · overrides the radar when ≥ '+pct(m.min_p)+' sure<br>Classes: '+esc((m.classes||[]).join(', '))+(m.prev?'<br><span class=m>previous model kept as .prev</span>':'')+'</p>')
+  :'<div class=big>none yet</div><p class=m>The radar\'s own classes are shown until the first model is trained.</p>';
+ var s=j.status||{},l=j.last_training;
+ $('train').innerHTML='<p>'+esc(s.msg||'-')+'</p><p>Labels: <b>'+j.total+'</b> · next training at <b>'+j.next_at+'</b> (when parked)<br>Automatic labelling: '+(j.autolabel_on?'<span class=ok>on</span>':'<span class=warn>off</span>')+'</p>'+
+  (l?'<p class=m>Last run '+ago(l.t)+': '+esc(l.msg)+'</p>':'');
+ var cls={};Object.keys(j.manual).forEach(function(k){cls[k]=1});Object.keys(j.auto).forEach(function(k){cls[k]=1});
+ var ks=Object.keys(cls).sort(),mx=1;ks.forEach(function(k){mx=Math.max(mx,(j.manual[k]||0)+(j.auto[k]||0))});
+ $('labels').innerHTML=ks.length?'<table><tr><th>class</th><th class=n>yours</th><th class=n>auto</th><th style="width:40%"></th></tr>'+ks.map(function(k){var a=j.manual[k]||0,b=j.auto[k]||0;
+  return '<tr><td>'+esc(k)+'</td><td class=n>'+a+'</td><td class=n>'+b+'</td><td><div class=bar style="width:'+(100*(a+b)/mx)+'%"></div></td></tr>'}).join('')+'</table>':'<p class=m>No labels yet. Drive (automatic labels) or tap objects on <a href="/learn">/learn</a>.</p>';
+ var o=(j.objects||[]).slice().sort(function(a,b){return a.d-b.d});
+ $('objs').innerHTML=o.length?'<table><tr><th>slot</th><th class=n>dist</th><th class=n>lateral</th><th class=n>ground km/h</th><th>radar says</th><th>model says</th><th>shown</th></tr>'+o.map(function(x){
+  var ml=x.ml?esc(x.ml.c)+' <span class=m>'+pct(x.ml.p)+'</span>':'<span class=m>-</span>';
+  return '<tr><td>'+x.s+'</td><td class=n>'+x.d+' m</td><td class=n>'+x.y+' m</td><td class=n>'+Math.round(x.gs*3.6)+'</td><td>'+esc(x.rc)+' <span class=m>'+(x.pc==null?'':x.pc+'%')+'</span></td><td>'+ml+'</td><td>'+(x.inf?'~ ':'')+esc(x.c)+'</td></tr>'}).join('')+'</table>'
+  :'<p class=m>No radar objects right now.</p>';
+ var r=(j.recent||[]).slice().reverse();
+ $('recent').innerHTML=r.length?'<table><tr><th>when</th><th>label</th><th>by</th><th>radar said</th><th class=n>dist</th><th class=n>ground km/h</th></tr>'+r.map(function(x){
+  return '<tr><td>'+ago(x.t)+'</td><td>'+esc(x.c)+'</td><td>'+(x.auto?'auto':'you')+'</td><td>'+esc(x.radar_c)+'</td><td class=n>'+(x.d==null?'-':x.d+' m')+'</td><td class=n>'+(x.gs==null?'-':Math.round(x.gs*3.6))+'</td></tr>'}).join('')+'</table>':'<p class=m>None yet.</p>';
+}
+function poll(){fetch('/api/ml').then(function(r){return r.json()}).then(function(j){$('conn').textContent='live';render(j)}).catch(function(){$('conn').textContent='disconnected, retrying…'})}
+poll();setInterval(poll,2000);
+</script></body></html>"""
+
 LEARN = r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,user-scalable=no">
 <title>Label objects</title><style>
 :root{--bg:#101215;--fg:#e6e8ea;--mut:#8b9199;--road:#1b1e22}
@@ -801,7 +895,7 @@ html,body{margin:0;height:100%;display:flex;flex-direction:column;background:var
 #pal button{border:0;border-radius:14px;padding:8px 12px;font:600 12px system-ui,sans-serif;color:#fff;opacity:.5}
 #pal button.on{opacity:1}
 </style></head><body>
-<div id=top><a href="/" style="color:inherit">road view</a><a href="/top" style="color:inherit">top-down</a><span><b id=v>0</b> <span class=m>km/h</span></span><span id=n class=m></span><span id=conn class=m>connecting…</span></div>
+<div id=top><a href="/" style="color:inherit">road view</a><a href="/top" style="color:inherit">top-down</a><a href="/ml" style="color:inherit">what it learned</a><span><b id=v>0</b> <span class=m>km/h</span></span><span id=n class=m></span><span id=conn class=m>connecting…</span></div>
 <canvas id=c></canvas>
 <div id=sel>tap an object below, then tap what it is</div>
 <div id=pal></div>
@@ -1238,6 +1332,10 @@ class H(BaseHTTPRequestHandler):
         elif self.path == '/api/map':
             msgs, rawv = build_map(time.time()); d = {'msgs': msgs, 'raw': rawv, 'car': MAP['car'], 'ctl': MAP['ctl'], 'logfile': MAP.get('logfile'), 'v': STATE.get('v', 0), 'acc': STATE.get('acc', False), 'alc': STATE.get('alc', False)}
             b = json.dumps(d, default=str).encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        elif self.path == '/api/ml':
+            b = json.dumps(ml_summary(), default=str).encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        elif self.path.split('?')[0] == '/ml':
+            b = MLPAGE.encode(); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path.split('?')[0] == '/map':
             b = MAPP.encode(); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path == '/api/stream':

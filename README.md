@@ -48,6 +48,8 @@ cd /data/openpilot && PYTHONPATH=/data/openpilot:/data nohup python3 /data/radar
 ```
 
 Open `http://<EON-IP>:8088/` on a phone on the same network. `/learn` = tap an object, then tap what it is.
+`/ml` = what it learned: model score vs no model, label counts per class (yours / automatic), the latest labels,
+and every live object with what the radar says, what the model says (with confidence) and what is shown.
 
 ## Automatic labelling (objects label themselves)
 
