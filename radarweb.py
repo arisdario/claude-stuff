@@ -199,7 +199,12 @@ def worker():
         print('no openpilot messaging here (not on the EON): live data is off. Open /?demo=1 for the demo scene, or use radarreplay.py to replay a recording.'); return
     can = messaging.sub_sock('can'); subs = {}
     for svc in ('carState', 'controlsState', 'radarState', 'model'):
-        try: subs[svc] = messaging.sub_sock(svc)
+        # conflate: keep only the newest message - only the latest state is used, and a reader that falls behind
+        # (busy page threads, camera encoding) otherwise gets "Reader was evicted, reconnecting". Not for 'can'.
+        try: subs[svc] = messaging.sub_sock(svc, conflate=True)
+        except TypeError:
+            try: subs[svc] = messaging.sub_sock(svc)
+            except Exception: pass
         except Exception: pass
     A = {}; B = {}; status = {}; nxt = 0; tick = 0; logf = None; last_tick = time.time(); td = {'car': 0.0, 'ctl': 0.0}
     while True:
