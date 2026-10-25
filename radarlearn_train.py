@@ -49,6 +49,9 @@ X = np.array([features(r) for r in rows], dtype=float)
 t = df['t'].values
 drive = np.cumsum(np.r_[1, np.diff(t) > 300])
 track = np.cumsum(np.r_[1, (np.diff(t) > 15) | (np.diff(df['s'].values) != 0)])
+tids = [r.get('tid') for r in rows]          # automatic labels: all snapshots of one track share a 'tid'
+if any(tids):
+    ids = {}; track = np.array([ids.setdefault(tid, len(ids) + 10 ** 6) if tid else k for tid, k in zip(tids, track)])
 counts = df['target'].value_counts()
 keep = df['target'].map(counts).values >= A.min_rows
 if (~keep).any(): print('dropped (fewer than %d rows): %s' % (A.min_rows, dict(counts[counts < A.min_rows])))

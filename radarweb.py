@@ -148,6 +148,26 @@ def ml_class(k, now, o, cname, inf):
 # stop. radarml.autotrain only installs the new model if it scores better (cross-validated) than no model and than the
 # installed one. The worker reloads the model whenever the file changes - no restart needed. AUTOTRAIN_NEW=0 disables.
 AUTO_NEW = int(os.environ.get('AUTOTRAIN_NEW', '30'))
+# AUTOLABEL: objects label themselves (radarml.AutoLabeler: moved fast = vehicle, never moved while you drove past =
+# static, flickering/inconsistent = not real, radar sure for the whole track = that class). Written to their own file
+# next to your /learn labels; both are used for training (yours count MANUAL_WEIGHT times more). AUTOLABEL=0 disables.
+AUTOLABEL_FILE = os.environ.get('AUTOLABELS', os.path.join(os.path.dirname(OBJLABEL_FILE), 'autolabels.jsonl'))
+AUTOLABEL_MAX = 50 * 1024 * 1024       # stop adding automatic labels once the file is this big
+AL = radarml.AutoLabeler() if os.environ.get('AUTOLABEL', '1') != '0' else None
+def autolabel_write(rows):
+    if not rows: return
+    try:
+        if os.path.exists(AUTOLABEL_FILE) and os.path.getsize(AUTOLABEL_FILE) > AUTOLABEL_MAX: return
+        os.makedirs(os.path.dirname(AUTOLABEL_FILE), exist_ok=True)
+        with open(AUTOLABEL_FILE, 'a') as f:
+            for r in rows: f.write(json.dumps(r, separators=(',', ':')) + '\n')
+    except Exception as e: print('autolabel:', e)
+def _label_lines():
+    n = 0
+    for fn in (OBJLABEL_FILE, AUTOLABEL_FILE):
+        try: n += sum(1 for _ in open(fn))
+        except IOError: pass
+    return n
 AUTO = {'proc': None, 'park': 0.0, 'next': 0.0, 'size': -1, 'rows': 0, 'trained_rows': 0, 'prev_rows': 0, 'mtime': 0.0, 'msg': ''}
 try:
     _st = json.load(open(MODEL_FILE + '.status.json')); AUTO['trained_rows'] = _st.get('labels', 0); AUTO['msg'] = _st.get('msg', '')
@@ -173,26 +193,24 @@ def autotrain_tick(now):
             AUTO['proc'] = None
             try: AUTO['msg'] = json.load(open(MODEL_FILE + '.status.json')).get('msg', '')
             except Exception: AUTO['msg'] = 'training failed (exit %s)' % p.returncode
-        STATE['ml'] = {'msg': AUTO['msg'], 'labels': AUTO['rows'], 'training': AUTO['proc'] is not None}
+        STATE['ml'] = {'msg': AUTO['msg'], 'labels': AUTO['rows'], 'training': AUTO['proc'] is not None, 'auto': dict(AL.counts) if AL else None}
         return
     if not parked: AUTO['park'] = 0.0
     elif not AUTO['park']: AUTO['park'] = now
     if now >= AUTO['next']:                # count labels at most once a minute, and only when the file grew
         AUTO['next'] = now + 60
-        try:
-            sz = os.path.getsize(OBJLABEL_FILE)
-            if sz != AUTO['size']: AUTO['size'] = sz; AUTO['rows'] = sum(1 for _ in open(OBJLABEL_FILE))
-        except OSError: pass
+        sz = sum(os.path.getsize(fn) for fn in (OBJLABEL_FILE, AUTOLABEL_FILE) if os.path.exists(fn))
+        if sz != AUTO['size']: AUTO['size'] = sz; AUTO['rows'] = _label_lines()
     due = AUTO_NEW > 0 and AUTO['rows'] >= radarml.AUTO_MIN_ROWS and AUTO['rows'] - AUTO['trained_rows'] >= AUTO_NEW
     if due and AUTO['park'] and now - AUTO['park'] > 60:
         import subprocess
         AUTO['prev_rows'] = AUTO['trained_rows']; AUTO['trained_rows'] = AUTO['rows']; AUTO['msg'] = 'training on %d labels…' % AUTO['rows']
-        AUTO['proc'] = subprocess.Popen(['nice', '-n', '19', sys.executable, radarml.__file__, '--autotrain', OBJLABEL_FILE, MODEL_FILE],
+        AUTO['proc'] = subprocess.Popen(['nice', '-n', '19', sys.executable, radarml.__file__, '--autotrain', OBJLABEL_FILE + ',' + AUTOLABEL_FILE, MODEL_FILE],
                                         stdout=subprocess.DEVNULL, stderr=open('/tmp/radar_autotrain.log', 'w'))
     elif not AUTO['msg'] or AUTO['msg'].startswith('waiting'):
         AUTO['msg'] = 'waiting: %d labels, next training at %d%s' % (AUTO['rows'], max(radarml.AUTO_MIN_ROWS, AUTO['trained_rows'] + AUTO_NEW),
                                                                      ' (when parked)' if due else '')
-    STATE['ml'] = {'msg': AUTO['msg'], 'labels': AUTO['rows'], 'training': AUTO['proc'] is not None}
+    STATE['ml'] = {'msg': AUTO['msg'], 'labels': AUTO['rows'], 'training': AUTO['proc'] is not None, 'auto': dict(AL.counts) if AL else None}
 
 def worker():
     if messaging is None:
@@ -350,9 +368,11 @@ def worker():
                 try: o.update(radarml.decode_ab(ba, bb))           # lat speed, long accel, dZ, obstacle probs, sigmas (tesla_radar.dbc)
                 except Exception: pass
                 TRK.add(k, now, o)
+                if AL: autolabel_write(AL.update(k, now, o, STATE['v'], TRK.get(k, now)))
                 o['c'], o['inf'], o['ml'] = ml_class(k, now, o, cname, inf)
                 objs.append(o)
             alive = set(x['s'] for x in objs); TRK.drop_missing(alive)
+            if AL: autolabel_write(AL.end_missing(alive))
             if MODEL is not None:
                 for k in [k for k in MODEL.smooth if k not in alive]: MODEL.forget(k)
             with LOCK:
@@ -818,7 +838,7 @@ function label(cat){if(!SEL){$('sel').textContent='tap an object first';return}
   $('sel').textContent=j.ok?('Labeled slot '+SEL.s+' as '+cat):'Label failed (no recording running?)';SEL=null;draw();
  }).catch(function(){$('sel').textContent='Label failed (offline?)'});
  if(navigator.vibrate)navigator.vibrate(30)}
-function upd(s){S=s;$('v').textContent=Math.round(s.v*3.6);$('n').textContent=s.o.length+' objects'+(s.ml?' · model: '+s.ml.msg:'');
+function upd(s){S=s;$('v').textContent=Math.round(s.v*3.6);$('n').textContent=s.o.length+' objects'+(s.ml?' · model: '+s.ml.msg+(s.ml.auto?' · auto-labelled: '+Object.keys(s.ml.auto).map(function(k){return k+' '+s.ml.auto[k]}).join(', '):''):'');
  if(SEL){var still=s.o.find(function(o){return o.s===SEL.s});if(still)SEL=still;else{SEL=null;$('sel').textContent='track lost, selection cleared'}}
  draw()}
 onresize=draw;

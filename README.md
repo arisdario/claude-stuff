@@ -49,10 +49,28 @@ cd /data/openpilot && PYTHONPATH=/data/openpilot:/data nohup python3 /data/radar
 
 Open `http://<EON-IP>:8088/` on a phone on the same network. `/learn` = tap an object, then tap what it is.
 
+## Automatic labelling (objects label themselves)
+
+radarweb follows every radar track over its whole life. When a track ends it gets a label only if its behaviour
+clearly fits one, and snapshots from across its life (as the object looked at that moment) are saved with that label
+to `/data/canraw/autolabels.jsonl`:
+
+| Track behaviour | Label |
+|---|---|
+| moved over the ground at 6+ m/s (22 km/h) for 1 s | `four_wheel` (`two_wheel` if the radar was sure and it stayed under 43 km/h) |
+| radar held one class at 80%+ confidence for most of the track | that class |
+| never moved while you drove 20 m+ past it, seen 3 s+ | `static` (poles, signs, walls, parked objects) |
+| lived under 0.8 s with low existence probability, or range rate and distance change disagree | `not_real` (ghost) |
+| anything else | not used |
+
+At most one track per class every 15 s is kept (balanced classes, small file; it stops at 50 MB). The labels are only
+as good as these rules: the model learns to recognise those classes earlier and in the hard cases (a parked car looks
+like the cars it saw move). Labels you tap on `/learn` are still used and count 3x. `AUTOLABEL=0` turns it off.
+
 ## Automatic training
 
-- Labels go to `/data/canraw/labels.jsonl`.
-- With 60+ labels and 30+ new since the last training, radarweb retrains when the car has been parked for a minute
+- Labels: `/data/canraw/labels.jsonl` (yours) + `/data/canraw/autolabels.jsonl` (automatic).
+- With 60+ labels in total and 30+ new since the last training, radarweb retrains when the car has been parked for a minute
   (under 1 km/h, openpilot not engaged), as a separate `nice -n 19` process. Driving off stops it; it retries at the next stop.
 - The new model is installed (`/data/radar_model.json`, old one kept as `.prev`) only if its cross-validated macro-F1
   beats both "no model" and the installed model. radarweb reloads it without a restart.
@@ -63,7 +81,9 @@ Open `http://<EON-IP>:8088/` on a phone on the same network. `/learn` = tap an o
 |---|---|---|
 | `AUTOTRAIN_NEW` | `30` | new labels needed before retraining; `0` = off |
 | `RADAR_MODEL` | `/data/radar_model.json` | model file |
-| `LEARN_LABELS` | `/data/canraw/labels.jsonl` | labels file |
+| `LEARN_LABELS` | `/data/canraw/labels.jsonl` | your labels file |
+| `AUTOLABEL` | `1` | `0` = no automatic labels |
+| `AUTOLABELS` | `/data/canraw/autolabels.jsonl` | automatic labels file |
 
 ## Optional: train on a laptop
 

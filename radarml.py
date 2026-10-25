@@ -20,7 +20,7 @@ RADAR_CLASSES = ('four_wheel', 'two_wheel', 'pedestrian', 'construction', 'unkno
 TARGET = {'car': 'four_wheel', 'truck': 'four_wheel', 'bus': 'four_wheel', 'two_wheel': 'two_wheel',
           'pedestrian': 'pedestrian', 'dog': 'animal', 'animal': 'animal', 'construction': 'construction',
           'obstacle': 'construction', 'separator': 'static', 'wall': 'static', 'pole': 'static', 'sign': 'static',
-          'not_real': 'not_real'}
+          'not_real': 'not_real', 'four_wheel': 'four_wheel', 'static': 'static'}
 # training targets -> what the road/top views can draw (they only have icons for RADAR_CLASSES)
 DISPLAY = {'four_wheel': 'four_wheel', 'two_wheel': 'two_wheel', 'pedestrian': 'pedestrian',
            'construction': 'construction', 'animal': 'unknown', 'static': 'unknown', 'not_real': 'unknown'}
@@ -111,6 +111,61 @@ class TrackHist:
         for k in [k for k in self.h if k not in alive]: del self.h[k]
 
 
+class AutoLabeler:
+    """Objects label themselves: follows every track over its whole life and, when it ends, gives it a label only
+    if its behaviour clearly fits one (rules below). Snapshots taken during its life (features as they were at that
+    moment) all get that label, so the model learns to recognise a vehicle before it moves, a pole before you pass it.
+    Rows go to the auto-labels file with 'auto': true and a track id 'tid' (training keeps one track's snapshots on
+    the same side of the cross-validation split). Manual /learn labels weigh more in training (MANUAL_WEIGHT)."""
+    SNAP_AT = (0.5, 1.5, 3.0, 6.0)   # take a snapshot when the track is this old (s); at most this many per track
+    PER_CLASS_S = 15.0               # at most one labelled track per class per this many seconds (keeps the file small, classes balanced)
+    def __init__(self): self.tr = {}; self.last = {}; self.n = 0; self.counts = {}
+    def update(self, k, now, o, v_ego, hist):
+        t = self.tr.get(k)
+        if t and (now - t['last'] > 0.5 or abs(o['d'] - t['d']) > JUMP_D or abs(o['y'] - t['y']) > JUMP_Y):
+            out = self.finish(k); t = None
+        else: out = []
+        if t is None:
+            self.n += 1
+            t = self.tr[k] = {'id': '%x-%d' % (int(now), self.n), 't0': now, 'last': now, 'd': o['d'], 'y': o['y'], 'f': 0,
+                              'move_s': 0.0, 'still_f': 0, 'gs_max': 0.0, 'ego_m': 0.0, 'pe_max': 0.0, 'rc': {}, 'derr': 0.0, 'snaps': []}
+        dt = min(0.2, now - t['last']) if t['f'] else 0.0
+        gs = abs(o['gs']); t['f'] += 1; t['last'] = now; t['d'] = o['d']; t['y'] = o['y']
+        if gs >= 6.0: t['move_s'] += dt
+        if gs < 0.5: t['still_f'] += 1
+        t['gs_max'] = max(t['gs_max'], gs); t['ego_m'] += abs(v_ego) * dt; t['pe_max'] = max(t['pe_max'], o.get('pe', 0))
+        if o.get('pc', 0) >= 80: t['rc'][o.get('rc', o.get('c'))] = t['rc'].get(o.get('rc', o.get('c')), 0) + 1
+        age = now - t['t0']
+        if len(t['snaps']) < len(self.SNAP_AT) and age >= self.SNAP_AT[len(t['snaps'])] and hist:
+            x = features(o, hist, v_ego); t['derr'] = max(t['derr'], x[FEATS.index('d_rate_err')])
+            row = dict((key, o.get(key)) for key in ('s', 'd', 'y', 'vr', 'gs', 'len', 'pe', 'mst', 'meas') + tuple(SIGNALS) if key in o)
+            row.update(radar_c=o.get('rc', o.get('c')), radar_pc=o.get('pc'), t=round(now, 2), v=round(v_ego, 2), h=hist[::2], hf=HIST_FIELDS)
+            t['snaps'].append(row)
+        return out
+    def rule(self, t):
+        life = t['last'] - t['t0']; f = t['f']
+        top = max(t['rc'].items(), key=lambda kv: kv[1]) if t['rc'] else (None, 0)
+        sure = top[0] if top[0] in ('four_wheel', 'two_wheel', 'pedestrian', 'construction') and top[1] >= 0.7 * f and life >= 1.0 else None
+        if life < 0.8 and t['pe_max'] < 70: return 'not_real'                       # flickered in and out, radar itself unsure
+        if t['derr'] > 4.0 and life < 3.0: return 'not_real'                         # range rate and distance change disagree: multipath ghost
+        if t['move_s'] >= 1.0:                                                      # moved over the ground at 6+ m/s (22 km/h) for 1 s
+            return 'two_wheel' if sure == 'two_wheel' and t['gs_max'] < 12.0 else 'four_wheel'
+        if sure: return sure                                                        # radar held one class at 80%+ for most of the track
+        if life >= 3.0 and t['still_f'] >= 0.95 * f and t['ego_m'] >= 20.0: return 'static'   # never moved while you drove 20 m past it
+        return None
+    def finish(self, k):
+        t = self.tr.pop(k, None)
+        if not t or not t['snaps']: return []
+        lab = self.rule(t)
+        if lab is None or t['last'] - self.last.get(lab, 0) < self.PER_CLASS_S: return []
+        self.last[lab] = t['last']; self.counts[lab] = self.counts.get(lab, 0) + 1
+        return [dict(r, c=lab, auto=True, tid=t['id']) for r in t['snaps']]
+    def end_missing(self, alive):
+        out = []
+        for k in [k for k in self.tr if k not in alive]: out += self.finish(k)
+        return out
+
+
 class Model:
     """Exported model ({'kind': 'logreg' | 'forest', 'feats', 'classes', ...}) + per-track probability smoothing."""
     def __init__(self, path):
@@ -153,6 +208,7 @@ import os, random, time
 AUTO_MIN_ROWS = 60       # don't train on fewer labelled rows than this
 AUTO_MIN_CLASS = 5       # targets with fewer rows are left out (the model can't learn them from 2 examples)
 AUTO_MARGIN = 0.05       # cross-validated macro-F1 must beat "no model" by this much
+MANUAL_WEIGHT = 3.0      # a label you tapped counts as much as this many automatic ones
 
 
 def _gini(cnt):
@@ -185,11 +241,11 @@ def _tree(X, y, w, idx, K, rnd, max_depth, min_leaf, n_feat):
     grow(idx, 0)
     return {'l': L, 'r': R, 'f': F, 't': T, 'v': [v if v is not None else [] for v in V]}
 
-def train_forest(X, y, K, idx=None, n_trees=40, max_depth=8, min_leaf=2, seed=0):
+def train_forest(X, y, K, idx=None, n_trees=40, max_depth=8, min_leaf=2, seed=0, sw=None):
     idx = list(range(len(X))) if idx is None else list(idx)
-    n_c = [0] * K
-    for i in idx: n_c[y[i]] += 1
-    w = [len(idx) / (K * n_c[c]) if n_c[c] else 0.0 for c in y]          # class_weight='balanced'
+    sw = sw or [1.0] * len(y); n_c = [0.0] * K
+    for i in idx: n_c[y[i]] += sw[i]
+    w = [sw[i] * sum(n_c) / (K * n_c[c]) if n_c[c] else 0.0 for i, c in enumerate(y)]     # class_weight='balanced' x row weight
     rnd = random.Random(seed); n_feat = max(1, int(math.sqrt(len(X[0]))))
     return [_tree(X, y, w, idx, K, rnd, max_depth, min_leaf, n_feat) for _ in range(n_trees)]
 
@@ -209,13 +265,15 @@ def macro_f1(true, pred, K):
         if tp + fn: f.append(2.0 * tp / (2 * tp + fp + fn))
     return sum(f) / len(f) if f else 0.0
 
-def load_labels(path):
-    """labels.jsonl -> (X, y, classes, groups, shown) ready for training, or raise ValueError with the reason"""
+def load_labels(paths):
+    """label files (manual /learn + automatic) -> (X, y, classes, groups, shown, weights), or raise ValueError with the reason"""
     rows = []
-    for ln in open(path):
-        try: r = json.loads(ln)
-        except ValueError: continue
-        if r.get('c') in TARGET and 'd' in r: rows.append(r)
+    for path in paths:
+        if not os.path.exists(path): continue
+        for ln in open(path):
+            try: r = json.loads(ln)
+            except ValueError: continue
+            if r.get('c') in TARGET and 'd' in r: rows.append(r)
     rows.sort(key=lambda r: r.get('t', 0))
     cnt = {}
     for r in rows: cnt[TARGET[r['c']]] = cnt.get(TARGET[r['c']], 0) + 1
@@ -230,13 +288,14 @@ def load_labels(path):
         t = r.get('t', 0)
         if pt is not None and t - pt > 300: d += 1
         if pt is None or t - pt > 15 or r.get('s') != ps: k += 1
-        drive.append(d); track.append(k); pt = t; ps = r.get('s')
+        drive.append(d); track.append(r.get('tid') or k); pt = t; ps = r.get('s')
     groups = drive if len(set(drive)) >= 5 else track
     X = [features(r) for r in rows]; y = [ci[TARGET[r['c']]] for r in rows]
     shown = [ci.get(DISPLAY.get(r.get('radar_c'), 'unknown'), -1) for r in rows]
-    return X, y, classes, groups, shown
+    sw = [1.0 if r.get('auto') else MANUAL_WEIGHT for r in rows]
+    return X, y, classes, groups, shown, sw
 
-def cv_score(X, y, K, groups, folds=5, **kw):
+def cv_score(X, y, K, groups, folds=5, sw=None, **kw):
     """macro-F1 over group k-fold: every prediction is made by a forest that never saw that drive/track"""
     ug = sorted(set(groups)); folds = min(folds, len(ug)); pred = [0] * len(y)
     if folds < 2: return None
@@ -244,21 +303,21 @@ def cv_score(X, y, K, groups, folds=5, **kw):
     for fo in range(folds):
         tr = [i for i, g in enumerate(groups) if fold_of[g] != fo]; te = [i for i, g in enumerate(groups) if fold_of[g] == fo]
         if len(set(y[i] for i in tr)) < 2: continue
-        trees = train_forest(X, y, K, tr, **kw)
+        trees = train_forest(X, y, K, tr, sw=sw, **kw)
         for i in te: pred[i] = _predict(trees, X[i])
     return macro_f1(y, pred, K)
 
 def autotrain(labels, model_path, min_p=0.6, log=print):
     st = {'t': time.time(), 'installed': False}
     try:
-        X, y, classes, groups, shown = load_labels(labels)
+        X, y, classes, groups, shown, sw = load_labels(labels)
     except (ValueError, IOError) as e:
         st['msg'] = 'not trained: %s' % e; return st
     K = len(classes); st['rows'] = len(y); t0 = time.time()
     base = macro_f1(y, shown, K); st['baseline_f1'] = round(base, 3)
     best = None
     for depth in (5, 8):
-        f1 = cv_score(X, y, K, groups, max_depth=depth)
+        f1 = cv_score(X, y, K, groups, sw=sw, max_depth=depth)
         log('depth %d: cross-validated macro-F1 %s (no model: %.3f)' % (depth, f1, base))
         if f1 is not None and (best is None or f1 > best[0]): best = (f1, depth)
     if best is None:
@@ -271,7 +330,7 @@ def autotrain(labels, model_path, min_p=0.6, log=print):
         st['msg'] = 'kept current: new model %.2f vs no model %.2f' % (f1, base); return st
     if old is not None and f1 < old - 0.02:
         st['msg'] = 'kept current: new model %.2f vs installed %.2f' % (f1, old); return st
-    trees = train_forest(X, y, K, max_depth=depth)
+    trees = train_forest(X, y, K, max_depth=depth, sw=sw)
     out = {'kind': 'forest', 'classes': classes, 'trees': trees, 'feats': FEATS, 'min_p': min_p, 'cv_macro_f1': round(f1, 3),
            'baseline_f1': round(base, 3), 'rows': len(y), 'algo': 'radarml-extratrees-depth%d' % depth, 'trained': time.time()}
     tmp = model_path + '.tmp'
@@ -279,15 +338,16 @@ def autotrain(labels, model_path, min_p=0.6, log=print):
     if os.path.exists(model_path): os.replace(model_path, model_path + '.prev')
     os.replace(tmp, model_path)
     st.update(installed=True, msg='new model: %.2f vs no model %.2f (%d labels, %.0f s)' % (f1, base, len(y), time.time() - t0))
+    st['auto_rows'] = sum(1 for w in sw if w == 1.0)
     return st
 
 
 if __name__ == '__main__':
     import sys
     if len(sys.argv) == 4 and sys.argv[1] == '--autotrain':
-        st = autotrain(sys.argv[2], sys.argv[3])
-        try: st['labels'] = sum(1 for _ in open(sys.argv[2]))     # line count: radarweb compares it with the file to decide when to retrain
-        except IOError: pass
+        files = sys.argv[2].split(',')
+        st = autotrain(files, sys.argv[3])
+        st['labels'] = sum(sum(1 for _ in open(f)) for f in files if os.path.exists(f))   # radarweb compares this line count to decide when to retrain
         json.dump(st, open(sys.argv[3] + '.status.json', 'w')); print(st['msg'])
     else:
-        print('usage: python3 radarml.py --autotrain labels.jsonl radar_model.json')
+        print('usage: python3 radarml.py --autotrain labels.jsonl[,autolabels.jsonl] radar_model.json')
