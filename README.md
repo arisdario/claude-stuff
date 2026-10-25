@@ -12,6 +12,28 @@ from the objects you label and retrains itself on the EON.
 
 `radarweb.py` also needs your `radarlog.py` (decoders) next to it - it is not in this repo.
 
+## Dependencies
+
+**EON (`radarweb.py`, `radarml.py`)** - nothing to install, openpilot already has it all:
+
+| Needed | For | Where it comes from |
+|---|---|---|
+| Python 3 | everything | openpilot |
+| `radarlog.py` | radar frame decoders | your file, in `/data/` next to radarweb.py |
+| `cereal` (openpilot) | CAN + carState/controlsState/model data | `PYTHONPATH=/data/openpilot` in the start command |
+| `numpy`, `cv2` | lane/path drawing, camera snapshots | openpilot (only those features need them) |
+| `common.params` (openpilot) | camera recalibration page | openpilot |
+| `nice` | low-priority automatic training | system command, already on the EON |
+
+The ML part (`radarml.py`) is pure Python standard library on purpose: no numpy, scikit-learn or cantools on the car.
+
+**Laptop (`radarlearn_train.py`, optional):** Python 3.9+, `pip install numpy pandas "scikit-learn>=1.4" matplotlib`
+(matplotlib only for `--plots`). Keep `radarml.py` in the same folder.
+
+**Bench (`radar_classify_live.py`, optional):** Python 3.8+, `pip install python-can cantools`, a clone of
+[tesla-radar-driver](https://github.com/SamSkjord/tesla-radar-driver), a CAN adapter (socketcan, e.g. a Waveshare
+CAN hat on a Raspberry Pi; CANalyst-II on macOS also needs `pip install canalystii pyusb`), and `radarml.py` in the same folder.
+
 ## Run on the EON
 
 ```
