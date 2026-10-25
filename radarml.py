@@ -297,7 +297,7 @@ def load_labels(paths):
 
 def cv_score(X, y, K, groups, folds=5, sw=None, **kw):
     """macro-F1 over group k-fold: every prediction is made by a forest that never saw that drive/track"""
-    ug = sorted(set(groups)); folds = min(folds, len(ug)); pred = [0] * len(y)
+    ug = sorted(set(groups), key=str); folds = min(folds, len(ug)); pred = [0] * len(y)
     if folds < 2: return None
     order = list(ug); random.Random(1).shuffle(order); fold_of = dict((g, i % folds) for i, g in enumerate(order))
     for fo in range(folds):
