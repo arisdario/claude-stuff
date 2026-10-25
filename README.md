@@ -3,6 +3,11 @@
 Live Tesla radar view in a browser (runs on the EON next to openpilot), plus a machine-learning classifier that learns
 from the objects you label and retrains itself on the EON.
 
+**Intended for:** Tesla Model S **pre-AP** (no factory Autopilot) running openpilot on an EON, with a retrofitted
+**Bosch MRRevo14F** radar (the Tesla AP1 radar). The radar reports up to **32 tracked objects over CAN** (frame pairs
+0x310-0x36F), each with distance, lateral offset, relative speed, class, length and more - that is what radarweb
+shows and what the classifier learns from.
+
 | File | Runs on | What it does |
 |---|---|---|
 | `radarweb.py` | EON | Web server: road/top/learn pages. Reads CAN from openpilot's `can` socket (nothing is sent to the car). Saves `/learn` labels with 2 s of track history, runs the model, retrains automatically when parked. |
