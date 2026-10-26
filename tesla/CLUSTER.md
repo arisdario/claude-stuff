@@ -70,3 +70,21 @@ Fixed when the two numbers match (e.g. `(5, 5)` while engaged). If 0x399 doesn't
 still off (step 1).
 
 The C snippets were not compiled here (no panda toolchain in this environment).
+
+## MCU2: bench results (26 Oct) and conclusion
+
+`bench/benchdas.py` sent the complete DAS set (op_status 5, both lanes, lead at 40 m, set speed 80) with the panda's
+exact packing (`--selftest` reproduces the car's frames, including EPB 0x214):
+
+| Test | Cluster |
+|---|---|
+| A: DAS set, car's own 0x398 (no AP) | nothing; set speed stays at the drive inverter's 0 (0x368 `DI_cruiseSet`) |
+| B: + spoofed 0x398 (dasHw/radar/autopilot = 1) | nothing; parking-brake fault (the EPB expected the AP computer's 0x214) |
+| B2: + 0x214 | nothing |
+
+The DAS messages have the same IDs and layouts in the Model 3 DBC (0x239, 0x2B9, 0x309, 0x389, 0x399, 0x3E9), and
+none of the Model 3 UI/config messages (0x7FF, 0x3F8, 0x3FD, 0x293) appear on this car's CAN. Tinkla, whose fork this
+is, states that on MCU2 openpilot works but does not display on the instrument cluster, and that its Tinkla Buddy
+(which sits between the MCU and the cluster or the AP computer) supports MCU1 only. So on MCU2 the cluster draws the
+Autopilot view from the MCU2 itself, which takes the "AP fitted" setting from the gateway config, not from these CAN
+messages. Nothing the panda sends can change that; don't spoof 0x398 or 0x368 in the car.
