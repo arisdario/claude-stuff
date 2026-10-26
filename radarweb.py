@@ -1181,7 +1181,7 @@ table{width:100%;border-collapse:collapse}td{padding:2px 0;vertical-align:top}td
 <main id=m></main>
 <script>
 var demo=/demo=1/.test(location.search),D=null,TAB='map',Q='';
-var TABS=[['map','Map / nav'],['pt','Powertrain & chassis'],['gw','Gateway & config'],['das','Driver assist'],['body','Body & seat'],['all','All CAN & openpilot']];
+var TABS=[['map','Map / nav'],['pt','Powertrain & chassis'],['gw','Gateway & config'],['das','Driver assist'],['body','Body & seat'],['diag','Diagnostics (UDS)'],['all','All CAN & openpilot']];
 function cat(n){n=n.replace(/^(PT_|M3_)/,'');
  if(/^(UI_driverAssistMapData|UI_driverAssistRoadSign|UI_gps|MCU_location|UI_csa|UI_roadCurv|UI_radarMapData)/.test(n))return 'map';
  if(/^(DI_|ESP_|EPB_|EPAS|SBW_|BrakeMessage|STW_ANGL)/.test(n))return 'pt';
@@ -1256,6 +1256,34 @@ function evtable(raw,t){var L=[];
  L.slice(0,30).forEach(function(r){var c=r[5],i=r[2]>>3;o+='<tr onclick="canOpen(\''+r[1]+'\')" style="cursor:pointer"><td>'+r[0].toFixed(2)+'</td><td>'+hx(r[1])+'</td><td>'+(raw[r[1]].name||'')+'</td><td>'+raw[r[1]].src+'</td><td>'+i+'.'+(r[2]&7)+'</td><td>'+r[2]+'</td><td>'+r[3]+' / '+EVN+'</td><td>'+Math.round(r[4]*100)+'%</td><td>'+('0'+(c.b[i]||0).toString(16)).slice(-2)+'</td></tr>'});
  if(!L.length)o+='<tr><td colspan=9 style="color:var(--mut)">'+(EVN<2?'tap "I did it" at least 2-3 times (each result counts 3 s after the tap)':'no bit follows your taps yet - more taps, or the action does not reach these buses')+'</td></tr>';
  return o+'</table>'}
+var UDS_SVC={16:'DiagnosticSessionControl',17:'ECUReset',20:'ClearDiagnosticInformation',25:'ReadDTCInformation',34:'ReadDataByIdentifier',35:'ReadMemoryByAddress',39:'SecurityAccess',40:'CommunicationControl',46:'WriteDataByIdentifier',47:'InputOutputControlById',49:'RoutineControl',52:'RequestDownload',54:'TransferData',55:'RequestTransferExit',62:'TesterPresent',133:'ControlDTCSetting'};
+var UDS_NRC={16:'generalReject',17:'serviceNotSupported',18:'subFunctionNotSupported',19:'invalidFormat',34:'conditionsNotCorrect',36:'requestSequenceError',49:'requestOutOfRange',51:'securityAccessDenied',53:'invalidKey',54:'exceedNumberOfAttempts',55:'requiredTimeDelayNotExpired',120:'responsePending',126:'subFunctionNotSupportedInActiveSession',127:'serviceNotSupportedInActiveSession'};
+function hx2a(hex){return (hex||'').split(' ').filter(Boolean).map(function(x){return parseInt(x,16)})}
+function udsPayload(p,note){if(!p.length)return null;var s=p[0];
+ if(s==127){var sid=p[1],nrc=p[2];return {svc:(UDS_SVC[sid]||('service 0x'+(sid||0).toString(16))),detail:'NEGATIVE: '+(UDS_NRC[nrc]||('NRC 0x'+(nrc||0).toString(16))),kind:'neg'}}
+ var resp=s>=64&&UDS_SVC[s-64],sid=resp?s-64:s,nm=UDS_SVC[sid]||('service 0x'+sid.toString(16));
+ var det=(note?note+'; ':'')+'sub 0x'+((p[1]!=null?p[1]:0).toString(16));
+ if(sid==34||sid==46)det=(note?note+'; ':'')+'data id 0x'+(((p[1]||0)<<8|(p[2]||0)).toString(16));
+ if(sid==49){var rc=p[1],ri=((p[2]||0)<<8|(p[3]||0));det='routine 0x'+ri.toString(16)+' '+({1:'start',2:'stop',3:'result'}[rc]||('op '+rc))}
+ if(sid==39)det='level '+((p[1]||0))+(p[1]&1?' (seed request)':' (key sent)');
+ return {svc:nm,detail:det,kind:resp?'pos':'req'}}
+function udsDecode(hex){var b=hx2a(hex);if(!b.length)return null;var pci=b[0]>>4;
+ if(pci==0)return udsPayload(b.slice(1,1+(b[0]&15)));
+ if(pci==1)return udsPayload(b.slice(2),'multi-frame, total '+(((b[0]&15)<<8)|b[1])+' B');
+ if(pci==2)return {svc:'(continuation)',detail:'consecutive frame '+(b[0]&15),kind:'ct'};
+ if(pci==3)return {svc:'(flow control)',detail:'',kind:'ct'};
+ return udsPayload(b)}
+function diagIds(raw){return Object.keys(raw).filter(function(k){var e=raw[k],id=+k;return /uds|request|response/i.test(e.name||'')||(id>=0x600&&id<=0x7ff)})}
+function diagTable(raw,ids){var KC={req:'#1a73e8',pos:'#2fbf71',neg:'#e5484d',ct:'#8b949e'};
+ var h='<section class=wide><h2>Diagnostics on the bus (UDS / ISO-TP) <small>'+ids.length+' ids &middot; read-only: decodes requests &amp; responses already on the bus, nothing is sent</small></h2>'+
+  '<div style="color:var(--mut);margin:4px 0 8px">These appear only while a diagnostic tool (or the gateway) is talking to a module. Service and sub-function are decoded from the raw ISO-TP bytes; payloads are shown as hex, not interpreted.</div>'+
+  '<div style="overflow-x:auto"><table class=mono><tr><td>addr</td><td>name (if in DBC)</td><td>bus</td><td>dir</td><td>service</td><td>detail</td><td>age s</td><td>raw</td></tr>';
+ var rows=ids.map(function(k){return [raw[k],+k,udsDecode(raw[k].hex)]}).sort(function(a,b){return a[1]-b[1]});
+ var any=false;
+ rows.forEach(function(r){var e=r[0],id=r[1],u=r[2];if(!u)return;any=true;var col=KC[u.kind]||'#cfd6dd';
+  h+='<tr><td>'+hx(id)+'</td><td>'+(e.name||'')+'</td><td>'+e.src+'</td><td style="color:'+col+'">'+({req:'req &rarr;',pos:'&larr; ok',neg:'&larr; NEG',ct:'&middot;'}[u.kind]||'')+'</td><td style="color:'+col+'">'+u.svc+'</td><td>'+u.detail+'</td><td>'+e.age+'</td><td style="text-align:right">'+e.hex+'</td></tr>'});
+ if(!any)h+='<tr><td colspan=8 style="color:var(--mut)">No UDS traffic right now. Start a diagnostic tool, or query a module, and the request/response will be decoded here.</td></tr>';
+ return h+'</table></div></section>'}
 function allcan(raw){var t=Date.now()/1000,q=Q.toLowerCase(),btn=function(cur,v,f,l){return '<button class=chipb'+(cur==v?' style="background:#1a73e8;color:#fff"':'')+' onclick="'+f+'(\''+v+'\')">'+l+'</button>'};
  var h='<section class=wide><h2>Every CAN address seen (any bus) <small>'+Object.keys(raw).length+' addresses'+(MARKT?' &middot; mark set '+ago(t,MARKT)+' s ago':'')+'</small></h2>'+
   '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0">sort '+btn(SORT,'recent','canSort','last change')+btn(SORT,'rate','canSort','changes/s')+btn(SORT,'bits','canSort','bits changing')+btn(SORT,'addr','canSort','address')+btn(SORT,'hz','canSort','Hz')+btn(SORT,'bus','canSort','bus')+
@@ -1280,13 +1308,15 @@ function show(d){D=d;document.getElementById('v').textContent=Math.round((d.v||0
  document.getElementById('logn').textContent=d.logfile?'logging to '+d.logfile:'';
  var raw=d.raw||{},ms=d.msgs||{},groups={map:[],pt:[],gw:[],das:[],body:[]};
  Object.keys(ms).forEach(function(k){groups[cat(ms[k].name)].push(ms[k])});
- var nav='';TABS.forEach(function(t){var n=groups[t[0]]?groups[t[0]].length:Object.keys(raw).length;nav+='<button class="'+(TAB==t[0]?'on':'')+'" onclick="TAB=\''+t[0]+'\';show(D)">'+t[1]+'<small>'+n+'</small></button>'});
+ var dids=diagIds(raw);
+ var nav='';TABS.forEach(function(t){var n=t[0]=='diag'?dids.length:(groups[t[0]]?groups[t[0]].length:Object.keys(raw).length);nav+='<button class="'+(TAB==t[0]?'on':'')+'" onclick="TAB=\''+t[0]+'\';show(D)">'+t[1]+'<small>'+n+'</small></button>'});
  document.getElementById('nav').innerHTML=nav;
  var h='';
  if(TAB=='all'){
   h+=allcan(raw);
   h+='</section><section class=wide><h2>openpilot carState / controlsState fields</h2><table class=mono>';
   ['car','ctl'].forEach(function(g){var o=d[g]||{};Object.keys(o).forEach(function(k){h+='<tr><td>'+g+'.'+k+'</td><td>'+fv(o[k])+'</td></tr>'})});h+='</table></section>'}
+ else if(TAB=='diag'){h+=diagTable(raw,dids)}
  else{
   if(TAB=='map'){var md=groups.map.filter(function(m){return m.name=='UI_driverAssistMapData'})[0];
    if(md){var s=md.sig,u=(s.UI_mapSpeedUnits?' mph':' km/h');h+='<section><h2>Speed limit from the map</h2><div class=big>'+(s.UI_mapSpeedLimit?s.UI_mapSpeedLimit*5+u:'-')+'</div><div style="color:var(--mut)">raw '+s.UI_mapSpeedLimit+' (x5 assumed), type '+s.UI_mapSpeedLimitType+', road class '+s.UI_roadClass+'</div></section>'}}
