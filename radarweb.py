@@ -1539,9 +1539,12 @@ html,body{margin:0;height:100%;background:#0a0b0d;overflow:hidden;font-family:sy
 #c{display:block;width:100vw;height:100vh}
 #nav{position:fixed;right:10px;top:10px;z-index:50}#nav summary{list-style:none;cursor:pointer;width:34px;height:34px;display:flex;align-items:center;justify-content:center;background:rgba(28,33,40,.6);border:1px solid #2a2f36;border-radius:8px;font-size:17px;color:#aab1b8}#nav summary::-webkit-details-marker{display:none}#nav>div{position:absolute;right:0;top:42px;background:#14171b;border:1px solid #2a2f36;border-radius:8px;padding:6px 0;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.5)}#nav a{display:block;padding:9px 14px;color:#cfd6dd;text-decoration:none;font-size:13px;white-space:nowrap}#nav a:hover{background:#20252b}
 </style></head><body><canvas id=c></canvas>
-<details id=nav><summary>&#9776;</summary><div><span id=conn style="display:block;padding:9px 14px;color:#8a9098;font-size:13px">connecting&hellip;</span><a href="#" id=unit onclick="return unitTog()">units: km/h</a><a href="/">road view</a><a href="/map">CAN data</a><a href="/top">top-down</a><a href="/video">video</a><a href="?demo=1">demo</a></div></details>
+<details id=nav><summary>&#9776;</summary><div><span id=conn style="display:block;padding:9px 14px;color:#8a9098;font-size:13px">connecting&hellip;</span><a href="#" id=unit onclick="return unitTog()">units: km/h</a><a href="#" onclick="document.getElementById('egof').click();return false">upload car image (.webp)</a><a href="/">road view</a><a href="/map">CAN data</a><a href="/top">top-down</a><a href="/video">video</a><a href="?demo=1">demo</a></div></details>
+<input type=file id=egof accept="image/webp" style="display:none" onchange="egoUp(this)">
 <script>
 var cv=document.getElementById('c'),g=cv.getContext('2d'),S=null,demo=/demo/.test(location.search);
+function egoUp(inp){var f=inp.files&&inp.files[0];if(!f)return;fetch('/api/icon?name=ego.webp',{method:'POST',body:f}).then(function(r){return r.json()}).then(function(j){alert(j.ok?'Car image saved on the EON':'Upload failed: '+j.msg);if(j.ok){EGO=new Image();EGO.src='/icons/ego.webp?'+Date.now()}}).catch(function(e){alert('Upload failed: '+e)});inp.value=''}
+var EGO=new Image();EGO.src='/icons/ego.webp';
 var AP_BLUE='#2a7fff',LANE_ON='#3d8bff',LANE_OFF='#8b949e',AMBER='#f5a524';
 var MPH=false;try{MPH=localStorage.getItem('dashmph')=='1'}catch(e){}
 function unitTog(){MPH=!MPH;try{localStorage.setItem('dashmph',MPH?'1':'0')}catch(e){}unitUI();draw();return false}
@@ -1570,6 +1573,16 @@ function wheel(cx,cy,r,col){g.strokeStyle=col;g.lineWidth=r*.15;g.beginPath();g.
  g.lineCap='round';g.lineWidth=r*.15;g.beginPath();g.moveTo(cx-r*.84,cy+r*.05);g.lineTo(cx+r*.84,cy+r*.05);g.moveTo(cx,cy+r*.12);g.lineTo(cx,cy+r*.82);g.stroke();g.lineCap='butt'}
 /* set-speed dial glyph (speed-limit-ring style) */
 function setdial(cx,cy,r,col){g.strokeStyle=col;g.lineWidth=r*.2;g.beginPath();g.arc(cx,cy,r,0.7,5.58);g.stroke();g.fillStyle=col;g.beginPath();g.moveTo(cx,cy-r*1.25);g.lineTo(cx-r*.3,cy-r*.78);g.lineTo(cx+r*.3,cy-r*.78);g.closePath();g.fill()}
+/* parking-sensor arcs at the car's four corners, like the cluster: hidden when nothing is in range (255 cm),
+   grey when far, amber nearer, red close. front arcs reach ahead of the car, rear arcs behind it (towards you) */
+function parkArcs(G,cx,fy,ry,hw){var P=S&&S.park;if(!P)return;
+ function col(cm){return cm>=255||cm<=0?null:cm<60?'rgba(229,40,40,.85)':cm<120?'rgba(245,165,36,.75)':'rgba(200,206,214,.42)'}
+ var R=hw*1.15,T=hw*0.42;g.save();g.lineCap='butt';
+ [['f','l',fy,-1,Math.PI,1.5*Math.PI],['f','r',fy,1,1.5*Math.PI,2*Math.PI],['r','l',ry,-1,.5*Math.PI,Math.PI],['r','r',ry,1,0,.5*Math.PI]].forEach(function(a){
+  var s=P[a[0]];if(!s)return;var c=col(s[a[1]]);if(!c)return;var x=cx+a[3]*hw*0.72;
+  g.save();g.translate(x,a[2]);g.scale(1,0.62);g.beginPath();g.arc(0,0,R,a[4],a[5]);g.lineWidth=T;g.strokeStyle=c;g.stroke();
+  g.beginPath();g.arc(0,0,R+T/2,a[4],a[5]);g.lineWidth=1.5;g.strokeStyle='rgba(235,240,245,.55)';g.stroke();g.restore()});
+ g.restore()}
 var PWH=[];/* rolling kW history for the energy sparkline */
 function draw(){var G=geom();g.clearRect(0,0,G.W,G.H);if(!S)return;
  var alc=!!S.alc,off0=S.model?pv(S.model.p,0):0;
@@ -1602,9 +1615,13 @@ function draw(){var G=geom();g.clearRect(0,0,G.W,G.H);if(!S)return;
  if(leadS){var d=leadS.d,y=leadS.y||0,by=Y(G,d),w=Math.max(22,1.95*PPM(G,d));carIcon(X(G,d,y,off0),by,w,leadS.vr<-1.5);
   g.fillStyle=alc?'rgba(80,150,255,.95)':'rgba(160,170,180,.8)';g.font='600 '+Math.round(G.H*.028)+'px system-ui';g.textAlign='center';g.fillText(d.toFixed(0)+' m',X(G,d,y,off0),by+G.H*.042)}
  /* EGO car at the bottom (our own Model S, red) */
- var ew=Math.max(60,G.pxB*1.9);carIcon(G.cx+ (off0?0:0),G.yB+ (G.H-G.yB)*0.02,ew,false,'rgba(210,60,40,.55)');
+ var ew=Math.max(60,G.pxB*1.9),eby=G.yB+(G.H-G.yB)*0.02;
+ if(EGO.complete&&EGO.naturalWidth){var iw=ew*1.55,ih=iw*EGO.naturalHeight/EGO.naturalWidth,arcB=(iw*0.36*1.36)*0.62-ih*0.06;eby=Math.min(eby,G.H-8-arcB);var ex0=G.cx-iw/2,ey0=eby-ih*0.97;
+  parkArcs(G,G.cx,ey0+ih*0.30,eby-ih*0.06,iw*0.36);g.drawImage(EGO,ex0,ey0,iw,ih)}
+ else{parkArcs(G,G.cx,eby-ew*0.62,eby,ew*0.5);carIcon(G.cx,eby,ew,false,'rgba(210,60,40,.55)')}
  /* speed-limit sign, left of the road */
- if(S.lim&&S.lim>0){var sv=Math.round(MPH?S.lim*0.621371:S.lim),sx=G.W*0.30,sy=G.H*0.52,sr=G.H*.072;g.beginPath();g.arc(sx,sy,sr,0,6.2832);g.fillStyle='#fff';g.fill();g.lineWidth=sr*.3;g.strokeStyle='#d8232a';g.stroke();g.fillStyle='#111';g.textAlign='center';g.font='700 '+Math.round(sr*(sv>=100?.72:.95))+'px system-ui';g.fillText(sv,sx,sy+sr*.33)}
+ var limv=S.lim&&typeof S.lim=='object'?S.lim.v:S.lim,limk=S.lim&&typeof S.lim=='object'?S.lim.kmh!==false:true;
+ if(limv>0){var lkmh=limk?limv:limv*1.609344,sv=Math.round(MPH?(limk?limv*0.621371:limv):lkmh),sx=G.W*0.30,sy=G.H*0.52,sr=G.H*.072;g.beginPath();g.arc(sx,sy,sr,0,6.2832);g.fillStyle='#fff';g.fill();g.lineWidth=sr*.3;g.strokeStyle='#d8232a';g.stroke();g.fillStyle='#111';g.textAlign='center';g.font='700 '+Math.round(sr*(sv>=100?.72:.95))+'px system-ui';g.fillText(sv,sx,sy+sr*.33)}
  /* ===== top overlays ===== */
  var spd=Math.round((S.v||0)*(MPH?2.236936:3.6));
  g.textAlign='center';g.fillStyle='#fff';g.font='300 '+Math.round(G.H*.16)+'px system-ui';g.fillText(spd,G.cx,G.H*.17);
@@ -1636,7 +1653,7 @@ function demoLoop(){var t=Date.now()/1000,bend=Math.sin(t*0.22)*0.00002;
  var lead={d:40+12*Math.sin(t*0.35),y:0.2*Math.sin(t*0.3),vr:-2.5*Math.sin(t*0.5)};
  var o=[{d:lead.d,y:lead.y,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4},{d:26,y:-5.5,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4},{d:33,y:5.5,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4}];
  if(Math.sin(t*0.3)>0.5)o.push({d:15,y:-4+8*((t*0.25)%1),c:'unknown',ml:{c:'pedestrian'},cross:true,vy:1.0});
- upd({v:21+5*Math.sin(t*0.2),cruise:90,acc:true,op:true,alc:Math.sin(t*0.15)>-0.2,model:{p:poly(0),l:poly(-1.85),r:poly(1.85),pl:0.9,pr:0.9},lead:lead,o:o,lim:50,soc:63,gear:'drive',pw:{kw:-(10+30*Math.max(0,Math.sin(t*0.6)))},alert:''});
+ upd({v:21+5*Math.sin(t*0.2),cruise:90,acc:true,op:true,alc:Math.sin(t*0.15)>-0.2,model:{p:poly(0),l:poly(-1.85),r:poly(1.85),pl:0.9,pr:0.9},lead:lead,o:o,lim:{v:50,kmh:true},park:{f:{l:255,r:150,ss:1},r:{l:180,r:Math.round(45+40*Math.sin(t*0.7)),ss:1}},soc:63,gear:'drive',pw:{kw:-(10+30*Math.max(0,Math.sin(t*0.6)))},alert:''});
  requestAnimationFrame(demoLoop)}
 unitUI();
 if(demo){document.getElementById('conn').textContent='demo data';demoLoop()}
@@ -1815,6 +1832,23 @@ class H(BaseHTTPRequestHandler):
                     pass
             b = json.dumps({'ok': ok, 'text': txt, 'file': LABEL_FILE}).encode()
             self.send_response(200 if ok else 500); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        elif self.path.split('?')[0] == '/api/icon':
+            # /dash menu "upload car image": stores a .webp into ICON_DIR (served at /icons/<name>). Behind the same
+            # password as every page; only [\w.-]+.webp names, a real WebP header, and at most 512 KB.
+            import re as _re3
+            m_ = _re3.search(r'name=([\w.\-]+\.webp)\b', self.path); ok = False; msg = 'bad name'
+            try:
+                n = int(self.headers.get('Content-Length', '0') or '0')
+                if m_ and 0 < n <= 512 * 1024:
+                    dat = self.rfile.read(n)
+                    if dat[:4] == b'RIFF' and dat[8:12] == b'WEBP':
+                        os.makedirs(ICON_DIR, exist_ok=True); tmp = os.path.join(ICON_DIR, '.' + m_.group(1) + '.tmp')
+                        open(tmp, 'wb').write(dat); os.replace(tmp, os.path.join(ICON_DIR, m_.group(1))); ok = True; msg = 'saved'
+                    else: msg = 'not a WebP file'
+                elif m_: msg = 'empty or larger than 512 KB'
+            except Exception as e: msg = str(e)
+            b = json.dumps({'ok': ok, 'msg': msg, 'dir': ICON_DIR}).encode()
+            self.send_response(200 if ok else 400); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path == '/api/train':
             ok = start_training(True)
             b = json.dumps({'ok': ok, 'msg': AUTO['msg']}).encode()
