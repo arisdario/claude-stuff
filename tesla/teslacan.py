@@ -182,7 +182,9 @@ def create_fake_DAS_obj_lane_msg(leadDx,leadDy,leadClass,rLine,lLine,curv0,curv1
   tCurv1 = (int((clip(curv1*f,-0.2,0.2) + 0.2)/0.0016)) & 0xFF
   tCurv2 = (int((clip(curv2*f2,-0.0025,0.0025)  + 0.0025)/0.00002)) & 0xFF
   tCurv3 = (int((clip(curv3*f3,-0.00003,0.00003) + 0.00003)/0.00000024)) & 0xFF
-  lWidth = (int((laneWidth - 2.0)/0.3125)) & 0x0F
+  # LANEWIDTH: 4-bit field (2.0 .. 6.69 m in 0.3125 m steps). Unclipped, 0 m (before the first pathPlan) wrapped to
+  # 5.1 m and anything above 6.7 m wrapped around too.
+  lWidth = (int((clip(laneWidth, 2.0, 6.6875) - 2.0)/0.3125)) & 0x0F
   msg = create_string_buffer(msg_len)
   struct.pack_into('BBBBBBBB',msg ,0 , tLeadDx,tLeadDy,(lWidth << 4) + (lLine << 2) + rLine, tCurv0,tCurv1,tCurv2,tCurv3,((leadClass & 0x03) << 6) + int(laneRange/4))
   return [msg_id,0,msg.raw,0]
