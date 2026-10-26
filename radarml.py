@@ -36,9 +36,18 @@ SIG_B = {'LatSpeed': (0, 10, 0.125, -64), 'Length': (10, 6, 0.125, 0), 'dZ': (16
 def _dec(data, sigs):
     v = int.from_bytes(bytes(data), 'little')
     return {n: ((v >> st) & ((1 << ln) - 1)) * sc + of for n, (st, ln, sc, of) in sigs.items()}
+def decode_pair(a_bytes, b_bytes):
+    """one A/B object frame pair -> (a, b, extras): a/b with radarlog.decode_a/decode_b's key names (radarweb checks
+    they agree on your radar before using them), extras = decode_ab()'s fields; every frame is decoded only once"""
+    A = _dec(a_bytes, SIG_A); B = _dec(b_bytes, SIG_B)
+    a = {'long_dist': A['LongDist'], 'lat_dist': A['LatDist'], 'long_speed': A['LongSpeed'], 'prob_exist': A['ProbExist'],
+         'valid': A['Valid'], 'tracked': A['Tracked'], 'index': A['Index']}
+    b = {'cls': B['Class'], 'prob_class': B['ProbClass'], 'length': B['Length'], 'moving': B['MovingState'], 'index2': B['Index2']}
+    return a, b, _extras(A, B)
 def decode_ab(a_bytes, b_bytes):
     """extra per-object fields (short keys, as stored in the track history) from one A/B frame pair"""
-    a = _dec(a_bytes, SIG_A); b = _dec(b_bytes, SIG_B)
+    return _extras(_dec(a_bytes, SIG_A), _dec(b_bytes, SIG_B))
+def _extras(a, b):
     return {'ls': b['LatSpeed'], 'la': a['LongAccel'], 'dz': b['dZ'], 'po': a['ProbObstacle'], 'pno': a['ProbNonObstacle'],
             'dxs': b['dxSigma'], 'vxs': b['vxSigma'], 'axs': b['axSigma'], 'dys': b['dySigma'], 'rel': b['dxRearEndLoss'],
             'meas': a['Meas'], 'mst': b['MovingState']}

@@ -101,6 +101,28 @@ LOGDIR = '/data/maplog'
 # for /learn labels) stay in OBJFULL. SNAP = STATE as JSON, built once per tick and shared by all browser streams.
 PUB_KEYS = ('s', 'd', 'y', 'vr', 'gs', 'pe', 'c', 'inf', 'pc', 'len', 'ms', 'stationary', 'rc', 'ml', 'vy', 'cross')
 OBJFULL = {}; SNAP = [None, 0.0]; TICK = [0]
+# PERF (from a RADARWEB_PROFILE run on the EON: half the busy time was the per-CAN-frame loop): only these IDs are handled
+# on every frame - radar objects/status, the IDs decoded in the loop, multiplexed messages. All others just get counted,
+# and their latest bytes (for /map and the log) refreshed twice a second.
+HOT = set([0x108, 0x2F8, 0x32E, 0x33E, 0x102, 0x302, 0x382, 0x212, 0x232, 0x3D2, 0x754, 0x51E, 0x6F2, 0x300, 0x301, 0x501]) | set(range(0x310, 0x36F)) | set(MUXINFO)
+RAWDUE = [0.0]; SUBDUE = [0.0]
+# radar_decode: radarml.decode_pair decodes each object frame pair once (radarlog's decode_a/decode_b + decode_ab did it
+# twice, bit by bit). It is only trusted after it gave exactly radarlog's values for the first DEC_CHECK object frames
+# from your radar; on any difference radarweb keeps using radarlog's decoders and prints what differed.
+DEC_CHECK = 200; DEC = {'n': 0, 'fast': None}
+def radar_decode(ba, bb):
+    if DEC['fast'] is not True:
+        a, b = decode_a(ba), decode_b(bb)
+        if DEC['fast'] is None:
+            fa, fb, _ = radarml.decode_pair(ba, bb)
+            bad = [k for k in fa if abs(float(fa[k]) - float(a.get(k, 1e9))) > 1e-6] + [k for k in fb if abs(float(fb[k]) - float(b.get(k, 1e9))) > 1e-6]
+            if bad:
+                DEC['fast'] = False; print('fast radar decoder differs from radarlog on %s - keeping radarlog' % ', '.join(bad))
+            else:
+                DEC['n'] += 1
+                if DEC['n'] >= DEC_CHECK: DEC['fast'] = True; print('fast radar decoder matches radarlog on %d frames - using it' % DEC_CHECK)
+        return a, b, radarml.decode_ab(ba, bb)
+    return radarml.decode_pair(ba, bb)
 XS = []         # crossing detections since the last /data/maplog line (logged as 'xs' so radartrip.py can map them)
 # --- class cleanup (the radar only classifies ~5% of its tracks, flips between classes, and its pedestrian guesses are mostly low confidence) ---
 PED_MIN_PC = 50      # pedestrian / two-wheeler only shown if the radar's class probability is at least this (%); below that it is drawn as an unclassified marker
@@ -138,7 +160,7 @@ MODEL_FILE = os.environ.get('RADAR_MODEL', '/data/radar_model.json')
 TRK = radarml.TrackHist()
 try: MODEL = radarml.Model(MODEL_FILE) if os.path.exists(MODEL_FILE) else None
 except Exception as e: MODEL = None; print('radar model not loaded:', e)
-MLLAST = {}     # slot -> last (label, probability): the model runs 2x per second per object (staggered), not 10x
+MLLAST = {}     # slot -> last (label, probability): the model runs once per second per object (staggered), not 10x
 def ml_class(k, now, o, cname, inf, hist=None, run=True):
     if MODEL is None: return cname, inf, None
     if run or k not in MLLAST: MLLAST[k] = MODEL.track_class(k, radarml.features(o, hist, STATE['v']), alpha=0.6)
@@ -320,11 +342,15 @@ def _worker(prof=None):
     A = {}; B = {}; status = {}; nxt = 0; tick = 0; logf = None; last_tick = time.time(); td = {'car': 0.0, 'ctl': 0.0}
     while True:
         now = time.time()
+        raw_due = now >= RAWDUE[0]
+        if raw_due: RAWDUE[0] = now + 0.5
         for ev in messaging.drain_sock(can, wait_for_one=False):
             for m in ev.can:
-                d = m.dat; a = m.address; ld = len(d)
+                a = m.address; r = RAW.get(a)
+                if r is not None and not raw_due and a not in HOT:
+                    r[1] += 1; continue      # PERF: an ID nothing decodes - count it (Hz on /map), refresh its bytes twice a second
+                d = m.dat; ld = len(d)
                 if ld > 8: continue
-                r = RAW.get(a)
                 if r is None:
                     if len(RAW) >= 600: continue
                     r = RAW[a] = [m.src, 0, b'', now, 0, 0.0]
@@ -347,7 +373,6 @@ def _worker(prof=None):
                         PARKV['f' if a == 0x32E else 'r'] = {'l': (_v >> 8) & 255, 'r': (_v >> 16) & 255, 'ss': (_v >> 24) & 3}
                         STATE['park'] = dict(PARKV)
                     except Exception: pass
-                if STATE.get('park') and now - PARKT[0] > 2.0: STATE['park'] = None
                 if a == 0x102 and ld >= 4 and m.src == 0:    # BMS pack V/I, WK057/Skie.net: voltage (0|16,u,x0.01)V, current (16|15,signed,x0.1,-1000A offset). The -1000A offset on TOP of a signed field is unusual but is literally what the source gives - sanity check against a clamp meter once before trusting the sign/magnitude.
                     try:
                         _v = int.from_bytes(r[2], 'little')
@@ -407,7 +432,10 @@ def _worker(prof=None):
                     k = (a - 0x310) // 3; q = (a - 0x310) % 3
                     if q == 0: A[k] = (r[2], now)
                     elif q == 1: B[k] = (r[2], now)
-        for svc, s in subs.items():
+        if STATE.get('park') and now - PARKT[0] > 2.0: STATE['park'] = None
+        _subs = subs.items() if now >= SUBDUE[0] else ()      # PERF: state streams are conflated (newest only): read them 10x/s
+        if _subs: SUBDUE[0] = now + 0.1
+        for svc, s in _subs:
             for ev in messaging.drain_sock(s, wait_for_one=False):
                 try:
                     if svc == 'carState':
@@ -450,7 +478,7 @@ def _worker(prof=None):
                 if k not in A or k not in B: continue
                 (ba, ta), (bb, tb) = A[k], B[k]
                 if now - ta > STALE or now - tb > STALE: continue
-                a = decode_a(ba); b = decode_b(bb)
+                a, b, _x = radar_decode(ba, bb)
                 if not (a['valid'] or a['tracked']) or a['long_dist'] <= 0 or a['long_dist'] >= 250 or a['index'] != b['index2']: continue
                 gs = a['long_speed'] + STATE['v']
                 cname, inf = refine_class(k, now, CLASS.get(b['cls'], 'code%d' % b['cls']), b['prob_class'], a['long_dist'], a['lat_dist'], gs)
@@ -458,11 +486,10 @@ def _worker(prof=None):
                      'gs': round(gs, 1), 'pe': round(a['prob_exist']), 'c': cname, 'inf': inf,
                      'pc': round(b['prob_class']), 'len': round(b['length'], 1), 'ms': MOVING.get(b['moving'], b['moving']),
                      'stationary': abs(gs) < 1.5, 'rc': cname}     # rc = class before the model: what /learn stores as radar_c
-                try: o.update(radarml.decode_ab(ba, bb))           # lat speed, long accel, dZ, obstacle probs, sigmas (tesla_radar.dbc)
-                except Exception: pass
+                o.update(_x)           # lat speed, long accel, dZ, obstacle probs, sigmas (tesla_radar.dbc)
                 TRK.add(k, now, o); o['_h'] = TRK.get(k, now, rnd=False)      # one history copy per object per tick
                 o['vy_raw'] = radarml.lateral_speed(o['_h'], o.get('ls'))
-                o['c'], o['inf'], o['ml'] = ml_class(k, now, o, cname, inf, o['_h'], (TICK[0] + k) % 5 == 0)
+                o['c'], o['inf'], o['ml'] = ml_class(k, now, o, cname, inf, o['_h'], (TICK[0] + k) % 10 == 0)
                 objs.append(o)
             TICK[0] += 1
             _yaw = radarml.scene_yaw(objs)          # your rotation, measured from the stationary tracks (see radarml CROSSING)
