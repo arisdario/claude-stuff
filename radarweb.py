@@ -290,6 +290,22 @@ def autotrain_tick(now):
     STATE['ml'] = {'msg': AUTO['msg'], 'labels': AUTO['rows'], 'training': AUTO['proc'] is not None, 'auto': dict(AL.counts) if AL else None}
 
 def worker():
+    # PROFILE: RADARWEB_PROFILE=60 profiles the data loop (cProfile) for its first 60 s, writes where the time went (top
+    # functions by total and by own time) to /tmp/radarweb_profile.txt, then carries on unprofiled in the same loop.
+    secs = float(os.environ.get('RADARWEB_PROFILE', '0') or 0)
+    prof = None
+    if secs > 0:
+        import cProfile; prof = [cProfile.Profile(), time.time() + secs, secs]; prof[0].enable()
+    _worker(prof)
+
+def _profile_done(prof):
+    import pstats, io
+    prof[0].disable(); out = io.StringIO()
+    st = pstats.Stats(prof[0], stream=out); st.sort_stats('cumulative').print_stats(25); st.sort_stats('tottime').print_stats(25)
+    open('/tmp/radarweb_profile.txt', 'w').write('profiled %.0f s of the radarweb data loop\n' % prof[2] + out.getvalue())
+    print('profile written to /tmp/radarweb_profile.txt')
+
+def _worker(prof=None):
     if messaging is None:
         print('no openpilot messaging here (not on the EON): live data is off. Open /?demo=1 for the demo scene, or use radarreplay.py to replay a recording.'); return
     can = messaging.sub_sock('can'); subs = {}
@@ -487,6 +503,7 @@ def worker():
                                            'raw': {hex(a): r['hex'] for a, r in rawv.items()}, 'car': MAP['car']}) + '\n'); logf.flush()
                 except Exception: pass
         time.sleep(0.01)
+        if prof and now > prof[1]: _profile_done(prof); prof = None
 
 ROAD = r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,user-scalable=no">
 <title>Radar road view</title><style>
