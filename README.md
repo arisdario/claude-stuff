@@ -13,6 +13,7 @@ shows and what the classifier learns from.
 | `radarweb.py` | EON | Web server: road/top/learn pages. Reads CAN from openpilot's `can` socket (nothing is sent to the car). Saves `/learn` labels with 2 s of track history, runs the model, retrains automatically when parked. |
 | `radarml.py` | EON (+ laptop) | Pure python (no numpy/sklearn): full radar object-frame decoder (bit layout from tesla-radar-driver's DBC), INFRA3DRC-style features (mean/std/min/max/median/span of each signal over the track history), model inference, and the on-car trainer. |
 | `radarlearn_train.py` | laptop | Optional, more thorough trainer (scikit-learn, nested grid search, group cross-validation). |
+| `radartrip.py` | EON (+ laptop) | Drive logs on a map. Used by `/trips`; on a laptop `python3 radartrip.py map_*.jsonl` writes a self-contained `.html` per log. The output contains your GPS track: keep it private. |
 | `radar_classify_live.py` | Pi/laptop + CAN adapter | Optional: same classifier on a radar on a **bench**, via [tesla-radar-driver](https://github.com/SamSkjord/tesla-radar-driver). Never on a car. |
 
 `radarweb.py` also needs your `radarlog.py` (decoders) next to it - it is not in this repo.
@@ -48,6 +49,10 @@ cd /data/openpilot && PYTHONPATH=/data/openpilot:/data nohup python3 /data/radar
 ```
 
 Open `http://<EON-IP>:8088/` on a phone on the same network. `/learn` = tap an object, then tap what it is.
+`/trips` = your drives on a map (OpenStreetMap, free): route coloured by speed / vs the speed limit / openpilot,
+stops, and what the radar saw at its real position - vehicles, oncoming traffic, people and bikes crossing in front,
+static obstacles - plus a speed chart (click it to jump the map). Each drive in `/data/maplog` is processed once in the
+background (`nice`), cached as `map_*.trip.json`.
 `/ml` = what it learned: model score vs no model, label counts per class (yours / automatic), the latest labels,
 and every live object with what the radar says, what the model says (with confidence) and what is shown.
 
@@ -68,6 +73,21 @@ to `/data/canraw/autolabels.jsonl`:
 At most one track per class every 15 s is kept (balanced classes, small file; it stops at 50 MB). The labels are only
 as good as these rules: the model learns to recognise those classes earlier and in the hard cases (a parked car looks
 like the cars it saw move). Labels you tap on `/learn` are still used and count 3x. `AUTOLABEL=0` turns it off.
+
+## Crossing pedestrians and cyclists
+
+The radar measures speed along its line of sight, so someone crossing in front of you looks stationary to it and stays
+class "unknown". radarweb detects crossing from the track's sideways motion (last 2 s of positions, checked against the
+radar's lateral speed): 2-5 km/h = pedestrian, 5-25 km/h = cyclist, faster = vehicle. Your own rotation in turns makes
+everything ahead sweep sideways; that sweep is measured from the stationary objects and subtracted, and detection pauses
+in sharp turns and while manoeuvring (steering past 90 deg). Shown with `~` like other inferred classes.
+
+## Logs
+
+`/data/maplog/map_YYYYMMDD_HHMMSS.jsonl` is written by radarweb itself, one line per second (speed, openpilot/cruise
+state, decoded CAN incl. GPS and speed limit, raw CAN bytes, carState, and radarweb's own objects/crossings). A new file
+starts each time radarweb starts, named after the EON clock. About 55 MB per hour and nothing deletes them: check
+`du -sh /data/maplog` now and then.
 
 ## Automatic training
 

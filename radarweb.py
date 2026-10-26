@@ -97,6 +97,7 @@ def _flat(d, pre=''):
         elif isinstance(x, list) and len(x) <= 8 and all(isinstance(i, (int, float, bool, str)) for i in x): o[pre + k] = x
     return o
 LOGDIR = '/data/maplog'
+XS = []         # crossing detections since the last /data/maplog line (logged as 'xs' so radartrip.py can map them)
 # --- class cleanup (the radar only classifies ~5% of its tracks, flips between classes, and its pedestrian guesses are mostly low confidence) ---
 PED_MIN_PC = 50      # pedestrian / two-wheeler only shown if the radar's class probability is at least this (%); below that it is drawn as an unclassified marker
 HOLD_S = 8.0         # a class the radar gave a track is kept this long (while the track stays within 8 m / 3 m of its last position)
@@ -200,6 +201,37 @@ def ml_summary():
             'recent': sorted(man['recent'] + aut['recent'], key=lambda r: r.get('t') or 0)[-12:], 'objects': objs,
             'files': {'manual': OBJLABEL_FILE, 'auto': AUTOLABEL_FILE, 'model': MODEL_FILE}, 'autolabel_on': AL is not None,
             'next_at': max(radarml.AUTO_MIN_ROWS, AUTO['trained_rows'] + AUTO_NEW), 'total': AUTO['rows']}
+
+# TRIPS: /trips shows a /data/maplog drive on an OpenStreetMap map (radartrip.py). Turning a 50 MB log into a trip takes
+# a while on the EON, so it runs as a separate `nice -n 19` process and the result is cached next to the log
+# (map_*.trip.json); the drive being recorded right now is re-processed at most once a minute.
+import re as _re_trip
+TRIPJOBS = {}
+def trips_list():
+    out = []
+    try: names = sorted((f for f in os.listdir(LOGDIR) if _re_trip.match(r'^map_\d{8}_\d{6}\.jsonl$', f)), reverse=True)
+    except OSError: names = []
+    for f in names:
+        p_ = os.path.join(LOGDIR, f); c_ = p_[:-6] + '.trip.json'
+        out.append({'name': f, 'size': os.path.getsize(p_), 'ready': os.path.exists(c_) and os.path.getmtime(c_) >= os.path.getmtime(p_) - 60})
+    return {'files': out}
+def trip_get(f):
+    if not _re_trip.match(r'^map_\d{8}_\d{6}\.jsonl$', f or ''): return {'error': 'bad file name'}
+    src = os.path.join(LOGDIR, f); cache = src[:-6] + '.trip.json'
+    if not os.path.exists(src): return {'error': 'no such log'}
+    job = TRIPJOBS.get(f)
+    if job is not None and job.poll() is None: return {'pending': True}
+    TRIPJOBS.pop(f, None)
+    fresh = os.path.exists(cache) and (os.path.getmtime(cache) >= os.path.getmtime(src) or
+                                       (src == MAP.get('logfile') and time.time() - os.path.getmtime(cache) < 60))
+    if fresh or (job is not None and os.path.exists(cache)):
+        try: return json.load(open(cache))
+        except Exception: pass
+    if job is not None and job.returncode: return {'error': 'processing failed (exit %s), see /tmp/radar_trip.log' % job.returncode}
+    import subprocess
+    TRIPJOBS[f] = subprocess.Popen(['nice', '-n', '19', sys.executable, os.path.join(os.path.dirname(os.path.abspath(radarml.__file__)), 'radartrip.py'), '--json', src, cache],
+                                   stdout=subprocess.DEVNULL, stderr=open('/tmp/radar_trip.log', 'w'))
+    return {'pending': True}
 
 def _label_lines():
     n = 0
@@ -407,9 +439,19 @@ def worker():
                 try: o.update(radarml.decode_ab(ba, bb))           # lat speed, long accel, dZ, obstacle probs, sigmas (tesla_radar.dbc)
                 except Exception: pass
                 TRK.add(k, now, o)
-                if AL: autolabel_write(AL.update(k, now, o, STATE['v'], TRK.get(k, now)))
+                o['vy_raw'] = radarml.lateral_speed(TRK.get(k, now), o.get('ls'))
                 o['c'], o['inf'], o['ml'] = ml_class(k, now, o, cname, inf)
                 objs.append(o)
+            _yaw = radarml.scene_yaw(objs)          # your rotation, measured from the stationary tracks (see radarml CROSSING)
+            for o in objs:
+                _vy = radarml.ground_vy(o.pop('vy_raw', None), _yaw, o['d'], STATE['v'], STATE['ang'])
+                o['vy'] = round(_vy, 2) if _vy is not None else None
+                if o['c'] == 'unknown':          # crossing in front of you at walking / cycling / car pace (the radar can't see that)
+                    _xc = radarml.cross_class(o['vy'], o['gs'], o['d'])
+                    if _xc:
+                        o['c'] = _xc; o['inf'] = True; o['cross'] = True
+                        if not any(x[0] == o['s'] for x in XS) and len(XS) < 64: XS.append([o['s'], o['d'], o['y'], o['gs'], o['vy'], _xc])
+                if AL: autolabel_write(AL.update(o['s'], now, o, STATE['v'], TRK.get(o['s'], now)))
             alive = set(x['s'] for x in objs); TRK.drop_missing(alive)
             if AL: autolabel_write(AL.end_missing(alive))
             if MODEL is not None:
@@ -428,7 +470,9 @@ def worker():
                     msgs, rawv = build_map(now)
                     if logf is None:
                         os.makedirs(LOGDIR, exist_ok=True); MAP['logfile'] = LOGDIR + '/map_%s.jsonl' % time.strftime('%Y%m%d_%H%M%S'); logf = open(MAP['logfile'], 'a')
-                    logf.write(json.dumps({'t': round(now, 2), 'v': STATE['v'], 'acc': STATE.get('acc'), 'alc': STATE.get('alc'), 'msgs': {m['name']: m['sig'] for m in msgs.values()},
+                    with LOCK: _o = [[o['s'], o['d'], o['y'], o['gs'], o.get('vy'), o['c'], o.get('rc'), (o.get('ml') or {}).get('c')] for o in STATE['o']]
+                    _xs = XS[:]; del XS[:]
+                    logf.write(json.dumps({'t': round(now, 2), 'v': STATE['v'], 'acc': STATE.get('acc'), 'alc': STATE.get('alc'), 'o': _o, 'xs': _xs, 'msgs': {m['name']: m['sig'] for m in msgs.values()},
                                            'raw': {hex(a): r['hex'] for a, r in rawv.items()}, 'car': MAP['car']}) + '\n'); logf.flush()
                 except Exception: pass
         time.sleep(0.005)
@@ -845,7 +889,7 @@ th{color:var(--mut);font-weight:600;font-size:12px}td.n{text-align:right}
 .bar{height:8px;background:var(--bar);border-radius:4px;min-width:2px}
 .wrap{overflow-x:auto}
 </style></head><body>
-<div id=top><a href="/">road view</a><a href="/top">top-down</a><a href="/learn">label objects</a><b>What it learned</b><span id=conn class=m>loading…</span></div>
+<div id=top><a href="/">road view</a><a href="/top">top-down</a><a href="/learn">label objects</a><a href="/trips">trips map</a><b>What it learned</b><span id=conn class=m>loading…</span></div>
 <main>
 <section><h2>Model</h2><div id=model></div></section>
 <section><h2>Training</h2><div id=train></div></section>
@@ -1332,6 +1376,15 @@ class H(BaseHTTPRequestHandler):
         elif self.path == '/api/map':
             msgs, rawv = build_map(time.time()); d = {'msgs': msgs, 'raw': rawv, 'car': MAP['car'], 'ctl': MAP['ctl'], 'logfile': MAP.get('logfile'), 'v': STATE.get('v', 0), 'acc': STATE.get('acc', False), 'alc': STATE.get('alc', False)}
             b = json.dumps(d, default=str).encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        elif self.path == '/api/trips':
+            b = json.dumps(trips_list()).encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        elif self.path.startswith('/api/trip?'):
+            import urllib.parse as _up
+            f_ = (_up.parse_qs(self.path.split('?', 1)[1]).get('f') or [''])[0]
+            b = json.dumps(trip_get(f_)).encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        elif self.path.split('?')[0] == '/trips':
+            import radartrip
+            b = radartrip.VIEWER.encode(); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path == '/api/ml':
             b = json.dumps(ml_summary(), default=str).encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path.split('?')[0] == '/ml':

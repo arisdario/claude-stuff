@@ -91,6 +91,40 @@ def features(o, hist=None, v_ego=None, hist_fields=None):
     return [f[k] for k in FEATS]
 
 
+# CROSSING: the radar measures speed along its line of sight, so a pedestrian/cyclist crossing in front of you looks
+# like a stationary object to it and keeps class 'unknown' (seen in the 25 Oct logs: 113 sideways-moving tracks, all
+# 'unknown 25%'). Their sideways motion is visible in the track position though. lateral_speed() estimates it from
+# the last HIST_S of y positions, cross-checked against the radar's own LatSpeed. When you turn, everything ahead sweeps
+# sideways by (your yaw rate x distance): scene_yaw() measures that rotation from the stationary tracks themselves
+# (median, so the few real movers don't bias it) and ground_vy() subtracts it. Steering angle is only the fallback
+# when there are too few stationary tracks; it underestimates rotation at walking speed in tight turns.
+WHEELBASE, STEER_RATIO = 2.96, 15.0
+CROSS = ((0.6, 1.4, 'pedestrian'), (1.4, 7.0, 'two_wheel'), (7.0, 20.0, 'four_wheel'))  # sideways ground speed (m/s) -> class: walking 2-5 km/h (4 km/h + noise margin), cycling 5-25 km/h, car
+def lateral_speed(hist, ls):
+    """sideways speed (m/s) of a track relative to the car, or None (too little history, position and LatSpeed disagree)"""
+    if not hist or len(hist) < 6 or -hist[0][0] < 0.8: return None
+    vy = _slope([r[0] for r in hist], [r[2] for r in hist])
+    if ls is not None and 0.3 < abs(ls) < 15 and abs(vy) > 0.3 and (ls > 0) != (vy > 0): return None   # LatSpeed -64 = no data
+    return vy
+def scene_yaw(objs):
+    """your rotation (rad/s, in the radar's own sign convention) from how the stationary tracks sweep sideways, or None"""
+    r = sorted(-o['vy_raw'] / o['d'] for o in objs if o.get('vy_raw') is not None and abs(o['gs']) < 1.5 and o['d'] > 3)
+    return r[len(r) // 2] if len(r) >= 3 else None
+def ground_vy(vy_raw, yaw, d, v_ego, steer_deg):
+    """sideways ground speed: relative speed minus the sweep caused by your own rotation; None while it can't be told apart"""
+    if vy_raw is None or abs(steer_deg or 0.0) > 90: return None    # manoeuvring (parking, U-turn): no way to separate walkers
+    if yaw is not None:
+        return None if abs(yaw) > 0.06 else vy_raw + yaw * d     # turning: too much sweep to separate a walker from it
+    est = abs(v_ego * math.tan(math.radians((steer_deg or 0.0) / STEER_RATIO)) / WHEELBASE)
+    return None if est * max(d, 1.0) > 0.3 else vy_raw
+def cross_class(vy, gs, d):
+    """class implied by crossing in front of you, or None"""
+    if vy is None or abs(gs) >= 3.0 or d >= 40: return None
+    for lo, hi, c in CROSS:
+        if lo <= abs(vy) < hi: return c
+    return None
+
+
 class TrackHist:
     """Per radar slot: the last HIST_S seconds of [t] + SIGNALS. Restarts when the slot is reused."""
     fields = HIST_FIELDS
@@ -128,11 +162,15 @@ class AutoLabeler:
         if t is None:
             self.n += 1
             t = self.tr[k] = {'id': '%x-%d' % (int(now), self.n), 't0': now, 'last': now, 'd': o['d'], 'y': o['y'], 'f': 0,
-                              'move_s': 0.0, 'still_f': 0, 'gs_max': 0.0, 'ego_m': 0.0, 'pe_max': 0.0, 'rc': {}, 'derr': 0.0, 'snaps': []}
+                              'move_s': 0.0, 'still_f': 0, 'gs_max': 0.0, 'ego_m': 0.0, 'pe_max': 0.0, 'rc': {}, 'derr': 0.0, 'snaps': [],
+                              'cross': {}, 'side_f': 0}
         dt = min(0.2, now - t['last']) if t['f'] else 0.0
         gs = abs(o['gs']); t['f'] += 1; t['last'] = now; t['d'] = o['d']; t['y'] = o['y']
         if gs >= 6.0: t['move_s'] += dt
-        if gs < 0.5: t['still_f'] += 1
+        vy = o.get('vy'); xc = cross_class(vy, o['gs'], o['d'])
+        if xc: t['cross'][xc] = t['cross'].get(xc, 0.0) + dt
+        if vy is not None and abs(vy) >= 0.3: t['side_f'] += 1
+        if gs < 0.5 and (vy is None or abs(vy) < 0.3): t['still_f'] += 1
         t['gs_max'] = max(t['gs_max'], gs); t['ego_m'] += abs(v_ego) * dt; t['pe_max'] = max(t['pe_max'], o.get('pe', 0))
         if o.get('pc', 0) >= 80: t['rc'][o.get('rc', o.get('c'))] = t['rc'].get(o.get('rc', o.get('c')), 0) + 1
         age = now - t['t0']
@@ -150,8 +188,10 @@ class AutoLabeler:
         if t['derr'] > 4.0 and life < 3.0: return 'not_real'                         # range rate and distance change disagree: multipath ghost
         if t['move_s'] >= 1.0:                                                      # moved over the ground at 6+ m/s (22 km/h) for 1 s
             return 'two_wheel' if sure == 'two_wheel' and t['gs_max'] < 12.0 else 'four_wheel'
+        xc = max(t['cross'].items(), key=lambda kv: kv[1]) if t['cross'] else (None, 0)
+        if xc[1] >= 1.0: return xc[0]                                               # crossed in front of you for 1 s: walking / cycling / car pace
         if sure: return sure                                                        # radar held one class at 80%+ for most of the track
-        if life >= 3.0 and t['still_f'] >= 0.95 * f and t['ego_m'] >= 20.0: return 'static'   # never moved while you drove 20 m past it
+        if life >= 3.0 and t['still_f'] >= 0.95 * f and t['side_f'] == 0 and t['ego_m'] >= 20.0: return 'static'   # never moved (along or across) while you drove 20 m past it
         return None
     def finish(self, k):
         t = self.tr.pop(k, None)
