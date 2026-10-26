@@ -97,6 +97,10 @@ def _flat(d, pre=''):
         elif isinstance(x, list) and len(x) <= 8 and all(isinstance(i, (int, float, bool, str)) for i in x): o[pre + k] = x
     return o
 LOGDIR = '/data/maplog'
+# PERF: STATE['o'] (streamed to every page 10x/s) only carries what the pages use; the full objects (extra radar fields
+# for /learn labels) stay in OBJFULL. SNAP = STATE as JSON, built once per tick and shared by all browser streams.
+PUB_KEYS = ('s', 'd', 'y', 'vr', 'gs', 'pe', 'c', 'inf', 'pc', 'len', 'ms', 'stationary', 'rc', 'ml', 'vy', 'cross')
+OBJFULL = {}; SNAP = [None, 0.0]; TICK = [0]
 XS = []         # crossing detections since the last /data/maplog line (logged as 'xs' so radartrip.py can map them)
 # --- class cleanup (the radar only classifies ~5% of its tracks, flips between classes, and its pedestrian guesses are mostly low confidence) ---
 PED_MIN_PC = 50      # pedestrian / two-wheeler only shown if the radar's class probability is at least this (%); below that it is drawn as an unclassified marker
@@ -134,9 +138,11 @@ MODEL_FILE = os.environ.get('RADAR_MODEL', '/data/radar_model.json')
 TRK = radarml.TrackHist()
 try: MODEL = radarml.Model(MODEL_FILE) if os.path.exists(MODEL_FILE) else None
 except Exception as e: MODEL = None; print('radar model not loaded:', e)
-def ml_class(k, now, o, cname, inf):
+MLLAST = {}     # slot -> last (label, probability): the model runs 2x per second per object (staggered), not 10x
+def ml_class(k, now, o, cname, inf, hist=None, run=True):
     if MODEL is None: return cname, inf, None
-    ml, p = MODEL.track_class(k, radarml.features(o, TRK.get(k, now), STATE['v']))
+    if run or k not in MLLAST: MLLAST[k] = MODEL.track_class(k, radarml.features(o, hist, STATE['v']), alpha=0.6)
+    ml, p = MLLAST[k]
     if p >= MODEL.min_p and radarml.DISPLAY.get(ml, 'unknown') != cname:
         cname = radarml.DISPLAY.get(ml, 'unknown'); inf = True
         gs = abs(o['gs'])
@@ -438,10 +444,11 @@ def worker():
                      'stationary': abs(gs) < 1.5, 'rc': cname}     # rc = class before the model: what /learn stores as radar_c
                 try: o.update(radarml.decode_ab(ba, bb))           # lat speed, long accel, dZ, obstacle probs, sigmas (tesla_radar.dbc)
                 except Exception: pass
-                TRK.add(k, now, o)
-                o['vy_raw'] = radarml.lateral_speed(TRK.get(k, now), o.get('ls'))
-                o['c'], o['inf'], o['ml'] = ml_class(k, now, o, cname, inf)
+                TRK.add(k, now, o); o['_h'] = TRK.get(k, now, rnd=False)      # one history copy per object per tick
+                o['vy_raw'] = radarml.lateral_speed(o['_h'], o.get('ls'))
+                o['c'], o['inf'], o['ml'] = ml_class(k, now, o, cname, inf, o['_h'], (TICK[0] + k) % 5 == 0)
                 objs.append(o)
+            TICK[0] += 1
             _yaw = radarml.scene_yaw(objs)          # your rotation, measured from the stationary tracks (see radarml CROSSING)
             for o in objs:
                 _vy = radarml.ground_vy(o.pop('vy_raw', None), _yaw, o['d'], STATE['v'], STATE['ang'])
@@ -451,14 +458,18 @@ def worker():
                     if _xc:
                         o['c'] = _xc; o['inf'] = True; o['cross'] = True
                         if not any(x[0] == o['s'] for x in XS) and len(XS) < 64: XS.append([o['s'], o['d'], o['y'], o['gs'], o['vy'], _xc])
-                if AL: autolabel_write(AL.update(o['s'], now, o, STATE['v'], TRK.get(o['s'], now)))
+                if AL: autolabel_write(AL.update(o['s'], now, o, STATE['v'], o['_h']))
+                del o['_h']
             alive = set(x['s'] for x in objs); TRK.drop_missing(alive)
+            for k in [k for k in MLLAST if k not in alive]: del MLLAST[k]
             if AL: autolabel_write(AL.end_missing(alive))
             if MODEL is not None:
                 for k in [k for k in MODEL.smooth if k not in alive]: MODEL.forget(k)
+            OBJFULL.clear(); OBJFULL.update((o['s'], o) for o in objs)
             with LOCK:
-                STATE['t'] = round(now, 2); STATE['o'] = objs
+                STATE['t'] = round(now, 2); STATE['o'] = [dict((key, o[key]) for key in PUB_KEYS if key in o) for o in objs]
                 STATE['status'] = {k: v for k, v in status.items()}
+                SNAP[0] = json.dumps(STATE); SNAP[1] = now
         if now >= tick:
             dt = max(0.001, now - last_tick); last_tick = now; tick = now + 1.0
             try: autotrain_tick(now)
@@ -475,7 +486,7 @@ def worker():
                     logf.write(json.dumps({'t': round(now, 2), 'v': STATE['v'], 'acc': STATE.get('acc'), 'alc': STATE.get('alc'), 'o': _o, 'xs': _xs, 'msgs': {m['name']: m['sig'] for m in msgs.values()},
                                            'raw': {hex(a): r['hex'] for a, r in rawv.items()}, 'car': MAP['car']}) + '\n'); logf.flush()
                 except Exception: pass
-        time.sleep(0.005)
+        time.sleep(0.01)
 
 ROAD = r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,user-scalable=no">
 <title>Radar road view</title><style>
@@ -1359,7 +1370,7 @@ start();
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _snap(self):
-        with LOCK: return json.dumps(STATE)
+        with LOCK: return SNAP[0] if SNAP[0] and time.time() - SNAP[1] < 0.3 else json.dumps(STATE)   # built once per tick, shared by all streams
     def _authed(self):
         if not AUTH: return True
         import base64, hmac
@@ -1505,7 +1516,7 @@ class H(BaseHTTPRequestHandler):
                 try:
                     h = TRK.get(int(row['s']), row['t'])
                     if h and abs(h[-1][1] - float(row['d'])) < radarml.JUMP_D and abs(h[-1][2] - float(row['y'])) < radarml.JUMP_Y: row['h'] = h; row['hf'] = TRK.fields
-                    for o in STATE['o']:      # fields the page doesn't send (moving state, meas flag ...) from the live object
+                    for o in list(OBJFULL.values()):      # fields the page doesn't send (moving state, meas flag ...) from the live object
                         if o['s'] == int(row['s']):
                             for key in ('mst', 'meas', 'pe', 'ls', 'la', 'dz', 'po', 'pno'): row.setdefault(key, o.get(key))
                 except Exception:

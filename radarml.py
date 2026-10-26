@@ -136,10 +136,12 @@ class TrackHist:
         if h is None: h = self.h[k] = []
         h.append(r)
         while h and now - h[0][0] > HIST_S: h.pop(0)
-    def get(self, k, now):
-        """history in the features() format (times relative to now), or None"""
+    def get(self, k, now, rnd=True):
+        """history in the features() format (times relative to now), or None. rnd=False skips rounding (live use, faster);
+        rounded copies are only needed when the history is saved with a label"""
         h = self.h.get(k)
         if not h or now - h[-1][0] > 0.5: return None
+        if not rnd: return [[r[0] - now] + r[1:] for r in h]
         return [[round(r[0] - now, 2)] + [round(x, 3) for x in r[1:]] for r in h]
     def drop_missing(self, alive):
         for k in [k for k in self.h if k not in alive]: del self.h[k]
@@ -177,7 +179,8 @@ class AutoLabeler:
         if len(t['snaps']) < len(self.SNAP_AT) and age >= self.SNAP_AT[len(t['snaps'])] and hist:
             x = features(o, hist, v_ego); t['derr'] = max(t['derr'], x[FEATS.index('d_rate_err')])
             row = dict((key, o.get(key)) for key in ('s', 'd', 'y', 'vr', 'gs', 'len', 'pe', 'mst', 'meas') + tuple(SIGNALS) if key in o)
-            row.update(radar_c=o.get('rc', o.get('c')), radar_pc=o.get('pc'), t=round(now, 2), v=round(v_ego, 2), h=hist[::2], hf=HIST_FIELDS)
+            row.update(radar_c=o.get('rc', o.get('c')), radar_pc=o.get('pc'), t=round(now, 2), v=round(v_ego, 2),
+                       h=[[round(x, 3) for x in r] for r in hist[::2]], hf=HIST_FIELDS)
             t['snaps'].append(row)
         return out
     def rule(self, t):
