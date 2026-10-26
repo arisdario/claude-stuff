@@ -5,6 +5,7 @@
 #
 #   python3 canmarks.py /data/canraw/can_20261026_101500.bin.gz            # per mark: bytes that changed
 #   python3 canmarks.py FILE --window 3 --quiet 0.3                         # look 3 s after each mark; background <= 0.3 changes/s
+#   python3 canmarks.py FILE --skip-bus ''                                   # also show bus 1 (radar tracks, ignored by default)
 #   python3 canmarks.py FILE --id 0x3c2                                     # every change of one address, with marks in between
 #
 # A byte is listed for a mark when its value right before the mark differs from a value within --window seconds after
@@ -43,9 +44,12 @@ def main():
   ap.add_argument('file')
   ap.add_argument('--window', type=float, default=2.0, help='seconds after each mark to look for changes')
   ap.add_argument('--quiet', type=float, default=0.2, help='max background changes per second for a byte to count')
+  ap.add_argument('--skip-bus', default='1', help='comma list of buses to ignore (default 1 = radar tracks); "" = none')
   ap.add_argument('--id', type=lambda s: int(s, 0), default=None, help='print every change of this address')
   a = ap.parse_args()
   hdr, frames, marks = read(a.file)
+  skip = {int(b) for b in a.skip_bus.split(',') if b.strip()}
+  if a.id is None: frames = [f for f in frames if (f[1] & 0x7F) not in skip]
   dur = frames[-1][0] if frames else 0.
   print('%s  label=%r  %.0f s  %d frames  %d marks' % (a.file, hdr.get('label'), dur, len(frames), len(marks)))
 
