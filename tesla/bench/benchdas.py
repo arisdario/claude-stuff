@@ -14,6 +14,7 @@
 #   python3 benchdas.py --selftest                                   # no panda needed
 #   python3 benchdas.py --bench --secs 60                            # active AP picture, car's own 0x398 untouched
 #   python3 benchdas.py --bench --secs 60 --raw398 41154e4f00000010  # + config: dasHw 1, forwardRadarHw 1, autopilot 1
+#   python3 benchdas.py --bench --secs 60 --raw398 41154e4f00000010 --epb   # + EPB_epasControl 0x214 like the panda
 #   python3 benchdas.py --bench --op-status 2                        # "available" instead of "active"
 # Python 3.7 compatible (EON).
 import argparse, sys, time
@@ -32,6 +33,11 @@ def cksm(data_lo, data_hi, msg_id, msg_len):
 
 def frame(lo, hi, n=8):
   return ((lo & 0xFFFFFFFF) | ((hi & 0xFFFFFFFF) << 32)).to_bytes(8, 'little')[:n]
+
+
+def epb_frame(idx):
+  """do_EPB_epasControl (0x214, 3 bytes): car log shows 01 01 18, 01 0b 22, ..."""
+  lo = 0x01 + (idx << 8); return frame(lo + (cksm(lo, 0, 0x214, 2) << 16), 0, 3)
 
 
 def clip(x, lo, hi): return max(lo, min(hi, x))
@@ -164,6 +170,8 @@ def selftest():
     for a, d in das.tick(): got.setdefault(a, set()).add(d.hex())
   captured = {0x239: ['d0a1647f7f7ff0b0', 'd0a1647f7f7ff0d0'], 0x399: ['f1000000004071' + '3e', 'f1000000004011de'],
               0x3E9: ['f1000000000080' + '5d', 'f1000000000020fd']}
+  got[0x214] = {epb_frame(i).hex() for i in range(16)}
+  captured[0x214] = ['010118', '010b22', '01071e']
   ok = True
   for a, frames in captured.items():
     for f in frames:
@@ -183,6 +191,8 @@ ap.add_argument('--mph', action='store_true', help='car shows mph (default km/h)
 ap.add_argument('--set-speed', type=int, default=80, dest='set_speed', help='cruise set speed in car units')
 ap.add_argument('--lead', type=float, default=40., help='car ahead at this distance in m (0 = none)')
 ap.add_argument('--raw398', type=bytes.fromhex, default=None, help='also send this exact 0x398 frame at 1 Hz, e.g. 41154e4f00000010')
+ap.add_argument('--epb', action='store_true', help='also send EPB_epasControl 0x214 at 10 Hz (the panda sends it in the car '
+                'even with DAS emulation off; with an AP config the parking brake expects it)')
 ap.add_argument('--defaults', action='store_true', help="send the panda's start-up defaults instead of the active picture")
 a = ap.parse_args()
 if a.selftest:
@@ -201,8 +211,8 @@ if not pl:
 p = Panda(pl[0]); p.set_safety_mode(Panda.SAFETY_ALLOUTPUT)
 print('sending DAS picture: op_status %d, lanes %s, lead %s, set speed %d %s%s' % (
   das.op_status, 'both' if das.lLine and das.rLine else 'none', ('%.0f m' % a.lead) if a.lead > 0 and not a.defaults else 'none',
-  das.acc_speed_limit, 'mph' if a.mph else 'km/h', (', 0x398 = ' + ' '.join('%02x' % x for x in a.raw398)) if a.raw398 else ''))
-t0 = time.time(); nxt = t0; next398 = t0; sent = 0
+  das.acc_speed_limit, ('mph' if a.mph else 'km/h') + (', EPB 0x214' if a.epb else ''), (', 0x398 = ' + ' '.join('%02x' % x for x in a.raw398)) if a.raw398 else ''))
+t0 = time.time(); nxt = t0; next398 = t0; sent = 0; ticks = 0; epb_idx = 0
 try:
   while time.time() - t0 < a.secs:
     now = time.time()
@@ -210,6 +220,9 @@ try:
       nxt += 0.01                                              # 100 Hz, like 0x108 in the car
       for addr, dat in das.tick():
         p.can_send(addr, dat, a.bus); sent += 1
+      ticks += 1
+      if a.epb and ticks % 10 == 5:                            # do_EPB_epasControl: 01 idx cksm, 10 Hz
+        p.can_send(0x214, epb_frame(epb_idx), a.bus); epb_idx = (epb_idx + 1) % 16; sent += 1
     if a.raw398 is not None and now >= next398:
       p.can_send(0x398, a.raw398, a.bus); next398 += 1.0; sent += 1
     try: p.can_recv()                                          # keep the panda's receive buffer drained
