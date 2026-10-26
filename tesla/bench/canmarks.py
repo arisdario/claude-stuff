@@ -9,12 +9,14 @@
 #
 # A byte is listed for a mark when its value right before the mark differs from a value within --window seconds after
 # it, and it changes at most --quiet times per second outside the mark windows (counters and checksums are filtered out).
-import argparse, gzip, json, struct, sys
+import argparse, json, struct, sys, zlib
 
 
 def read(path):
-  f = gzip.open(path, 'rb'); hdr = json.loads(f.readline().decode())
-  data = f.read(); i = 0; frames = []; marks = []
+  # zlib instead of gzip.read(): a recording still running or stopped with pkill has no gzip end marker
+  z = zlib.decompressobj(16 + zlib.MAX_WBITS); raw = z.decompress(open(path, 'rb').read())
+  nl = raw.index(b'\n'); hdr = json.loads(raw[:nl].decode())
+  data = raw[nl + 1:]; i = 0; frames = []; marks = []
   while i < len(data):
     typ = data[i]
     if typ == 1:
