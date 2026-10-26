@@ -1194,11 +1194,12 @@ function card(m,raw){var r=raw[m.addr]||{};var h='<section'+(r.age>2?' class=sta
 var CH={},SORT='recent',VIEW='all',MARKT=0,OPEN={};
 function track(d){var raw=d.raw||{},t=Date.now()/1000;Object.keys(raw).forEach(function(k){
  var b=(raw[k].hex||'').split(' ').filter(Boolean).map(function(x){return parseInt(x,16)}),c=CH[k];
- if(!c){CH[k]={b:b,first:t,last:0,bl:{},bn:{},byl:{},byn:{},polls:0,chg:0,hist:[[t,raw[k].hex]],vals:[[t,b]],base:MARKT?b.slice():null,notch:MARKT?{}:null};return}
+ if(!c){CH[k]={b:b,first:t,last:0,bl:{},bn:{},byl:{},byn:{},polls:0,chg:0,hist:[[t,raw[k].hex]],vals:[[t,b]],base:MARKT?b.slice():null,notch:MARKT?{}:null,fl:{},srcs:{}};CH[k].srcs[raw[k].src]=1;return}
+ c.srcs[raw[k].src]=1;
  c.vals.push([t,b]);if(c.vals.length>120)c.vals.shift();   // 60 s of values for the byte graphs
  c.polls++;var any=false;
  for(var i=0;i<Math.max(b.length,c.b.length);i++){var x=(b[i]===undefined||c.b[i]===undefined)?255:(b[i]^c.b[i]);if(!x)continue;any=true;c.byl[i]=t;c.byn[i]=(c.byn[i]||0)+1;
-  for(var j=0;j<8;j++)if(x>>j&1){c.bl[i*8+j]=t;c.bn[i*8+j]=(c.bn[i*8+j]||0)+1}}
+  for(var j=0;j<8;j++)if(x>>j&1){var n=i*8+j;c.bl[n]=t;c.bn[n]=(c.bn[n]||0)+1;var f=c.fl[n]=c.fl[n]||[];f.push(t);while(f[0]<t-180)f.shift()}}
  if(any){c.chg++;c.last=t;c.hist.unshift([t,raw[k].hex]);if(c.hist.length>12)c.hist.pop()}
  c.b=b})}
 function noisy(c,n){return c.polls>=10&&(n||0)/c.polls>0.3}
@@ -1215,7 +1216,7 @@ function bcol(c,i,t){var st='';for(var j=0;j<8;j++)if(newbit(c,i*8+j)){st='box-s
 function ago(t,x){return x?(t-x<100?(t-x).toFixed(1):Math.round(t-x))+'':'-'}
 function canSort(m){SORT=m;show(D)}function canView(m){VIEW=m;show(D)}function canOpen(k){OPEN[k]=!OPEN[k];show(D)}
 function canMark(){MARKT=Date.now()/1000;for(var k in CH){var c=CH[k];c.base=c.b.slice();c.notch={};for(var n in c.bn)c.notch[n]=1}if(VIEW=='all')VIEW='mark';show(D)}
-function canReset(){CH={};MARKT=0;OPEN={};if(D)track(D);show(D)}
+function canReset(){CH={};MARKT=0;OPEN={};EV=[];EVN=0;HITS={};if(D)track(D);show(D)}
 function bitgrid(c,t){var h='<table class=mono style="margin:6px 0"><tr><td>byte \\ bit</td>';for(var j=7;j>=0;j--)h+='<td>'+j+'</td>';h+='<td>hex</td></tr>';
  for(var i=0;i<c.b.length;i++){h+='<tr><td>'+i+'</td>';for(var j=7;j>=0;j--){var n=i*8+j,f=c.bn[n]||0,a=c.bl[n]?t-c.bl[n]:1e9,
    bg=newbit(c,n)?'#2fbf71':a<1.5&&qbit(c,n)?'#e5484d':!qbit(c,n)&&f?'rgba(128,128,128,.35)':f?'rgba(26,115,232,'+Math.min(0.9,0.2+0.15*Math.log(1+f))+')':'';
@@ -1231,16 +1232,35 @@ function bytegraphs(c,t){   // value of each byte over the last 60 s (like Savvy
    (MARKT&&t-MARKT<60?'<line x1='+((60-(t-MARKT))/60*W).toFixed(1)+' x2='+((60-(t-MARKT))/60*W).toFixed(1)+' y1=0 y2='+H+' stroke="#2fbf71"/>':'')+
    '<polyline fill=none stroke="#1a73e8" stroke-width=1.5 points="'+pts+'"/></svg></div>'}
  return h+'</div>'}
+// "I did it": tap right before (or as) you do the action, repeat 4-6 times ~10 s apart. For every bit: in how many of
+// your taps did it flip within 3 s, versus how likely a flip in any 3 s is from its own background rate. Bits that
+// follow your taps and are otherwise quiet score highest. Addresses also seen on the radar bus (1) are skipped: the radar
+// reuses 0x310-0x36E and radarweb keeps one row per address.
+var EV=[],EVN=0,HITS={};
+function canEvent(){var te=Date.now()/1000;EV.push(te);if(VIEW!='events')VIEW='events';setTimeout(function(){EVN++;for(var k in CH){var c=CH[k];for(var n in c.fl)
+ if(c.fl[n].some(function(x){return x>te&&x<=te+3}))HITS[k+':'+n]=(HITS[k+':'+n]||0)+1}show(D)},3300);show(D)}
+function canEvReset(){EV=[];EVN=0;HITS={};show(D)}
+function inev(x){return EV.some(function(te){return x>te-0.5&&x<=te+3.5})}
+function evtable(raw,t){var L=[];
+ for(var key in HITS){var h=HITS[key],kk=key.split(':'),k=kk[0],n=+kk[1],c=CH[k];if(!c||!raw[k]||c.srcs[1]||h<2||!qbit(c,n))continue;
+  var span=Math.max(10,Math.min(180,t-c.first)-EV.length*4),bgn=(c.fl[n]||[]).filter(function(x){return !inev(x)}).length,p0=1-Math.exp(-bgn/span*3),
+   hit=h/Math.max(1,EVN),sc=hit-p0;if(sc>0.3)L.push([sc,k,n,h,p0,c])}
+ L.sort(function(a,b){return b[0]-a[0]});
+ var o='<table class=mono><tr><td>score</td><td>addr</td><td>name</td><td>bus</td><td>byte.bit</td><td>start bit</td><td>flipped after taps</td><td>chance by itself</td><td>byte now</td></tr>';
+ L.slice(0,30).forEach(function(r){var c=r[5],i=r[2]>>3;o+='<tr onclick="canOpen(\''+r[1]+'\')" style="cursor:pointer"><td>'+r[0].toFixed(2)+'</td><td>'+hx(r[1])+'</td><td>'+(raw[r[1]].name||'')+'</td><td>'+raw[r[1]].src+'</td><td>'+i+'.'+(r[2]&7)+'</td><td>'+r[2]+'</td><td>'+r[3]+' / '+EVN+'</td><td>'+Math.round(r[4]*100)+'%</td><td>'+('0'+(c.b[i]||0).toString(16)).slice(-2)+'</td></tr>'});
+ if(!L.length)o+='<tr><td colspan=9 style="color:var(--mut)">'+(EVN<2?'tap "I did it" at least 2-3 times (each result counts 3 s after the tap)':'no bit follows your taps yet - more taps, or the action does not reach these buses')+'</td></tr>';
+ return o+'</table>'}
 function allcan(raw){var t=Date.now()/1000,q=Q.toLowerCase(),btn=function(cur,v,f,l){return '<button class=chipb'+(cur==v?' style="background:#1a73e8;color:#fff"':'')+' onclick="'+f+'(\''+v+'\')">'+l+'</button>'};
  var h='<section class=wide><h2>Every CAN address seen (any bus) <small>'+Object.keys(raw).length+' addresses'+(MARKT?' &middot; mark set '+ago(t,MARKT)+' s ago':'')+'</small></h2>'+
   '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0">sort '+btn(SORT,'recent','canSort','last change')+btn(SORT,'rate','canSort','changes/s')+btn(SORT,'bits','canSort','bits changing')+btn(SORT,'addr','canSort','address')+btn(SORT,'hz','canSort','Hz')+btn(SORT,'bus','canSort','bus')+
-  ' &nbsp; show '+btn(VIEW,'all','canView','all')+btn(VIEW,'changing','canView','changed in 30 s')+btn(VIEW,'mark','canView','new since mark')+btn(VIEW,'static','canView','never changed')+
-  ' &nbsp; <button class=chipb onclick="canMark()" style="background:#2fbf71;color:#fff">Mark</button><button class=chipb onclick="canReset()">Reset stats</button></div>'+
+  ' &nbsp; show '+btn(VIEW,'all','canView','all')+btn(VIEW,'changing','canView','changed in 30 s')+btn(VIEW,'mark','canView','new since mark')+btn(VIEW,'static','canView','never changed')+btn(VIEW,'events','canView','follows my taps')+
+  ' &nbsp; <button class=chipb onclick="canMark()" style="background:#2fbf71;color:#fff">Mark</button><button class=chipb onclick="canReset()">Reset stats</button> &nbsp; <button class=chipb onclick="canEvent()" style="background:#f08a00;color:#000;font-weight:700">I did it ('+EVN+(EV.length>EVN?' +1':'')+')</button><button class=chipb onclick="canEvReset()">Reset taps</button></div>'+
   '<div style="color:var(--mut);margin-bottom:6px">Changed <span style="background:#e5484d;color:#fff">&lt;1.5 s</span> <span style="background:#f08a00;color:#000">&lt;5 s</span> <span style="background:rgba(240,138,0,.25)">&lt;30 s</span> ago &middot; grey = changes almost every update (counter / live value) &middot; <span style="box-shadow:inset 0 0 0 2px #1a73e8">outlined</span> = has a bit that flipped after Mark and never before (wait 30 s, then Mark, then do one thing) &middot; "last chg" ignores grey bytes. Bytes of IDs nothing decodes refresh twice a second, so very short blips can be missed.</div>'+
   '<input id=f1 placeholder="filter by address / name / bus, e.g. 0x3d8, UI_, src 1" value="'+Q+'" oninput="Q=this.value;show(D);var e=document.getElementById(\'f1\');e.focus();e.setSelectionRange(Q.length,Q.length)">'+
+  (VIEW=='events'?'<h2 style="margin-top:10px">Bits that follow your taps <small>tap "I did it" right as you do the action, 4-6 times, ~10 s apart</small></h2><div style="overflow-x:auto">'+evtable(raw,t)+'</div><h2 style="margin-top:10px">Addresses <small>click a row for its bit grid</small></h2>':'')+
   '<div style="overflow-x:auto"><table class=mono><tr><td>addr</td><td>name (if in DBC)</td><td>bus</td><td>Hz</td><td>age s</td><td>last chg s</td><td>chg/s</td><td>bits</td><td>mark</td><td>data</td></tr>';
  var ks=Object.keys(raw).filter(function(k){var e=raw[k],c=CH[k];if(!c)return false;if(q&&(hx(k)+' '+e.name+' src '+e.src).toLowerCase().indexOf(q)<0)return false;
-  if(VIEW=='changing')return t-qlast(c)<30;if(VIEW=='mark')return dmark(c)>0;if(VIEW=='static')return !c.chg;return true});
+  if(VIEW=='changing')return t-qlast(c)<30;if(VIEW=='mark')return dmark(c)>0;if(VIEW=='static')return !c.chg;if(VIEW=='events'){for(var hk in HITS)if(hk.split(':')[0]==k&&HITS[hk]>=2)return true;return false}return true});
  var rate=function(k){var c=CH[k];return c.chg/Math.max(1,t-c.first)},key={recent:function(k){return -qlast(CH[k])},rate:function(k){return -rate(k)},bits:function(k){return -nbits(CH[k])},addr:function(k){return +k},hz:function(k){return -raw[k].hz},bus:function(k){return raw[k].src*4096+(+k)}}[SORT];
  if(VIEW=='mark')key=function(k){return -dmark(CH[k])};
  ks.sort(function(a,b){return (key(a)-key(b))||(a-b)});
