@@ -17,6 +17,17 @@ v = sqrt(a_y_max / curvature) reproduces the stored speed exactly:
 This process only ever reads the sqlite file (PRAGMA query_only=ON enforces
 that at the connection level) - it never writes to it.
 
+Changes (see PCC_module.py / pcc_curves.py for the consumer side):
+  - POSITION: liveLocationKalman never had a valid fix on this car (mapcurve_check.log: posValid=False on every
+    line), so nothing was ever published. Falls back to gpsLocationExternal, which carcontroller.py publishes from
+    the car's own GPS on CAN (MCU_locationStatus + UI_gpsVehicleHeading) when use_tesla_gps = True is set in
+    /data/bb_openpilot.cfg.
+  - WHICH CURVE: the slowest point within 400 m is not the one that matters - a 30 km/h corner 390 m away needs no
+    slowing yet, a 50 km/h bend 60 m away does. Each point is ranked by the speed you may have NOW to still reach it
+    at its speed slowing at pcc_curves.A_CURVE_DECEL (same rule PCC_module uses), and the binding one is published.
+  - CORRIDOR: points are only taken from a corridor along the current heading (10 m + 30% of the distance to each
+    side) instead of a 50 deg cone, which at 400 m spans ~650 m and picks up parallel and side streets.
+
 Run standalone for testing:
     python3 mapcurved.py
 
@@ -30,11 +41,18 @@ import sys
 import os
 
 import cereal.messaging as messaging
+try:
+    from selfdrive.car.tesla.pcc_curves import approach_speed
+except ImportError:                       # running outside the openpilot tree (tests)
+    from pcc_curves import approach_speed
 
 DB_PATH = '/data/mapcurve.sqlite'
 CELL_DEG = 0.01          # must match mapcurve_build.py's CELL_DEG
 LOOKAHEAD_M = 400.0      # how far ahead to search for the tightest curve
 HEADING_CONE_DEG = 50.0  # only consider points within this angle of current heading
+CORRIDOR_M, CORRIDOR_FRAC = 10.0, 0.30   # ...and at most this far to the side: CORRIDOR_M + CORRIDOR_FRAC * distance ahead
+GPS_MAX_ACC_M = 20.0     # ignore gpsLocationExternal fixes worse than this (m)
+GPS_MAX_AGE_S = 2.0      # ...or older than this
 A_Y_MAX = 1.85           # must match PCC_module.py's max_v_in_mapped_curve_ms
 UPDATE_HZ = 4
 MIN_SPEED_MS = 1.0       # guard against div-by-zero / garbage rows
@@ -73,9 +91,9 @@ class MapCurveLookup:
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.execute('PRAGMA query_only=ON')  # this process never writes
 
-    def query_ahead(self, lat, lon, heading_deg):
-        """Return (min_speed_ms, dist_m) for the tightest curve ahead within
-        LOOKAHEAD_M and HEADING_CONE_DEG of current heading, or None."""
+    def query_ahead(self, lat, lon, heading_deg, v_ego=0.0):
+        """Return (speed_ms, dist_m) of the curve point that limits the speed NOW (lowest approach speed, see the
+        header) within LOOKAHEAD_M, HEADING_CONE_DEG and the corridor along the current heading, or None."""
         m_lat, m_lon = meters_per_deg(lat)
         cell_m_lat = CELL_DEG * m_lat
         cell_m_lon = CELL_DEG * m_lon
@@ -92,32 +110,37 @@ class MapCurveLookup:
              cell_lon - span_lon, cell_lon + span_lon)
         ).fetchall()
 
-        best_speed = None
-        best_dist = None
+        best = None                                   # (approach speed now, point speed, distance)
+        h = math.radians(heading_deg)
         for plat, plon, speed in rows:
             dlat_m = (plat - lat) * m_lat
             dlon_m = (plon - lon) * m_lon
             dist = math.hypot(dlat_m, dlon_m)
-            if dist < 1.0 or dist > LOOKAHEAD_M:
+            if dist < 1.0 or dist > LOOKAHEAD_M or speed is None or speed < MIN_SPEED_MS:
                 continue
             brg = bearing_deg_to(lat, lon, plat, plon)
             if angle_diff_deg(brg, heading_deg) > HEADING_CONE_DEG:
                 continue
-            if best_speed is None or speed < best_speed:
-                best_speed = speed
-                best_dist = dist
+            along = dlon_m * math.sin(h) + dlat_m * math.cos(h)
+            side = abs(dlon_m * math.cos(h) - dlat_m * math.sin(h))
+            if along <= 0 or side > CORRIDOR_M + CORRIDOR_FRAC * along:
+                continue
+            v_now = approach_speed(speed, dist, v_ego)
+            if best is None or v_now < best[0]:
+                best = (v_now, speed, dist)
 
-        if best_speed is None:
+        if best is None:
             return None
-        return best_speed, best_dist
+        return best[1], best[2]
 
 
 def main():
     pm = messaging.PubMaster(['liveMapData'])
-    sm = messaging.SubMaster(['liveLocationKalman'])
+    sm = messaging.SubMaster(['liveLocationKalman', 'gpsLocationExternal'])
     lookup = MapCurveLookup()
 
     period = 1.0 / UPDATE_HZ
+    last_gps_t = -1e9
     while True:
         t0 = time.monotonic()
         sm.update(0)
@@ -126,18 +149,31 @@ def main():
         md = msg.liveMapData
         md.mapValid = False
         md.curvatureValid = False
+        md.speedLimitValid = False   # this process only knows curves; carcontroller reads speedLimit only when valid
 
         ll = sm['liveLocationKalman']
         has_fix = (sm.updated['liveLocationKalman']
                    and ll.positionGeodetic.valid
                    and ll.orientationNED.valid)
-
+        v_ego = 0.0
         if has_fix:
             lat, lon, _alt = ll.positionGeodetic.value
             _roll, _pitch, yaw = ll.orientationNED.value
             heading_deg = math.degrees(yaw) % 360.0
+            try: v_ego = math.sqrt(sum(x * x for x in ll.velocityECEF.value))
+            except Exception: pass
+        else:
+            # the car's own GPS (carcontroller publishes it with use_tesla_gps = True)
+            g = sm['gpsLocationExternal']
+            if sm.updated['gpsLocationExternal']:
+                last_gps_t = time.monotonic()
+            if (time.monotonic() - last_gps_t <= GPS_MAX_AGE_S and 0 < g.accuracy <= GPS_MAX_ACC_M
+                    and abs(g.latitude) > 0.1 and abs(g.longitude) > 0.1):
+                has_fix = True
+                lat, lon, heading_deg, v_ego = g.latitude, g.longitude, g.bearing % 360.0, g.speed
 
-            result = lookup.query_ahead(lat, lon, heading_deg)
+        if has_fix:
+            result = lookup.query_ahead(lat, lon, heading_deg, v_ego)
             if result is not None:
                 speed_ms, dist_m = result
                 speed_ms = max(speed_ms, MIN_SPEED_MS)

@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 from selfdrive.car.tesla import teslacan
+from selfdrive.car.tesla import pcc_curves  # curve approach speeds, accel profile, learned pedal map (see that file)
 from selfdrive.car.tesla.speed_utils.fleet_speed import FleetSpeed
 from selfdrive.controls.lib.longcontrol import LongControl, LongCtrlState
 from common.numpy_fast import clip, interp
@@ -16,7 +17,7 @@ from collections import OrderedDict
 from common.params import Params
 import json
 
-CURVE_AY_SCALE = 1.0  # CURVELIMIT: 1.0 = same lateral accel as the OP planner (1.85 m/s2 at 75mph, 2.6 at 25mph); lower = slows earlier
+# curve speed tuning (lateral acceleration, approach deceleration, braking authority) lives in pcc_curves.py
 _DT = 0.05    # 10Hz in our case, since we don't want to process more than once the same radarState message
 _DT_MPC = _DT
 
@@ -88,27 +89,23 @@ class PCCModes():
     return [mode.label for mode in cls._all_modes]
     
 
+PEDAL_MAP = None   # pcc_curves.PedalMap, set by PCCController; None = old fixed conversion
+PEDAL_MAP_OFF_FILE = '/data/pcc_pedalmap_off'   # touch to go back to the fixed accel / 3
+
 def tesla_compute_gb(accel, speed):
+  # PEDALMAP: positive accelerations use the learned acceleration-per-pedal for this speed (a Tesla's response to the
+  # pedal drops with speed); decelerations keep the old fixed conversion.
+  if accel > 0 and PEDAL_MAP is not None and not os.path.exists(PEDAL_MAP_OFF_FILE):
+    return float(accel) / PEDAL_MAP.gain(speed)
   return float(accel)  / 3.
 
   
-def max_v_in_mapped_curve_ms(map_data, pedal_set_speed_kph):
-  """Use HD map data to limit speed in sharper turns."""
-  if map_data and map_data.curvatureValid:
-    pedal_set_speed_ms = pedal_set_speed_kph * CV.KPH_TO_MS
-    # Max lateral acceleration, used to caclulate how much to slow down in turns
-    a_y_max = 1.85  # m/s^2
-    curvature = abs(map_data.curvature)
-    v_curvature_ms = math.sqrt(a_y_max / max(1e-4, curvature))
-    time_to_turn_s = max(0, map_data.distToTurn / max(pedal_set_speed_ms, 1.))
-    v_approaching_turn_ms = OrderedDict([
-      # seconds til turn, max allowed velocity
-      (0, pedal_set_speed_ms),
-      (8, v_curvature_ms)
-    ])
-    return _interp_map(time_to_turn_s, v_approaching_turn_ms)
-  else:
-    return None
+def max_v_in_mapped_curve_ms(curvature, dist_to_turn_m, v_ego):
+  """Use map data to limit speed in sharper turns.
+  MAPCURVE FIX: the old version interpolated the time axis the wrong way round - full set speed AT the turn and the
+  curve speed 8 s BEFORE it. Now: the fastest speed from which slowing at a comfortable rate still reaches the curve
+  speed at the turn (pcc_curves.map_curve_limit)."""
+  return pcc_curves.map_curve_limit(curvature, dist_to_turn_m, v_ego)
 
 
 
@@ -140,6 +137,12 @@ class PCCController():
     self._curve_poly = None
     self._curve_points = None
     self._curve_x = np.arange(192)
+    # MAPCURVE FIX: liveMapData comes 4x/s but update_pdl runs 20x/s; recv_one_or_none only saw it 1 cycle in 5, so the
+    # map limit flickered on and off. Keep the last one (curvature, distance, time) and use it until it is 2 s old.
+    self._map_curve = None
+    self._curve_warn_t = 0.
+    global PEDAL_MAP
+    self.pedal_map = PEDAL_MAP = pcc_curves.PedalMap('/data/params/pccPedalMap.json')
     self.lead_1 = None
     self.last_update_time = 0
     self.enable_pedal_cruise = False
@@ -307,6 +310,7 @@ class PCCController():
       self.fleet_speed.reset_averager()
       #save the pid parameters to params file
       self.save_pid(self.LoC.pid)
+      self.pedal_map.save()
     elif self.enable_pedal_cruise and not prev_enable_pedal_cruise:
       CS.UE.custom_alert_message(2, "PCC Enabled", 150)
       CS.cstm_btns.set_button_status(PCCModes.BUTTON_NAME, PCCState.ENABLED)
@@ -362,6 +366,9 @@ class PCCController():
     # Bring in the lead car distance from the radarState feed
     radSt = messaging.recv_one_or_none(self.radarState)
     mapd = messaging.recv_one_or_none(self.live_map_data)
+    if mapd is not None:
+      lmd = mapd.liveMapData
+      self._map_curve = (lmd.curvature, lmd.distToTurn, time.time()) if (lmd.mapValid and lmd.curvatureValid) else None
     if radSt is not None:
       self.lead_1 = radSt.radarState.leadOne
       if _is_present(self.lead_1):
@@ -379,7 +386,11 @@ class PCCController():
     accel_limits = [float(x) for x in calc_cruise_accel_limits(v_ego,following,True)]  # LIMITS: tesla tables
 
 
-    accel_limits[1] *= _accel_limit_multiplier(CS, self.lead_1)
+    if _is_present(self.lead_1):
+      accel_limits[1] *= _accel_limit_multiplier(CS, self.lead_1)
+    else:
+      # LINEAR: without a lead use a simple speed-dependent comfort limit (was planner table x 0.4: weak and uneven)
+      accel_limits[1] = pcc_curves.accel_max_no_lead(v_ego)
     accel_limits[0] = _decel_limit(accel_limits[0], CS.v_ego, self.lead_1, CS, self.pedal_speed_kph)
     jerk_limits = [min(-0.1, accel_limits[0]/2.), max(0.1, accel_limits[1]/2.)]  # TODO: make a separate lookup for jerk tuning
     #accel_limits = limit_accel_in_turns(v_ego, CS.angle_steers, accel_limits, CS.CP)  # SMOOTH
@@ -402,18 +413,31 @@ class PCCController():
 
       if self.enable_pedal_cruise and not self.accelerator_pedal_pressed:
         self.v_pid = self.calc_follow_speed_ms(CS,alca_enabled)
-
-        if mapd is not None:
-          v_curve = max_v_in_mapped_curve_ms(mapd.liveMapData, self.pedal_speed_kph)
-          if v_curve:
+        v_follow = self.v_pid
+        v_curve = 255.
+        if self._map_curve is not None and time.time() - self._map_curve[2] < 2.:
+          curv, dist, t_map = self._map_curve
+          dist = max(0., dist - CS.v_ego * (time.time() - t_map))   # we kept driving since the message
+          v_map = max_v_in_mapped_curve_ms(curv, dist, CS.v_ego)
+          if v_map:
             if os.path.exists('/data/mapcurve_debug'):  # touch this file to enable, rm to disable
-              print('MAPCURVE: v_pid_before=%.1f v_curve=%.1f dist=%.0f applied=%s' %
-                    (self.v_pid, v_curve, mapd.liveMapData.distToTurn, v_curve < self.v_pid))
-            self.v_pid = min(self.v_pid, v_curve)
+              print('MAPCURVE: v_pid_before=%.1f v_curve=%.1f dist=%.0f applied=%s' % (self.v_pid, v_map, dist, v_map < self.v_pid))
+            v_curve = min(v_curve, v_map)
+        # CURVELIMIT: slow down for curves using the camera model path
+        v_curve = min(v_curve, self._curve_speed(CS))
+        self.v_pid = min(self.v_pid, v_curve)
         # take fleet speed into consideration
         self.v_pid = min(self.v_pid, self.fleet_speed.adjust(CS, self.pedal_speed_kph * CV.KPH_TO_MS, frame))
-        # CURVELIMIT: slow down for curves using the camera model path
-        self.v_pid = min(self.v_pid, self._curve_speed(CS))
+        # CURVEBRAKE: when a curve is what limits us and we are above its approach speed, allow real deceleration
+        # (without a lead the limit was ~0.5 m/s2 - far too weak to get down to a curve speed in time)
+        if v_curve < v_follow and CS.v_ego > v_curve + 0.3:
+          accel_limits[0] = min(accel_limits[0], -pcc_curves.CURVE_BRAKE)
+          jerk_limits[0] = min(jerk_limits[0], accel_limits[0] / 2.)
+        # CURVEWARN: the pedal can only use regen (~1.6-2 m/s2). Far above the approach speed, regen alone won't get
+        # down in time - only the driver's brake can. Say so on the cluster (at most every 3 s).
+        if CS.v_ego > v_curve + pcc_curves.CURVE_WARN_OVER and time.time() - self._curve_warn_t > 3.:
+          self._curve_warn_t = time.time()
+          CS.UE.custom_alert_message(4, "Sharp curve - brake!", 150, 4)
         # cruise speed can't be negative even if user is distracted
         self.v_pid = max(self.v_pid, 0.)
 
@@ -501,6 +525,15 @@ class PCCController():
     tesla_pedal = clip(tesla_pedal, 0., MAX_PEDAL_VALUE) if self.enable_pedal_cruise else 0.
     enable_pedal = 1. if self.enable_pedal_cruise else 0.
     
+    # PEDALMAP: learn acceleration per unit of pedal while accelerating on our own (no brake, no human pedal, no close
+    # lead, not in a tight turn); the commanded pedal is matched with the measured acceleration ~0.3 s later
+    if PCCModes.is_selected(FollowMode(), CS.cstm_btns):
+      pedal_frac = (tesla_pedal - pedal_zero) / max(1., MAX_PEDAL_VALUE - pedal_zero) if tesla_pedal > pedal_zero else 0.
+      lead_far = (not _is_present(self.lead_1)) or self.lead_1.dRel > 2. * _safe_distance_m(CS.v_ego, CS)
+      learn_ok = (self.enable_pedal_cruise and enable_pedal and not CS.brake_pressed and not self.accelerator_pedal_pressed
+                  and lead_far and abs(CS.angle_steers) < 15. and output_gb > 0.)
+      self.pedal_map.update(pedal_frac, CS.a_ego, CS.v_ego, learn_ok)
+
     self.torqueLevel_last = CS.torqueLevel
     self.prev_tesla_pedal = tesla_pedal * enable_pedal
     self.prev_tesla_accel = apply_accel * enable_pedal
@@ -511,16 +544,18 @@ class PCCController():
 
   # function to calculate the cruise speed based on a safe follow distance
   def calc_follow_speed_ms(self, CS, alca_enabled):
-    # Make sure we were able to populate lead_1.
+    # NOLEADFIX: before the first radarState this returned (None, None, None), which then went into min() with numbers
+    # and raised. No radarState yet = no lead.
     if self.lead_1 is None:
-      return None, None, None
-    # dRel is in meters.
-    lead_dist_m = self.lead_1.dRel
-    if not CS.useTeslaRadar:
-      lead_dist_m = _visual_radar_adjusted_dist_m(lead_dist_m, CS)
-    # Grab the relative speed.
-    v_rel = self.lead_1.vRel if abs(self.lead_1.vRel) > .5 else 0
-    a_rel = self.lead_1.aRel if abs(self.lead_1.aRel) > .5 else 0
+      lead_dist_m = 0.; v_rel = a_rel = 0.
+    else:
+      # dRel is in meters.
+      lead_dist_m = self.lead_1.dRel
+      if not CS.useTeslaRadar:
+        lead_dist_m = _visual_radar_adjusted_dist_m(lead_dist_m, CS)
+      # Grab the relative speed.
+      v_rel = self.lead_1.vRel if abs(self.lead_1.vRel) > .5 else 0
+      a_rel = self.lead_1.aRel if abs(self.lead_1.aRel) > .5 else 0
     rel_speed_kph = (v_rel + 0 * CS.apFollowTimeInS * a_rel) * CV.MS_TO_KPH
     # v_ego is in m/s, so safe_distance is in meters.
     safe_dist_m = _safe_distance_m(CS.v_ego,CS)
@@ -602,8 +637,11 @@ class PCCController():
     # Enforce limits on speed
     new_speed_kph = clip(new_speed_kph, MIN_PCC_V_KPH, MAX_PCC_V_KPH)
     new_speed_kph = clip(new_speed_kph, MIN_PCC_V_KPH, self.pedal_speed_kph)
-    if CS.turn_signal_blinking or (abs(CS.angle_steers) > ANGLE_STOP_ACCEL) or alca_enabled:
-      # Don't accelerate during manual turns, curves or ALCA.
+    # LINEAR: don't accelerate during manual turns, ALCA, or when the steering already means a lot of lateral
+    # acceleration. Was any steering angle above 10 deg, which froze the speed in every gentle bend (no slowing either:
+    # curve limits below handle slowing).
+    a_lat = pcc_curves.lateral_accel(CS.v_ego, CS.angle_steers, CS.CP.steerRatio, CS.CP.wheelbase)
+    if CS.turn_signal_blinking or a_lat > pcc_curves.ACCEL_LAT_BLOCK or alca_enabled:
       new_speed_kph = min(new_speed_kph, self.last_speed_kph)
     #BB Last safety check. Zero if below MIN_SAFE_DIST_M
     if (MIN_SAFE_DIST_M > lead_dist_m > 0) and (rel_speed_kph < 3.):
@@ -630,16 +668,10 @@ class PCCController():
       pts = self._curve_points
       if pts is None:
         return 255.
-      x = self._curve_x[:len(pts)]
-      y_p = np.gradient(pts, x)
-      y_pp = np.gradient(y_p, x)
-      curv = y_pp / (1. + y_p**2)**1.5
-      curv = curv[3:]              # first few metres are a noisy array edge for np.gradient; skip them
-      if curv.size == 0:
-        return 255.
-      a_y_max = (2.975 - CS.v_ego * 0.0375) * CURVE_AY_SCALE
-      v_curvature = np.sqrt(a_y_max / np.clip(np.abs(curv), 1e-4, None))
-      return max(20. * CV.MPH_TO_MS, float(np.min(v_curvature)))
+      # CURVEPLAN: smoothed path, and each point's curve speed turned into an approach speed for its distance
+      # (pcc_curves.vision_curve_limit) instead of the single tightest point anywhere ahead applied right away
+      v = pcc_curves.vision_curve_limit(np, pts, CS.v_ego)
+      return 255. if v is None else v
     except Exception:
       return 255.
 
