@@ -54,10 +54,15 @@ def _extras(a, b):
 
 # history row = [age_s] + SIGNALS (missing signal -> 0, like INFRA3DRC's fillna(0)). The labels file stores the
 # field names next to the rows ('hf'), so rows recorded with an older radarweb still line up.
-SIGNALS = ['d', 'y', 'vr', 'gs', 'ls', 'la', 'len', 'dz', 'pe', 'po', 'pno', 'pc', 'dxs', 'vxs', 'dys']
+# v2 adds, after Ham et al., Sensors 2025 (object-level radar classification): vy = sideways ground speed (radarweb's
+# rotation-compensated estimate), ga = ground acceleration (radar's relative + your own), axs = the tracker's
+# acceleration uncertainty - plus 2-D ground speed and correlations, derived below.
+SIGNALS = ['d', 'y', 'vr', 'gs', 'ls', 'la', 'len', 'dz', 'pe', 'po', 'pno', 'pc', 'dxs', 'vxs', 'dys', 'axs', 'vy', 'ga']
+FEATS_VERSION = 2
 HIST_FIELDS = ['age'] + SIGNALS
 STATS = ('mean', 'std', 'min', 'max', 'median', 'span')
-FEATS = ['v_ego', 'age', 'n', 'abs_y', 'abs_gs', 'y_rate', 'd_rate_err', 'meas'] + \
+FEATS = ['v_ego', 'age', 'n', 'abs_y', 'abs_gs', 'y_rate', 'd_rate_err', 'meas',
+         'gxy_mean', 'gxy_std', 'corr_d_gs', 'corr_y_vy', 'corr_gs_vy'] + \
         ['%s_now' % s for s in SIGNALS] + ['%s_%s' % (s, st) for s in SIGNALS for st in STATS] + \
         ['rc_' + c for c in RADAR_CLASSES] + ['ms_%d' % i for i in range(4)]
 
@@ -66,6 +71,12 @@ def _stats(a):
     n = len(a); m = sum(a) / n; srt = sorted(a)
     med = srt[n // 2] if n % 2 else (srt[n // 2 - 1] + srt[n // 2]) / 2
     return {'mean': m, 'std': math.sqrt(sum((x - m) ** 2 for x in a) / n), 'min': srt[0], 'max': srt[-1], 'median': med, 'span': srt[-1] - srt[0]}
+def _corr(a, b):
+    n = len(a)
+    if n < 3: return 0.0
+    ma = sum(a) / n; mb = sum(b) / n
+    va = sum((x - ma) ** 2 for x in a); vb = sum((x - mb) ** 2 for x in b)
+    return sum((x - ma) * (y - mb) for x, y in zip(a, b)) / math.sqrt(va * vb) if va > 1e-9 and vb > 1e-9 else 0.0
 def _slope(ts, xs):
     if len(ts) < 3: return 0.0
     mt = sum(ts) / len(ts); mx = sum(xs) / len(xs); den = sum((t - mt) ** 2 for t in ts)
@@ -87,11 +98,14 @@ def features(o, hist=None, v_ego=None, hist_fields=None):
     last = dict((s, col(s)[-1]) for s in SIGNALS)
     if v_ego is None: v_ego = float(o.get('v', last['gs'] - last['vr']))
     rc = o.get('radar_c', o.get('c', 'unknown')); mst = int(o.get('mst', -1) if o.get('mst') is not None else -1)
-    ds, ys = col('d'), col('y')
-    f = {'v_ego': v_ego, 'age': -ts[0], 'n': float(len(hist)), 'abs_y': abs(last['y']), 'abs_gs': abs(last['gs']),
+    ds, ys = col('d'), col('y'); gss, vys = col('gs'), col('vy')
+    gxy = [math.sqrt(a * a + b * b) for a, b in zip(gss, vys)]; gm = sum(gxy) / len(gxy)
+    f = {'gxy_mean': gm, 'gxy_std': math.sqrt(sum((x - gm) ** 2 for x in gxy) / len(gxy)),       # 2-D speed over ground
+         'corr_d_gs': _corr(ds, gss), 'corr_y_vy': _corr(ys, vys), 'corr_gs_vy': _corr(gss, vys)}
+    f.update({'v_ego': v_ego, 'age': -ts[0], 'n': float(len(hist)), 'abs_y': abs(last['y']), 'abs_gs': abs(last['gs']),
          'y_rate': _slope(ts, ys), 'meas': float(o.get('meas', 0) or 0),
          # range rate the radar reports vs how the distance actually changed: real objects agree, multipath ghosts often don't
-         'd_rate_err': abs(_slope(ts, ds) - sum(col('vr')) / len(hist)) if len(hist) >= 3 else 0.0}
+         'd_rate_err': abs(_slope(ts, ds) - sum(col('vr')) / len(hist)) if len(hist) >= 3 else 0.0})
     for s in SIGNALS:
         f[s + '_now'] = last[s]
         for st, v in _stats(col(s)).items(): f['%s_%s' % (s, st)] = v
@@ -152,6 +166,10 @@ class TrackHist:
         if not h or now - h[-1][0] > 0.5: return None
         if not rnd: return [[r[0] - now] + r[1:] for r in h]
         return [[round(r[0] - now, 2)] + [round(x, 3) for x in r[1:]] for r in h]
+    def set_last(self, k, field, value):
+        """fill in a value computed after add() (radarweb's sideways ground speed needs all objects of the tick first)"""
+        h = self.h.get(k)
+        if h: h[-1][HIST_FIELDS.index(field)] = float(value or 0.0)
     def drop_missing(self, alive):
         for k in [k for k in self.h if k not in alive]: del self.h[k]
 
@@ -227,6 +245,7 @@ class Model:
         self.min_p = float(m.get('min_p', 0.6))
     def proba(self, x):
         m = self.m
+        if m['kind'] == 'mlp': return _mlp_proba(m, x)
         if m['kind'] == 'logreg':
             z = [(xi - mu) / sc for xi, mu, sc in zip(x, m['mean'], m['scale'])]
             s = [b + sum(w * zi for w, zi in zip(row, z)) for row, b in zip(m['coef'], m['intercept'])]
@@ -347,52 +366,197 @@ def load_labels(paths):
     sw = [1.0 if r.get('auto') else MANUAL_WEIGHT for r in rows]
     return X, y, classes, groups, shown, sw
 
-def cv_score(X, y, K, groups, folds=5, sw=None, **kw):
-    """macro-F1 over group k-fold: every prediction is made by a forest that never saw that drive/track"""
-    ug = sorted(set(groups), key=str); folds = min(folds, len(ug)); pred = [0] * len(y)
-    if folds < 2: return None
+def _folds(groups, folds=5):
+    """group k-fold: list of (train idx, test idx); one drive (or track) never on both sides"""
+    ug = sorted(set(groups), key=str); folds = min(folds, len(ug))
+    if folds < 2: return []
     order = list(ug); random.Random(1).shuffle(order); fold_of = dict((g, i % folds) for i, g in enumerate(order))
-    for fo in range(folds):
-        tr = [i for i, g in enumerate(groups) if fold_of[g] != fo]; te = [i for i, g in enumerate(groups) if fold_of[g] == fo]
+    return [([i for i, g in enumerate(groups) if fold_of[g] != fo], [i for i, g in enumerate(groups) if fold_of[g] == fo]) for fo in range(folds)]
+
+def cv_score(X, y, K, groups, folds=5, sw=None, **kw):
+    """macro-F1 of the plain-python extra-trees over group k-fold (fallback trainer when numpy is missing)"""
+    pred = [0] * len(y); fl = _folds(groups, folds)
+    if not fl: return None
+    for tr, te in fl:
         if len(set(y[i] for i in tr)) < 2: continue
         trees = train_forest(X, y, K, tr, sw=sw, **kw)
         for i in te: pred[i] = _predict(trees, X[i])
     return macro_f1(y, pred, K)
 
+def metrics(true, pred, classes):
+    """the numbers INFRA3DRC reports (accuracy, balanced accuracy, macro-F1, weighted-F1) + per-class F1 + confusion matrix"""
+    K = len(classes); cm = [[0] * K for _ in range(K)]
+    for a, b in zip(true, pred): cm[a][b] += 1
+    f1, rec, sup = [], [], []
+    for c in range(K):
+        tp = cm[c][c]; fn = sum(cm[c]) - tp; fp = sum(cm[r][c] for r in range(K)) - tp; n = sum(cm[c])
+        f1.append(2.0 * tp / (2 * tp + fp + fn) if tp + fp + fn else 0.0); rec.append(tp / float(n) if n else 0.0); sup.append(n)
+    tot = float(sum(sup)) or 1.0; present = [c for c in range(K) if sup[c]]
+    return {'accuracy': round(sum(cm[c][c] for c in range(K)) / tot, 3), 'balanced_accuracy': round(sum(rec[c] for c in present) / max(1, len(present)), 3),
+            'macro_f1': round(sum(f1[c] for c in present) / max(1, len(present)), 3), 'weighted_f1': round(sum(f1[c] * sup[c] for c in range(K)) / tot, 3),
+            'f1': dict((classes[c], round(f1[c], 3)) for c in range(K)), 'confusion': cm}
+
+
+# MODEL V2 TRAINERS (numpy, which openpilot ships on the EON; inference stays plain python in Model.proba)
+#   rf : Random Forest as in INFRA3DRC-Radar-Classification - bootstrap sample per tree, best split over sqrt(features)
+#        candidates per node (gini), balanced class weights. 100 trees: their 500 would cost too much CPU per object.
+#   mlp: the 2 hidden layers x 10 ReLU network of Ham et al. (Sensors 2025, grid-search model): softmax output,
+#        class-weighted cross-entropy, RMSprop lr 0.01, batch 64, up to 50 epochs, early stopping on held-out drives.
+#        Class weights instead of their SMOTE (no synthetic samples).
+RF_TREES, RF_CV_TREES, RF_DEPTH, RF_LEAF = 100, 40, 10, 2
+
+def _rf_tree(np, X, Y, w, ids, rs, max_depth, min_leaf, n_feat):
+    L, R, F, T, V = [], [], [], [], []
+    nf = X.shape[1]
+    def leaf(W):
+        t = W.sum() or 1.0; L.append(-1); R.append(-1); F.append(-2); T.append(0.0); V.append([round(float(v) / t, 4) for v in W])
+        return len(L) - 1
+    def grow(ids, depth):
+        Yw = Y[ids] * w[ids, None]; W = Yw.sum(0); tot = W.sum(); n = len(ids)
+        if depth >= max_depth or n < 2 * min_leaf or W.max() >= tot - 1e-9: return leaf(W)
+        best = None; pos = np.arange(1, n)
+        okpos = (pos >= min_leaf) & (pos <= n - min_leaf)
+        for f in rs.choice(nf, n_feat, replace=False):
+            xv = X[ids, f]; o = np.argsort(xv, kind='mergesort'); xs = xv[o]
+            cl = np.cumsum(Yw[o], axis=0)[:-1]; cr = W - cl
+            lt = cl.sum(1); rt = cr.sum(1)
+            ok = okpos & (xs[1:] > xs[:-1])
+            if not ok.any(): continue
+            imp = (lt - (cl * cl).sum(1) / np.maximum(lt, 1e-12)) + (rt - (cr * cr).sum(1) / np.maximum(rt, 1e-12))
+            imp[~ok] = np.inf; j = int(np.argmin(imp))
+            if best is None or imp[j] < best[0]: best = (imp[j], int(f), float((xs[j] + xs[j + 1]) / 2.0))
+        if best is None: return leaf(W)
+        _, f, thr = best; me = len(L); L.append(0); R.append(0); F.append(f); T.append(round(thr, 5)); V.append([])
+        m = X[ids, f] <= thr
+        L[me] = grow(ids[m], depth + 1); R[me] = grow(ids[~m], depth + 1)
+        return me
+    grow(ids, 0)
+    return {'l': L, 'r': R, 'f': F, 't': T, 'v': V}
+
+def train_rf(np, X, y, K, idx, sw, n_trees=RF_TREES, seed=0):
+    X = np.asarray(X, dtype=float); y = np.asarray(y); idx = np.asarray(idx); swa = np.asarray(sw, dtype=float)
+    Y = np.zeros((len(y), K)); Y[np.arange(len(y)), y] = 1.0
+    n_c = np.array([swa[idx][y[idx] == c].sum() for c in range(K)])
+    w = swa * np.where(n_c[y] > 0, n_c.sum() / (K * np.maximum(n_c[y], 1e-12)), 0.0)        # class_weight='balanced' x row weight
+    rs = np.random.RandomState(seed); n_feat = max(1, int(math.sqrt(X.shape[1])))
+    return [_rf_tree(np, X, Y, w, idx[rs.randint(0, len(idx), len(idx))], rs, RF_DEPTH, RF_LEAF, n_feat) for _ in range(n_trees)]
+
+def train_mlp(np, X, y, K, idx, sw, groups, hidden=(10, 10), lr=0.01, epochs=50, batch=64, seed=0):
+    X = np.asarray(X, dtype=float); y = np.asarray(y); swa = np.asarray(sw, dtype=float); idx = list(idx)
+    gl = sorted(set(groups[i] for i in idx), key=str); random.Random(seed).shuffle(gl)
+    vg = set(gl[:max(1, len(gl) // 7)]) if len(gl) >= 4 else set()                       # ~15% of drives/tracks held out for early stopping
+    tr = np.array([i for i in idx if groups[i] not in vg]); va = np.array([i for i in idx if groups[i] in vg])
+    mu = X[tr].mean(0); sd = X[tr].std(0); sd[sd < 1e-9] = 1.0
+    Z = (X - mu) / sd
+    n_c = np.array([swa[tr][y[tr] == c].sum() for c in range(K)])
+    cw = np.where(n_c > 0, n_c.sum() / (K * np.maximum(n_c, 1e-12)), 0.0); w = swa * cw[y]
+    rs = np.random.RandomState(seed); sizes = [X.shape[1]] + list(hidden) + [K]
+    Ws = [rs.randn(a, b) * math.sqrt(2.0 / a) for a, b in zip(sizes, sizes[1:])]; bs = [np.zeros(b) for b in sizes[1:]]
+    cache = [np.zeros_like(p) for p in Ws + bs]
+    def forward(A):
+        acts = [A]
+        for i, (W_, b_) in enumerate(zip(Ws, bs)):
+            A = A.dot(W_) + b_
+            if i < len(Ws) - 1: A = np.maximum(A, 0.0)
+            acts.append(A)
+        e = np.exp(A - A.max(1, keepdims=True)); return acts, e / e.sum(1, keepdims=True)
+    def wloss(ii):
+        if not len(ii): return 0.0
+        _, P = forward(Z[ii]); return float(-(w[ii] * np.log(P[np.arange(len(ii)), y[ii]] + 1e-12)).sum() / w[ii].sum())
+    best = (np.inf, None); bad = 0
+    for ep in range(epochs):
+        perm = rs.permutation(tr)
+        for s0 in range(0, len(perm), batch):
+            bi = perm[s0:s0 + batch]; acts, P = forward(Z[bi])
+            G = P.copy(); G[np.arange(len(bi)), y[bi]] -= 1.0; G *= (w[bi] / w[bi].sum())[:, None]
+            grads_W, grads_b = [None] * len(Ws), [None] * len(Ws)
+            for i in range(len(Ws) - 1, -1, -1):
+                grads_W[i] = acts[i].T.dot(G) + 1e-4 * Ws[i]; grads_b[i] = G.sum(0)
+                if i: G = G.dot(Ws[i].T) * (acts[i] > 0)
+            for j, (p_, g_) in enumerate(zip(Ws + bs, grads_W + grads_b)):          # RMSprop
+                cache[j] = 0.9 * cache[j] + 0.1 * g_ * g_; p_ -= lr * g_ / (np.sqrt(cache[j]) + 1e-7)
+        vl = wloss(va) if len(va) else wloss(tr)
+        if vl < best[0] - 1e-4: best = (vl, ([W_.copy() for W_ in Ws], [b_.copy() for b_ in bs])); bad = 0
+        else:
+            bad += 1
+            if bad >= 5: break                                                         # early stopping, patience 5
+    Wb, bb = best[1]
+    return {'mean': mu.tolist(), 'scale': sd.tolist(), 'layers': [[W_.tolist(), b_.tolist()] for W_, b_ in zip(Wb, bb)]}
+
+def _mlp_proba(m, x):
+    h = [(xi - mu) / sc for xi, mu, sc in zip(x, m['mean'], m['scale'])]
+    for li, (W_, b_) in enumerate(m['layers']):
+        h = [b_[j] + sum(h[i] * W_[i][j] for i in range(len(h))) for j in range(len(b_))]
+        if li < len(m['layers']) - 1: h = [v if v > 0 else 0.0 for v in h]
+    mx = max(h); e = [math.exp(v - mx) for v in h]; t = sum(e)
+    return [v / t for v in e]
+
+def _forest_pred(trees, x, K):
+    p = [0.0] * K
+    for tr in trees:
+        i = 0
+        while tr['l'][i] != -1: i = tr['l'][i] if x[tr['f'][i]] <= tr['t'][i] else tr['r'][i]
+        for j, v in enumerate(tr['v'][i]): p[j] += v
+    return max(range(K), key=p.__getitem__)
+
 def autotrain(labels, model_path, min_p=0.6, log=print):
-    st = {'t': time.time(), 'installed': False}
+    st = {'t': time.time(), 'installed': False, 'feats_version': FEATS_VERSION}
     try:
         X, y, classes, groups, shown, sw = load_labels(labels)
     except (ValueError, IOError) as e:
         st['msg'] = 'not trained: %s' % e; return st
-    K = len(classes); st['rows'] = len(y); t0 = time.time()
-    base = macro_f1(y, shown, K); st['baseline_f1'] = round(base, 3)
-    best = None
-    for depth in (5, 8):
-        f1 = cv_score(X, y, K, groups, sw=sw, max_depth=depth)
-        log('depth %d: cross-validated macro-F1 %s (no model: %.3f)' % (depth, f1, base))
-        if f1 is not None and (best is None or f1 > best[0]): best = (f1, depth)
-    if best is None:
+    K = len(classes); st['rows'] = len(y); st['auto_rows'] = sum(1 for w in sw if w == 1.0); t0 = time.time()
+    base = metrics(y, [c if c >= 0 else (y[i] + 1) % K for i, c in enumerate(shown)], classes); st['baseline'] = base
+    st['baseline_f1'] = base['macro_f1']
+    fl = _folds(groups)
+    if not fl:
         st['msg'] = 'not trained: not enough separate drives/tracks to cross-validate'; return st
-    f1, depth = best; st['cv_f1'] = round(f1, 3)
+    try: import numpy as np
+    except ImportError: np = None
+    cands = {}
+    if np is not None:
+        for name in ('rf', 'mlp'):
+            pred = [0] * len(y)
+            for k_, (tr, te) in enumerate(fl):
+                if len(set(y[i] for i in tr)) < 2: continue
+                if name == 'rf':
+                    trees = train_rf(np, X, y, K, tr, sw, n_trees=RF_CV_TREES, seed=k_)
+                    for i in te: pred[i] = _forest_pred(trees, X[i], K)
+                else:
+                    m = train_mlp(np, X, y, K, tr, sw, groups, seed=k_)
+                    for i in te: p = _mlp_proba(m, X[i]); pred[i] = p.index(max(p))
+            cands[name] = metrics(y, pred, classes)
+            log('%s: cross-validated %s (no model: macro-F1 %.3f)' % (name, {k: v for k, v in cands[name].items() if k not in ('f1', 'confusion')}, base['macro_f1']))
+    else:                                                                              # no numpy: plain-python extra-trees
+        for depth in (5, 8):
+            f1 = cv_score(X, y, K, groups, sw=sw, max_depth=depth)
+            if f1 is not None: cands['extratrees%d' % depth] = {'macro_f1': round(f1, 3)}
+    st['candidates'] = cands
+    if not cands:
+        st['msg'] = 'not trained: cross-validation failed'; return st
+    name = max(cands, key=lambda k: cands[k]['macro_f1']); f1 = cands[name]['macro_f1']; st['cv_f1'] = f1; st['chosen'] = name
     old = None
-    try: old = json.load(open(model_path)).get('cv_macro_f1')
+    try:
+        om = json.load(open(model_path))
+        if om.get('feats') == FEATS: old = om.get('cv_macro_f1')                         # a model on older features doesn't count
     except Exception: pass
-    if f1 < base + AUTO_MARGIN:
-        st['msg'] = 'kept current: new model %.2f vs no model %.2f' % (f1, base); return st
+    if f1 < base['macro_f1'] + AUTO_MARGIN:
+        st['msg'] = 'kept current: best (%s) %.2f vs no model %.2f' % (name, f1, base['macro_f1']); return st
     if old is not None and f1 < old - 0.02:
-        st['msg'] = 'kept current: new model %.2f vs installed %.2f' % (f1, old); return st
-    trees = train_forest(X, y, K, max_depth=depth, sw=sw)
-    out = {'kind': 'forest', 'classes': classes, 'trees': trees, 'feats': FEATS, 'min_p': min_p, 'cv_macro_f1': round(f1, 3),
-           'baseline_f1': round(base, 3), 'rows': len(y), 'algo': 'radarml-extratrees-depth%d' % depth, 'trained': time.time()}
+        st['msg'] = 'kept current: best (%s) %.2f vs installed %.2f' % (name, f1, old); return st
+    allidx = list(range(len(y)))
+    if name == 'rf': out = {'kind': 'forest', 'trees': train_rf(np, X, y, K, allidx, sw), 'algo': 'random-forest-%dtrees' % RF_TREES}
+    elif name == 'mlp': out = dict(train_mlp(np, X, y, K, allidx, sw, groups), kind='mlp', algo='mlp-2x10')
+    else: out = {'kind': 'forest', 'trees': train_forest(X, y, K, max_depth=int(name[-1]), sw=sw), 'algo': 'radarml-' + name}
+    out.update({'classes': classes, 'feats': FEATS, 'feats_version': FEATS_VERSION, 'min_p': min_p, 'cv_macro_f1': f1,
+                'baseline_f1': base['macro_f1'], 'rows': len(y), 'trained': time.time(), 'metrics': cands.get(name), 'candidates':
+                dict((k, {kk: v[kk] for kk in v if kk != 'confusion'}) for k, v in cands.items()), 'baseline': base})
     tmp = model_path + '.tmp'
     json.dump(out, open(tmp, 'w'), separators=(',', ':'))
     if os.path.exists(model_path): os.replace(model_path, model_path + '.prev')
     os.replace(tmp, model_path)
-    st.update(installed=True, msg='new model: %.2f vs no model %.2f (%d labels, %.0f s)' % (f1, base, len(y), time.time() - t0))
-    st['auto_rows'] = sum(1 for w in sw if w == 1.0)
+    st.update(installed=True, msg='new model (%s): %.2f vs no model %.2f (%d labels, %.0f s)' % (out['algo'], f1, base['macro_f1'], len(y), time.time() - t0))
     return st
-
 
 if __name__ == '__main__':
     import sys

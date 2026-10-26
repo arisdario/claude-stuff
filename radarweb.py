@@ -158,8 +158,10 @@ def refine_class(k, now, cname, pc, d, y, gs):
 # (nobody walks at 14 km/h, no bicycle at 36 km/h) are applied again after it. No model file = old behaviour.
 MODEL_FILE = os.environ.get('RADAR_MODEL', '/data/radar_model.json')
 TRK = radarml.TrackHist()
+MODEL_STALE = [False]   # installed model predates the current features: retrain at the next stop instead of waiting for new labels
 try: MODEL = radarml.Model(MODEL_FILE) if os.path.exists(MODEL_FILE) else None
-except Exception as e: MODEL = None; print('radar model not loaded:', e)
+except Exception as e:
+    MODEL = None; MODEL_STALE[0] = 'other features' in str(e); print('radar model not loaded:', e)
 MLLAST = {}     # slot -> last (label, probability): the model runs once per second per object (staggered), not 10x
 def ml_class(k, now, o, cname, inf, hist=None, run=True):
     if MODEL is None: return cname, inf, None
@@ -220,8 +222,9 @@ def ml_summary():
     m = MODEL.m if MODEL is not None else None
     model = None
     if m:
-        model = {k: m.get(k) for k in ('algo', 'rows', 'cv_macro_f1', 'baseline_f1', 'trained', 'min_p', 'classes')}
+        model = {k: m.get(k) for k in ('algo', 'rows', 'cv_macro_f1', 'baseline_f1', 'trained', 'min_p', 'classes', 'metrics', 'candidates', 'baseline', 'feats_version', 'kind')}
         model['trees'] = len(m.get('trees', [])); model['prev'] = os.path.exists(MODEL_FILE + '.prev')
+        if m.get('kind') == 'mlp': model['layers'] = [len(b_) for _, b_ in m['layers']]
     try: last = json.load(open(MODEL_FILE + '.status.json'))
     except Exception: last = None
     with LOCK: objs = [{k: o.get(k) for k in ('s', 'd', 'y', 'gs', 'c', 'rc', 'pc', 'ml', 'inf')} for o in STATE['o']]
@@ -271,8 +274,20 @@ AUTO = {'proc': None, 'park': 0.0, 'next': 0.0, 'size': -1, 'rows': 0, 'trained_
 try:
     _st = json.load(open(MODEL_FILE + '.status.json')); AUTO['trained_rows'] = _st.get('labels', 0); AUTO['msg'] = _st.get('msg', '')
 except Exception: pass
+if MODEL_STALE[0]: AUTO['trained_rows'] = -10 ** 6; AUTO['msg'] = 'model v2: the installed model uses older features - retraining at the next stop'
 try: AUTO['mtime'] = os.path.getmtime(MODEL_FILE)
 except OSError: pass
+def start_training(manual):
+    """run radarml --autotrain in the background at the lowest CPU priority (automatic when parked, or "Train now" on /ml)"""
+    if AUTO['proc'] is not None: return False
+    import subprocess
+    AUTO['prev_rows'] = AUTO['trained_rows']; AUTO['trained_rows'] = max(AUTO['rows'], 0); AUTO['manual'] = manual
+    AUTO['msg'] = 'training on %d labels%s…' % (AUTO['rows'], ' (started by you)' if manual else '')
+    AUTO['proc'] = subprocess.Popen(['nice', '-n', '19', sys.executable, radarml.__file__, '--autotrain', OBJLABEL_FILE + ',' + AUTOLABEL_FILE, MODEL_FILE],
+                                    stdout=subprocess.DEVNULL, stderr=open('/tmp/radar_autotrain.log', 'w'))
+    STATE['ml'] = {'msg': AUTO['msg'], 'labels': AUTO['rows'], 'training': True, 'auto': dict(AL.counts) if AL else None}   # show it right away
+    return True
+
 def autotrain_tick(now):
     global MODEL
     try:                                   # pick up a new model file (autotrain, or one copied over from the laptop)
@@ -280,12 +295,15 @@ def autotrain_tick(now):
         if mt != AUTO['mtime']:
             AUTO['mtime'] = mt; MODEL = radarml.Model(MODEL_FILE); print('radar model loaded:', MODEL_FILE)
     except OSError: pass
-    except Exception as e: print('radar model not loaded:', e)
+    except Exception as e:
+        print('radar model not loaded:', e)
+        if 'other features' in str(e): MODEL = None; AUTO['trained_rows'] = -10 ** 6
     parked = STATE['v'] < 0.3 and not STATE['op']
+    in_p = 'park' in str(MAP.get('car', {}).get('gearShifter', '')).lower()
     p = AUTO['proc']
     if p is not None:
         if p.poll() is None:
-            if not parked:
+            if not parked and not AUTO.get('manual'):      # a training you started with "Train now" is left to finish
                 p.kill(); p.wait(); AUTO['proc'] = None; AUTO['msg'] = 'training stopped (car moving), retries when parked'
                 AUTO['trained_rows'] = AUTO['prev_rows']; AUTO['park'] = 0.0
         else:
@@ -301,11 +319,9 @@ def autotrain_tick(now):
         sz = sum(os.path.getsize(fn) for fn in (OBJLABEL_FILE, AUTOLABEL_FILE) if os.path.exists(fn))
         if sz != AUTO['size']: AUTO['size'] = sz; AUTO['rows'] = _label_lines()
     due = AUTO_NEW > 0 and AUTO['rows'] >= radarml.AUTO_MIN_ROWS and AUTO['rows'] - AUTO['trained_rows'] >= AUTO_NEW
-    if due and AUTO['park'] and now - AUTO['park'] > 60:
-        import subprocess
-        AUTO['prev_rows'] = AUTO['trained_rows']; AUTO['trained_rows'] = AUTO['rows']; AUTO['msg'] = 'training on %d labels…' % AUTO['rows']
-        AUTO['proc'] = subprocess.Popen(['nice', '-n', '19', sys.executable, radarml.__file__, '--autotrain', OBJLABEL_FILE + ',' + AUTOLABEL_FILE, MODEL_FILE],
-                                        stdout=subprocess.DEVNULL, stderr=open('/tmp/radar_autotrain.log', 'w'))
+    # really parked: gear in P for 30 s, or stopped 2 min (model v2 training takes longer than a red light)
+    if due and AUTO['park'] and (in_p and now - AUTO['park'] > 30 or now - AUTO['park'] > 120):
+        start_training(False)
     elif not AUTO['msg'] or AUTO['msg'].startswith('waiting'):
         AUTO['msg'] = 'waiting: %d labels, next training at %d%s' % (AUTO['rows'], max(radarml.AUTO_MIN_ROWS, AUTO['trained_rows'] + AUTO_NEW),
                                                                      ' (when parked)' if due else '')
@@ -440,6 +456,8 @@ def _worker(prof=None):
                 try:
                     if svc == 'carState':
                         STATE['v'] = round(ev.carState.vEgo, 2); STATE['ang'] = round(ev.carState.steeringAngle, 1)
+                        try: STATE['a'] = float(ev.carState.aEgo)
+                        except Exception: pass
                         try: STATE['acc'] = bool(ev.carState.cruiseState.enabled and ev.carState.cruiseState.speed > 0.5)   # 'enabled' alone is true while parked, speed is 0 until a set speed exists
                         except Exception: pass
                         if now >= td['car']:
@@ -487,15 +505,18 @@ def _worker(prof=None):
                      'pc': round(b['prob_class']), 'len': round(b['length'], 1), 'ms': MOVING.get(b['moving'], b['moving']),
                      'stationary': abs(gs) < 1.5, 'rc': cname}     # rc = class before the model: what /learn stores as radar_c
                 o.update(_x)           # lat speed, long accel, dZ, obstacle probs, sigmas (tesla_radar.dbc)
+                o['ga'] = o.get('la', 0.0) + STATE.get('a', 0.0)   # ground acceleration = radar's relative + your own
                 TRK.add(k, now, o); o['_h'] = TRK.get(k, now, rnd=False)      # one history copy per object per tick
                 o['vy_raw'] = radarml.lateral_speed(o['_h'], o.get('ls'))
-                o['c'], o['inf'], o['ml'] = ml_class(k, now, o, cname, inf, o['_h'], (TICK[0] + k) % 10 == 0)
                 objs.append(o)
             TICK[0] += 1
             _yaw = radarml.scene_yaw(objs)          # your rotation, measured from the stationary tracks (see radarml CROSSING)
             for o in objs:
                 _vy = radarml.ground_vy(o.pop('vy_raw', None), _yaw, o['d'], STATE['v'], STATE['ang'])
                 o['vy'] = round(_vy, 2) if _vy is not None else None
+                TRK.set_last(o['s'], 'vy', o['vy'])                 # model v2 feature: sideways ground speed history
+                if o['_h']: o['_h'][-1][radarml.HIST_FIELDS.index('vy')] = o['vy'] or 0.0
+                o['c'], o['inf'], o['ml'] = ml_class(o['s'], now, o, o['c'], o['inf'], o['_h'], (TICK[0] + o['s']) % 10 == 0)
                 if o['c'] == 'unknown':          # crossing in front of you at walking / cycling / car pace (the radar can't see that)
                     _xc = radarml.cross_class(o['vy'], o['gs'], o['d'])
                     if _xc:
@@ -943,12 +964,17 @@ table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}td,t
 th{color:var(--mut);font-weight:600;font-size:12px}td.n{text-align:right}
 .bar{height:8px;background:var(--bar);border-radius:4px;min-width:2px}
 .wrap{overflow-x:auto}
+button{font:inherit;padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+.cmh{text-align:center}td.cmc{text-align:center}
 </style></head><body>
 <div id=top><a href="/">road view</a><a href="/top">top-down</a><a href="/learn">label objects</a><a href="/trips">trips map</a><b>What it learned</b><span id=conn class=m>loading…</span></div>
 <main>
 <section><h2>Model</h2><div id=model></div></section>
 <section><h2>Training</h2><div id=train></div></section>
 <section><h2>Labels per class</h2><div id=labels></div></section>
+<section style="grid-column:1/-1"><h2>Models compared (cross-validated on drives it never trained on)</h2><div class=wrap id=cmp></div></section>
+<section><h2>Per-class F1</h2><div class=wrap id=pcf></div></section>
+<section style="grid-column:1/-1"><h2>Confusion matrix (rows = label, columns = model)</h2><div class=wrap id=cm></div></section>
 <section style="grid-column:1/-1"><h2>Live objects - radar vs model</h2><div class=wrap id=objs></div></section>
 <section style="grid-column:1/-1"><h2>Latest labels</h2><div class=wrap id=recent></div></section>
 </main>
@@ -957,18 +983,30 @@ var $=function(i){return document.getElementById(i)};
 function esc(x){return String(x==null?'':x).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function pct(x){return x==null?'-':Math.round(x*100)+'%'}
 function ago(t){if(!t)return '-';var s=Date.now()/1000-t;return s<90?Math.round(s)+' s ago':s<5400?Math.round(s/60)+' min ago':s<172800?Math.round(s/3600)+' h ago':Math.round(s/86400)+' days ago'}
+function trainNow(){var b=$('tn');b.disabled=true;fetch('/api/train',{method:'POST'}).then(function(r){return r.json()}).then(function(j){b.textContent=j.ok?'training started':'already training';poll()}).catch(function(){b.disabled=false})}
+var NAMES={rf:'Random Forest (INFRA3DRC)',mlp:'Neural net 2x10 (Ham et al.)',extratrees5:'Extra trees (depth 5)',extratrees8:'Extra trees (depth 8)'};
 function render(j){
  var m=j.model;
  $('model').innerHTML=m?('<div class=big>'+pct(m.cv_macro_f1)+'</div><div class=m>score (cross-validated macro-F1) vs <b>'+pct(m.baseline_f1)+'</b> without the model</div>'+
-  '<p>Trained on <b>'+m.rows+'</b> labels, '+ago(m.trained)+'<br>'+esc(m.algo)+' · '+m.trees+' trees · overrides the radar when ≥ '+pct(m.min_p)+' sure<br>Classes: '+esc((m.classes||[]).join(', '))+(m.prev?'<br><span class=m>previous model kept as .prev</span>':'')+'</p>')
+  '<p>Trained on <b>'+m.rows+'</b> labels, '+ago(m.trained)+'<br>'+esc(m.algo)+' · '+(m.kind=='mlp'?'layers '+(m.layers||[]).join('-'):m.trees+' trees')+' · overrides the radar when ≥ '+pct(m.min_p)+' sure<br>Classes: '+esc((m.classes||[]).join(', '))+(m.prev?'<br><span class=m>previous model kept as .prev</span>':'')+'</p>')
   :'<div class=big>none yet</div><p class=m>The radar\'s own classes are shown until the first model is trained.</p>';
  var s=j.status||{},l=j.last_training;
- $('train').innerHTML='<p>'+esc(s.msg||'-')+'</p><p>Labels: <b>'+j.total+'</b> · next training at <b>'+j.next_at+'</b> (when parked)<br>Automatic labelling: '+(j.autolabel_on?'<span class=ok>on</span>':'<span class=warn>off</span>')+'</p>'+
+ $('train').innerHTML='<p><button id=tn onclick="trainNow()"'+(s.training?' disabled':'')+'>'+(s.training?'training…':'Train now')+'</button></p><p>'+esc(s.msg||'-')+'</p><p>Labels: <b>'+j.total+'</b> · next training at <b>'+j.next_at+'</b> (when parked)<br>Automatic labelling: '+(j.autolabel_on?'<span class=ok>on</span>':'<span class=warn>off</span>')+'</p>'+
   (l?'<p class=m>Last run '+ago(l.t)+': '+esc(l.msg)+'</p>':'');
  var cls={};Object.keys(j.manual).forEach(function(k){cls[k]=1});Object.keys(j.auto).forEach(function(k){cls[k]=1});
  var ks=Object.keys(cls).sort(),mx=1;ks.forEach(function(k){mx=Math.max(mx,(j.manual[k]||0)+(j.auto[k]||0))});
  $('labels').innerHTML=ks.length?'<table><tr><th>class</th><th class=n>yours</th><th class=n>auto</th><th style="width:40%"></th></tr>'+ks.map(function(k){var a=j.manual[k]||0,b=j.auto[k]||0;
   return '<tr><td>'+esc(k)+'</td><td class=n>'+a+'</td><td class=n>'+b+'</td><td><div class=bar style="width:'+(100*(a+b)/mx)+'%"></div></td></tr>'}).join('')+'</table>':'<p class=m>No labels yet. Drive (automatic labels) or tap objects on <a href="/learn">/learn</a>.</p>';
+
+ var cands=(m&&m.candidates)||(l&&l.candidates)||{},base=(m&&m.baseline)||(l&&l.baseline),ck=Object.keys(cands);
+ function mrow(name,x,bold){return '<tr'+(bold?' style="font-weight:700"':'')+'><td>'+esc(name)+'</td><td class=n>'+pct(x.accuracy)+'</td><td class=n>'+pct(x.balanced_accuracy)+'</td><td class=n>'+pct(x.macro_f1)+'</td><td class=n>'+pct(x.weighted_f1)+'</td></tr>'}
+ $('cmp').innerHTML=ck.length?'<table><tr><th>model</th><th class=n>accuracy</th><th class=n>balanced acc.</th><th class=n>macro-F1</th><th class=n>weighted-F1</th></tr>'+
+  ck.map(function(k){return mrow((NAMES[k]||k)+(m&&m.algo&&((k=='rf'&&m.kind=='forest')||(k=='mlp'&&m.kind=='mlp'))?'  (installed)':''),cands[k],m&&((k=='rf'&&m.kind=='forest')||(k=='mlp'&&m.kind=='mlp')))}).join('')+(base?mrow('No model (radar + rules)',base,false):'')+'</table>'
+  +'<p class=m>Same four numbers INFRA3DRC-Radar-Classification reports. Most labels come from the automatic rules, so this measures agreement with them; labels you tap on /learn are the real test.</p>':'<p class=m>Shown after the first model v2 training.</p>';
+ var mt=m&&m.metrics,cls=(m&&m.classes)||[];
+ $('pcf').innerHTML=mt&&mt.f1?'<table><tr><th>class</th><th class=n>model</th><th class=n>no model</th></tr>'+cls.map(function(c){return '<tr><td>'+esc(c)+'</td><td class=n>'+pct(mt.f1[c])+'</td><td class=n>'+(base&&base.f1?pct(base.f1[c]):'-')+'</td></tr>'}).join('')+'</table>':'<p class=m>-</p>';
+ $('cm').innerHTML=mt&&mt.confusion?'<table><tr><th></th>'+cls.map(function(c){return '<th class=cmh>'+esc(c)+'</th>'}).join('')+'</tr>'+mt.confusion.map(function(row,i){var t=row.reduce(function(a,b){return a+b},0)||1;
+  return '<tr><td>'+esc(cls[i])+'</td>'+row.map(function(v,jj){return '<td class=cmc style="background:rgba(42,139,242,'+(v/t*0.85).toFixed(2)+')">'+v+'</td>'}).join('')+'</tr>'}).join('')+'</table>':'<p class=m>-</p>';
  var o=(j.objects||[]).slice().sort(function(a,b){return a.d-b.d});
  $('objs').innerHTML=o.length?'<table><tr><th>slot</th><th class=n>dist</th><th class=n>lateral</th><th class=n>ground km/h</th><th>radar says</th><th>model says</th><th>shown</th></tr>'+o.map(function(x){
   var ml=x.ml?esc(x.ml.c)+' <span class=m>'+pct(x.ml.p)+'</span>':'<span class=m>-</span>';
@@ -1548,6 +1586,10 @@ class H(BaseHTTPRequestHandler):
                     pass
             b = json.dumps({'ok': ok, 'text': txt, 'file': LABEL_FILE}).encode()
             self.send_response(200 if ok else 500); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        elif self.path == '/api/train':
+            ok = start_training(True)
+            b = json.dumps({'ok': ok, 'msg': AUTO['msg']}).encode()
+            self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path.split('?')[0] == '/api/objlabel':
             # LEARN: body is JSON {s,c,d,y,vr,gs,len,radar_c,radar_pc} from the /learn page's tap-to-select UI.
             # Added here: 'h' = the last HIST_S of that track and 'v' = ego speed, so the trainer gets the same

@@ -89,6 +89,30 @@ state, decoded CAN incl. GPS and speed limit, raw CAN bytes, carState, and radar
 starts each time radarweb starts, named after the EON clock. About 55 MB per hour and nothing deletes them: check
 `du -sh /data/maplog` now and then.
 
+## Model v2: how it all fits together
+
+The radar does its own detection, tracking and classification inside (raw data -> FFTs -> angles -> detections ->
+tracking/classification) and only sends the result over CAN: up to 32 objects with distance, offsets, speeds,
+acceleration, length, height, probabilities, tracker uncertainties and its class. radarweb works after that:
+
+1. **Track history** (2 s per object) and derived signals: sideways ground speed (with your own rotation removed),
+   ground acceleration (radar's relative + yours), 2-D ground speed, correlations between position and speed.
+2. **Features** (148): mean/std/min/max/median/span of every signal over the history, as in INFRA3DRC (there over the
+   points of an object, here over time), plus the object-level kinematic features of Ham et al., Sensors 2025.
+3. **Labels**: automatic ones from track behaviour + yours from `/learn` (3x weight).
+4. **Training** (parked: gear in P for 30 s or stopped 2 min; or **Train now** on `/ml`; or
+   `python3 radarml.py --autotrain labels.jsonl,autolabels.jsonl radar_model.json`), at the lowest CPU priority.
+   Two candidates, both on the EON (numpy, which openpilot ships):
+   - Random Forest, 100 trees, as in INFRA3DRC-Radar-Classification (bootstrap, best split, balanced classes)
+   - neural network 2 hidden layers x 10, as in Ham et al. (ReLU, RMSprop lr 0.01, batch 64, early stopping)
+   Each is scored with cross-validation that keeps whole drives out of training; the better one is installed if it
+   beats "no model" and the installed model. `/ml` shows both with INFRA3DRC's metrics (accuracy, balanced accuracy,
+   macro-F1, weighted-F1), per-class F1 and the confusion matrix. Without numpy a plain-python trainer is used.
+5. **Live**: each object is classified once per second (plain python, smoothed per track); the model replaces the
+   radar's class when it is at least 60% sure, then physical limits and crossing detection apply.
+
+A model trained on older features is replaced automatically at the next stop.
+
 ## Automatic training
 
 - Labels: `/data/canraw/labels.jsonl` (yours) + `/data/canraw/autolabels.jsonl` (automatic).
