@@ -1158,7 +1158,7 @@ MAPP = r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport co
 @media(prefers-color-scheme:light){:root{--bg:#f3f4f6;--card:#fff;--fg:#1c1f23;--mut:#5b626b;--bd:#d9dce0}}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif}
 header{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--bd)}header a{color:var(--mut)}
-.chip{padding:3px 12px;border-radius:99px;background:#4b5563;color:#fff;font-weight:700}.chip.on{background:var(--ok)}
+.chipb{padding:3px 10px;border-radius:99px;border:1px solid #4b5563;background:transparent;color:inherit;cursor:pointer}.chip{padding:3px 12px;border-radius:99px;background:#4b5563;color:#fff;font-weight:700}.chip.on{background:var(--ok)}
 nav{display:flex;gap:6px;padding:8px 16px;flex-wrap:wrap;border-bottom:1px solid var(--bd)}
 nav button{font:inherit;padding:6px 14px;border-radius:99px;border:1px solid var(--bd);background:none;color:var(--fg);cursor:pointer}nav button.on{background:var(--acc);border-color:var(--acc);color:#fff}
 nav small{opacity:.7;margin-left:4px}
@@ -1186,6 +1186,65 @@ function fv(x){return x===null||x===undefined?'-':(typeof x=='number'?(Math.roun
 function hx(k){return '0x'+(+k).toString(16)}
 function card(m,raw){var r=raw[m.addr]||{};var h='<section'+(r.age>2?' class=stale':'')+'><h2>'+m.name+' <small>'+hx(m.addr)+' &middot; bus '+r.src+' &middot; '+r.hz+' Hz &middot; age '+r.age+'s'+(m.mux!==null&&m.mux!==undefined?' &middot; mux '+m.mux:'')+'</small></h2><table>';
  Object.keys(m.sig).forEach(function(k){h+='<tr><td>'+k+'</td><td>'+fv(m.sig[k])+'</td></tr>'});return h+'</table></section>'}
+// "Every CAN address": change tracking in the browser (no extra work on the EON). Each 0.5 s poll is compared with the
+// previous one, per byte and per bit: when it last changed, how often. Bytes that change in > 30% of polls (counters,
+// checksums, live values) are greyed; a byte that changed < 1.5 s ago is red, < 5 s orange, < 30 s faint. "Mark" stores
+// the current bytes: then outlined bytes / the "mark" column show what differs since you pressed it (press a button in
+// the car, see what lit up). Click a row for the bit grid and its last values.
+var CH={},SORT='recent',VIEW='all',MARKT=0,OPEN={};
+function track(d){var raw=d.raw||{},t=Date.now()/1000;Object.keys(raw).forEach(function(k){
+ var b=(raw[k].hex||'').split(' ').filter(Boolean).map(function(x){return parseInt(x,16)}),c=CH[k];
+ if(!c){CH[k]={b:b,first:t,last:0,bl:{},bn:{},byl:{},byn:{},polls:0,chg:0,hist:[[t,raw[k].hex]],vals:[[t,b]],base:MARKT?b.slice():null};return}
+ c.vals.push([t,b]);if(c.vals.length>120)c.vals.shift();   // 60 s of values for the byte graphs
+ c.polls++;var any=false;
+ for(var i=0;i<Math.max(b.length,c.b.length);i++){var x=(b[i]===undefined||c.b[i]===undefined)?255:(b[i]^c.b[i]);if(!x)continue;any=true;c.byl[i]=t;c.byn[i]=(c.byn[i]||0)+1;
+  for(var j=0;j<8;j++)if(x>>j&1){c.bl[i*8+j]=t;c.bn[i*8+j]=(c.bn[i*8+j]||0)+1}}
+ if(any){c.chg++;c.last=t;c.hist.unshift([t,raw[k].hex]);if(c.hist.length>12)c.hist.pop()}
+ c.b=b})}
+function noisy(c,n){return c.polls>=10&&(n||0)/c.polls>0.3}
+function qbit(c,n){return !noisy(c,c.byn[n>>3])}   // a bit counts as quiet when its byte isn't a counter / live value
+function qlast(c){var m=0;for(var k in c.bl)if(qbit(c,+k)&&c.bl[k]>m)m=c.bl[k];return m}   // last change of a quiet bit
+function nbits(c){return Object.keys(c.bn).length}
+function dmark(c){if(!c.base)return 0;var n=0;for(var i=0;i<Math.max(c.b.length,c.base.length);i++){var x=(c.b[i]||0)^(c.base[i]||0);while(x){n+=x&1;x>>=1}}return n}
+function bcol(c,i,t){var st='';if(c.base&&c.b[i]!==c.base[i])st='box-shadow:inset 0 0 0 2px #1a73e8;';
+ if(noisy(c,c.byn[i]))return st+'color:var(--mut)';if(!c.byl[i])return st;var a=t-c.byl[i];
+ return st+(a<1.5?'background:#e5484d;color:#fff':a<5?'background:#f08a00;color:#000':a<30?'background:rgba(240,138,0,.25)':'')}
+function ago(t,x){return x?(t-x<100?(t-x).toFixed(1):Math.round(t-x))+'':'-'}
+function canSort(m){SORT=m;show(D)}function canView(m){VIEW=m;show(D)}function canOpen(k){OPEN[k]=!OPEN[k];show(D)}
+function canMark(){MARKT=Date.now()/1000;for(var k in CH)CH[k].base=CH[k].b.slice();show(D)}
+function canReset(){CH={};MARKT=0;OPEN={};if(D)track(D);show(D)}
+function bitgrid(c,t){var h='<table class=mono style="margin:6px 0"><tr><td>byte \\ bit</td>';for(var j=7;j>=0;j--)h+='<td>'+j+'</td>';h+='<td>hex</td></tr>';
+ for(var i=0;i<c.b.length;i++){h+='<tr><td>'+i+'</td>';for(var j=7;j>=0;j--){var n=i*8+j,f=c.bn[n]||0,a=c.bl[n]?t-c.bl[n]:1e9,
+   bg=a<1.5&&qbit(c,n)?'#e5484d':!qbit(c,n)&&f?'rgba(128,128,128,.35)':f?'rgba(26,115,232,'+Math.min(0.9,0.2+0.15*Math.log(1+f))+')':'';
+   h+='<td title="bit '+n+' (Intel start bit) &middot; '+f+' flips'+(c.bl[n]?' &middot; last '+ago(t,c.bl[n])+' s ago':'')+'" style="text-align:center;'+(bg?'background:'+bg:'')+'">'+(c.b[i]>>j&1)+'</td>'}
+  h+='<td>'+('0'+c.b[i].toString(16)).slice(-2)+'</td></tr>'}
+ h+='</table>'+bytegraphs(c,t)+'<div style="color:var(--mut)">blue = flipped (darker = more often), grey = in a byte that changes constantly, red = just now. Hover a bit for its number and count.</div><div class=mono style="margin-top:6px">';
+ c.hist.forEach(function(e){h+=ago(t,e[0])+' s ago &nbsp; '+e[1]+'<br>'});return h+'</div>'}
+function bytegraphs(c,t){   // value of each byte over the last 60 s (like SavvyCAN's graphs), only bytes that changed
+ var h='<div style="display:flex;flex-wrap:wrap;gap:8px;margin:6px 0">',W=180,H=44;
+ for(var i=0;i<c.b.length;i++){if(!c.byn[i])continue;var pts=c.vals.map(function(v){return ((60-(t-v[0]))/60*W).toFixed(1)+','+(H-2-((v[1][i]||0)/255)*(H-4)).toFixed(1)}).join(' ');
+  var lo=255,hi=0;c.vals.forEach(function(v){var x=v[1][i]||0;if(x<lo)lo=x;if(x>hi)hi=x});
+  h+='<div><div style="color:var(--mut)">byte '+i+' &nbsp; '+lo+'..'+hi+(MARKT&&t-MARKT<60?' &nbsp; <span style="color:#2fbf71">| = mark</span>':'')+'</div><svg width='+W+' height='+H+' style="background:rgba(128,128,128,.12);border-radius:4px">'+
+   (MARKT&&t-MARKT<60?'<line x1='+((60-(t-MARKT))/60*W).toFixed(1)+' x2='+((60-(t-MARKT))/60*W).toFixed(1)+' y1=0 y2='+H+' stroke="#2fbf71"/>':'')+
+   '<polyline fill=none stroke="#1a73e8" stroke-width=1.5 points="'+pts+'"/></svg></div>'}
+ return h+'</div>'}
+function allcan(raw){var t=Date.now()/1000,q=Q.toLowerCase(),btn=function(cur,v,f,l){return '<button class=chipb'+(cur==v?' style="background:#1a73e8;color:#fff"':'')+' onclick="'+f+'(\''+v+'\')">'+l+'</button>'};
+ var h='<section class=wide><h2>Every CAN address seen (any bus) <small>'+Object.keys(raw).length+' addresses'+(MARKT?' &middot; mark set '+ago(t,MARKT)+' s ago':'')+'</small></h2>'+
+  '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0">sort '+btn(SORT,'recent','canSort','last change')+btn(SORT,'rate','canSort','changes/s')+btn(SORT,'bits','canSort','bits changing')+btn(SORT,'addr','canSort','address')+btn(SORT,'hz','canSort','Hz')+btn(SORT,'bus','canSort','bus')+
+  ' &nbsp; show '+btn(VIEW,'all','canView','all')+btn(VIEW,'changing','canView','changed in 30 s')+btn(VIEW,'mark','canView','differs from mark')+btn(VIEW,'static','canView','never changed')+
+  ' &nbsp; <button class=chipb onclick="canMark()" style="background:#2fbf71;color:#fff">Mark</button><button class=chipb onclick="canReset()">Reset stats</button></div>'+
+  '<div style="color:var(--mut);margin-bottom:6px">Changed <span style="background:#e5484d;color:#fff">&lt;1.5 s</span> <span style="background:#f08a00;color:#000">&lt;5 s</span> <span style="background:rgba(240,138,0,.25)">&lt;30 s</span> ago &middot; grey = changes almost every update (counter / live value) &middot; <span style="box-shadow:inset 0 0 0 2px #1a73e8">outlined</span> = differs from Mark &middot; "last chg" ignores grey bytes. Bytes of IDs nothing decodes refresh twice a second, so very short blips can be missed.</div>'+
+  '<input id=f1 placeholder="filter by address / name / bus, e.g. 0x3d8, UI_, src 1" value="'+Q+'" oninput="Q=this.value;show(D);var e=document.getElementById(\'f1\');e.focus();e.setSelectionRange(Q.length,Q.length)">'+
+  '<div style="overflow-x:auto"><table class=mono><tr><td>addr</td><td>name (if in DBC)</td><td>bus</td><td>Hz</td><td>age s</td><td>last chg s</td><td>chg/s</td><td>bits</td><td>mark</td><td>data</td></tr>';
+ var ks=Object.keys(raw).filter(function(k){var e=raw[k],c=CH[k];if(!c)return false;if(q&&(hx(k)+' '+e.name+' src '+e.src).toLowerCase().indexOf(q)<0)return false;
+  if(VIEW=='changing')return t-qlast(c)<30;if(VIEW=='mark')return dmark(c)>0;if(VIEW=='static')return !c.chg;return true});
+ var rate=function(k){var c=CH[k];return c.chg/Math.max(1,t-c.first)},key={recent:function(k){return -qlast(CH[k])},rate:function(k){return -rate(k)},bits:function(k){return -nbits(CH[k])},addr:function(k){return +k},hz:function(k){return -raw[k].hz},bus:function(k){return raw[k].src*4096+(+k)}}[SORT];
+ ks.sort(function(a,b){return (key(a)-key(b))||(a-b)});
+ ks.forEach(function(k){var e=raw[k],c=CH[k],ql=qlast(c),dm=dmark(c),d='';
+  for(var i=0;i<c.b.length;i++)d+='<span style="padding:0 2px;border-radius:3px;'+bcol(c,i,t)+'" title="byte '+i+' &middot; '+(c.byn[i]||0)+' changes'+(c.byl[i]?' &middot; last '+ago(t,c.byl[i])+' s ago':'')+'">'+('0'+c.b[i].toString(16)).slice(-2)+'</span> ';
+  h+='<tr onclick="canOpen(\''+k+'\')" style="cursor:pointer'+(OPEN[k]?';background:rgba(26,115,232,.12)':'')+'"><td>'+hx(k)+'</td><td>'+(e.name||'')+'</td><td>'+e.src+'</td><td>'+e.hz+'</td><td>'+e.age+'</td><td>'+ago(t,ql)+'</td><td>'+rate(k).toFixed(2)+'</td><td>'+nbits(c)+'</td><td>'+(c.base?dm:'')+'</td><td style="text-align:right;white-space:nowrap">'+d+'</td></tr>';
+  if(OPEN[k])h+='<tr><td colspan=10>'+bitgrid(c,t)+'</td></tr>'});
+ return h+'</table></div>'}
 function show(d){D=d;document.getElementById('v').textContent=Math.round((d.v||0)*3.6)+' km/h';
  document.getElementById('acc').className='chip'+(d.acc?' on':'');document.getElementById('alc').className='chip'+(d.alc?' on':'');
  document.getElementById('logn').textContent=d.logfile?'logging to '+d.logfile:'';
@@ -1195,10 +1254,8 @@ function show(d){D=d;document.getElementById('v').textContent=Math.round((d.v||0
  document.getElementById('nav').innerHTML=nav;
  var h='';
  if(TAB=='all'){
-  h+='<section class=wide><h2>Every CAN address seen (any bus) <small>'+Object.keys(raw).length+' addresses</small></h2><input id=f1 placeholder="filter by address / name / bus, e.g. 0x3d8, UI_, src 1" value="'+Q+'" oninput="Q=this.value;show(D);var e=document.getElementById(\'f1\');e.focus();e.setSelectionRange(Q.length,Q.length)"><table class=mono><tr><td>addr</td><td>name (if in DBC)</td><td>bus</td><td>Hz</td><td>age s</td><td>data</td></tr>';
-  var q=Q.toLowerCase();Object.keys(raw).sort(function(a,b){return a-b}).forEach(function(k){var e=raw[k];if(q&&(hx(k)+' '+e.name+' src '+e.src).toLowerCase().indexOf(q)<0)return;
-   h+='<tr><td>'+hx(k)+'</td><td>'+(e.name||'')+'</td><td>'+e.src+'</td><td>'+e.hz+'</td><td>'+e.age+'</td><td style="text-align:right">'+e.hex+'</td></tr>'});
-  h+='</table></section><section class=wide><h2>openpilot carState / controlsState fields</h2><table class=mono>';
+  h+=allcan(raw);
+  h+='</section><section class=wide><h2>openpilot carState / controlsState fields</h2><table class=mono>';
   ['car','ctl'].forEach(function(g){var o=d[g]||{};Object.keys(o).forEach(function(k){h+='<tr><td>'+g+'.'+k+'</td><td>'+fv(o[k])+'</td></tr>'})});h+='</table></section>'}
  else{
   if(TAB=='map'){var md=groups.map.filter(function(m){return m.name=='UI_driverAssistMapData'})[0];
@@ -1206,13 +1263,14 @@ function show(d){D=d;document.getElementById('v').textContent=Math.round((d.v||0
   var L=groups[TAB].sort(function(a,b){return a.addr-b.addr});L.forEach(function(m){h+=card(m,raw)});
   if(!L.length)h='<div class=empty>Nothing seen yet for this group. If the car is on and the "All CAN" tab lists addresses, MCU2 may use different IDs than the S/X DBC.</div>'}
  document.getElementById('m').innerHTML=h}
+function demoHex(){var n=Math.floor(Date.now()/500),h=function(x){return ('0'+(x&255).toString(16)).slice(-2)};return [h(n%16),'12',h(Math.floor(n/12)%2?0x40:0),'00',h(n*7),'00','00',h(n*13)].join(' ')}   // demo: a counter, a rare flag, a checksum
 function demoD(){return {v:17.2,acc:true,alc:true,msgs:{'968:UI_driverAssistMapData':{name:'UI_driverAssistMapData',addr:968,mux:null,sig:{UI_mapSpeedLimit:24,UI_mapSpeedUnits:0,UI_navRouteActive:1,UI_nextBranchDist:'120 m'}},
  '984:MCU_locationStatus':{name:'MCU_locationStatus',addr:984,mux:null,sig:{MCU_latitude:'44.4268 deg',MCU_longitude:'26.1025 deg'}},
  '872:DI_state':{name:'DI_state',addr:872,mux:null,sig:{DI_vehicleSpeed:'62 kph',DI_gear:4}},'920:GTW_carConfig':{name:'GTW_carConfig',addr:920,mux:null,sig:{GTW_dasHw:2,GTW_parkAssistInstalled:1}},
  '513:SDM1':{name:'SDM1',addr:513,mux:null,sig:{SDM1_Chime:0}}},
- raw:{968:{src:0,hz:10,age:.05,hex:'00 18 00 20 00 00 00 00',name:'UI_driverAssistMapData'},984:{src:0,hz:5,age:.1,hex:'11 22 33 44 55 66 77 88',name:'MCU_locationStatus'},872:{src:0,hz:50,age:0,hex:'00',name:'DI_state'},920:{src:0,hz:1,age:.2,hex:'00',name:'GTW_carConfig'},513:{src:0,hz:50,age:0,hex:'00',name:'SDM1'}},car:{vEgo:17.2},ctl:{enabled:true}}}
-if(demo){document.getElementById('conn').textContent='demo data';setInterval(function(){if(document.activeElement.tagName!='INPUT')show(demoD())},500)}
-else{(function poll(){fetch('/api/map').then(function(r){return r.json()}).then(function(d){document.getElementById('conn').textContent='live';if(document.activeElement.tagName!='INPUT')show(d);else D=d}).catch(function(){document.getElementById('conn').textContent='disconnected'}).then(function(){setTimeout(poll,500)})})()}
+ raw:{968:{src:0,hz:10,age:.05,hex:'00 18 00 20 00 00 00 00',name:'UI_driverAssistMapData'},984:{src:0,hz:5,age:.1,hex:'11 22 33 44 55 66 77 88',name:'MCU_locationStatus'},872:{src:0,hz:50,age:0,hex:demoHex(),name:'DI_state'},920:{src:0,hz:1,age:.2,hex:'00',name:'GTW_carConfig'},513:{src:0,hz:50,age:0,hex:'00',name:'SDM1'}},car:{vEgo:17.2},ctl:{enabled:true}}}
+if(demo){document.getElementById('conn').textContent='demo data';setInterval(function(){var d=demoD();track(d);if(document.activeElement.tagName!='INPUT')show(d);else D=d},500)}
+else{(function poll(){fetch('/api/map').then(function(r){return r.json()}).then(function(d){document.getElementById('conn').textContent='live';track(d);if(document.activeElement.tagName!='INPUT')show(d);else D=d}).catch(function(){document.getElementById('conn').textContent='disconnected'}).then(function(){setTimeout(poll,500)})})()}
 </script></body></html>
 """
 
