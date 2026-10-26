@@ -1539,12 +1539,22 @@ html,body{margin:0;height:100%;background:#0a0b0d;overflow:hidden;font-family:sy
 #c{display:block;width:100vw;height:100vh}
 #nav{position:fixed;right:10px;top:10px;z-index:50}#nav summary{list-style:none;cursor:pointer;width:34px;height:34px;display:flex;align-items:center;justify-content:center;background:rgba(28,33,40,.6);border:1px solid #2a2f36;border-radius:8px;font-size:17px;color:#aab1b8}#nav summary::-webkit-details-marker{display:none}#nav>div{position:absolute;right:0;top:42px;background:#14171b;border:1px solid #2a2f36;border-radius:8px;padding:6px 0;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.5)}#nav a{display:block;padding:9px 14px;color:#cfd6dd;text-decoration:none;font-size:13px;white-space:nowrap}#nav a:hover{background:#20252b}
 </style></head><body><canvas id=c></canvas>
-<details id=nav><summary>&#9776;</summary><div><span id=conn style="display:block;padding:9px 14px;color:#8a9098;font-size:13px">connecting&hellip;</span><a href="#" id=unit onclick="return unitTog()">units: km/h</a><a href="#" onclick="document.getElementById('egof').click();return false">upload car image (.webp)</a><a href="/">road view</a><a href="/map">CAN data</a><a href="/top">top-down</a><a href="/video">video</a><a href="?demo=1">demo</a></div></details>
-<input type=file id=egof accept="image/webp" style="display:none" onchange="egoUp(this)">
+<details id=nav><summary>&#9776;</summary><div><span id=conn style="display:block;padding:9px 14px;color:#8a9098;font-size:13px">connecting&hellip;</span><a href="#" id=unit onclick="return unitTog()">units: km/h</a><a href="#" onclick="document.getElementById('egof').click();return false">upload images (.webp)</a><a href="/">road view</a><a href="/map">CAN data</a><a href="/top">top-down</a><a href="/video">video</a><a href="?demo=1">demo</a></div></details>
+<input type=file id=egof accept="image/webp" multiple style="display:none" onchange="egoUp(this)">
 <script>
 var cv=document.getElementById('c'),g=cv.getContext('2d'),S=null,demo=/demo/.test(location.search);
-function egoUp(inp){var f=inp.files&&inp.files[0];if(!f)return;fetch('/api/icon?name=ego.webp',{method:'POST',body:f}).then(function(r){return r.json()}).then(function(j){alert(j.ok?'Car image saved on the EON':'Upload failed: '+j.msg);if(j.ok){EGO=new Image();EGO.src='/icons/ego.webp?'+Date.now()}}).catch(function(e){alert('Upload failed: '+e)});inp.value=''}
-var EGO=new Image();EGO.src='/icons/ego.webp';
+/* images the page uses, served from /icons (the EON's /data/radar_icons); uploaded from the menu, never in the repo */
+var SPRN=['ego','car','carside','moto','setspeed','wheel'],SPR={};
+function sprLoad(n,bust){var i=new Image();i.src='/icons/'+n+'.webp'+(bust?'?'+Date.now():'');SPR[n]=i}
+SPRN.forEach(function(n){sprLoad(n)});
+function ok(n){var i=SPR[n];return i&&i.complete&&i.naturalWidth>0}
+function egoUp(inp){var fs=[].slice.call(inp.files||[]),done=[],bad=[];inp.value='';if(!fs.length)return;
+ Promise.all(fs.map(function(f){var n=f.name.replace(/\.webp$/i,'');if(SPRN.indexOf(n)<0){bad.push(f.name+' (unknown name)');return null}
+  return fetch('/api/icon?name='+n+'.webp',{method:'POST',body:f}).then(function(r){return r.json()}).then(function(j){if(j.ok){done.push(n);sprLoad(n,1)}else bad.push(f.name+': '+j.msg)}).catch(function(e){bad.push(f.name+': '+e)})}))
+ .then(function(){alert((done.length?'Saved: '+done.join(', '):'Nothing saved')+(bad.length?'\nNot saved: '+bad.join('; '):'')+'\nExpected names: '+SPRN.join('.webp, ')+'.webp')})}
+var EGO={get complete(){return ok('ego')},get naturalWidth(){return ok('ego')?SPR.ego.naturalWidth:0},get naturalHeight(){return SPR.ego.naturalHeight}};
+/* white-on-transparent icons tinted to a colour (cached per colour) */
+var TINT={};function tinted(n,col){var k=n+col;if(TINT[k])return TINT[k];var i=SPR[n],c=document.createElement('canvas');c.width=i.naturalWidth;c.height=i.naturalHeight;var x=c.getContext('2d');x.drawImage(i,0,0);x.globalCompositeOperation='source-in';x.fillStyle=col;x.fillRect(0,0,c.width,c.height);TINT[k]=c;return c}
 var AP_BLUE='#2a7fff',LANE_ON='#3d8bff',LANE_OFF='#8b949e',AMBER='#f5a524';
 var MPH=false;try{MPH=localStorage.getItem('dashmph')=='1'}catch(e){}
 function unitTog(){MPH=!MPH;try{localStorage.setItem('dashmph',MPH?'1':'0')}catch(e){}unitUI();draw();return false}
@@ -1562,17 +1572,27 @@ function X(G,d,y,off){return G.cx+(y-off)*PPM(G,d)}
 function rr(x,y,w,h,r){g.beginPath();g.moveTo(x+r,y);g.arcTo(x+w,y,x+w,y+h,r);g.arcTo(x+w,y+h,x,y+h,r);g.arcTo(x,y+h,x,y,r);g.arcTo(x,y,x+w,y,r);g.closePath()}
 /* rear-view car silhouette from /icons; falls back to a rounded box */
 var SED=new Image();SED.src='/icons/sedan.webp';
+/* a vehicle from the uploaded sprites: own-lane / lead -> car.webp, other lanes -> carside.webp (body ~94% of the image width) */
+function carSprite(cx,by,w,brake,side){var n=side&&ok('carside')?'carside':'car';if(!ok(n))return false;var i=SPR[n],iw=w*1.08,ih=iw*i.naturalHeight/i.naturalWidth;
+ g.drawImage(i,cx-iw/2,by-ih,iw,ih);
+ if(brake){var lh=Math.max(2,ih*.045),ly=by-ih*.36;g.fillStyle='rgba(255,40,40,.95)';g.shadowColor='rgba(255,40,40,.9)';g.shadowBlur=8;rr(cx-iw*.36,ly,iw*.22,lh,lh/2);g.fill();rr(cx+iw*.14,ly,iw*.22,lh,lh/2);g.fill();g.shadowBlur=0}
+ return true}
+function motoSprite(cx,by,ppm){if(!ok('moto'))return false;var i=SPR.moto,iw=Math.max(8,ppm*0.95),ih=iw*i.naturalHeight/i.naturalWidth;g.drawImage(i,cx-iw/2,by-ih,iw,ih);return true}
 function carIcon(cx,by,w,brake,tint){var h=w*0.62;if(SED.complete&&SED.naturalWidth){var sh=w*SED.naturalHeight/SED.naturalWidth;if(tint){g.save();g.drawImage(SED,cx-w/2,by-sh,w,sh);g.globalCompositeOperation='source-atop';g.fillStyle=tint;g.globalAlpha=.5;g.fillRect(cx-w/2,by-sh,w,sh);g.restore()}else g.drawImage(SED,cx-w/2,by-sh,w,sh);
   var lh=Math.max(2,sh*.05),ly=by-sh*.6;g.fillStyle=brake?'rgba(255,40,40,.98)':'rgba(210,45,45,.6)';rr(cx-w*.3,ly,w*.26,lh,lh/2);g.fill();rr(cx+w*.04,ly,w*.26,lh,lh/2);g.fill();return}
  g.fillStyle=tint||'#2b2f36';rr(cx-w/2,by-h,w,h,w*.14);g.fill();g.fillStyle='rgba(255,255,255,.08)';rr(cx-w*.36,by-h*.82,w*.72,h*.4,w*.08);g.fill()}
 function pedIcon(cx,by,h,c){g.fillStyle=c;var hw=h*.2;g.beginPath();g.arc(cx,by-h*.86,h*.15,0,6.3);g.fill();rr(cx-hw/2,by-h*.66,hw,h*.44,hw*.4);g.fill();g.strokeStyle=c;g.lineWidth=Math.max(2,h*.08);g.beginPath();g.moveTo(cx,by-h*.26);g.lineTo(cx-h*.14,by);g.moveTo(cx,by-h*.26);g.lineTo(cx+h*.14,by);g.stroke()}
 function bikeIcon(cx,by,h,c){g.strokeStyle='#c6ccd3';g.lineWidth=Math.max(2,h*.06);g.beginPath();g.arc(cx-h*.22,by-h*.12,h*.12,0,6.3);g.arc(cx+h*.22,by-h*.12,h*.12,0,6.3);g.stroke();g.fillStyle=c;g.beginPath();g.arc(cx,by-h*.62,h*.1,0,6.3);g.fill();rr(cx-h*.16,by-h*.5,h*.32,h*.3,h*.1);g.fill()}
 /* steering-wheel glyph */
-function wheel(cx,cy,r,col){g.strokeStyle=col;g.lineWidth=r*.15;g.beginPath();g.arc(cx,cy,r,0,6.2832);g.stroke();
+function wheel(cx,cy,r,col){if(ok('wheel')){var i=SPR.wheel,w=r*2.2,h=w*i.naturalHeight/i.naturalWidth;g.drawImage(tinted('wheel',col),cx-w/2,cy-h/2,w,h);return}
+ wheelDrawn(cx,cy,r,col)}
+function wheelDrawn(cx,cy,r,col){g.strokeStyle=col;g.lineWidth=r*.15;g.beginPath();g.arc(cx,cy,r,0,6.2832);g.stroke();
  g.fillStyle=col;g.beginPath();g.arc(cx,cy,r*.19,0,6.2832);g.fill();
  g.lineCap='round';g.lineWidth=r*.15;g.beginPath();g.moveTo(cx-r*.84,cy+r*.05);g.lineTo(cx+r*.84,cy+r*.05);g.moveTo(cx,cy+r*.12);g.lineTo(cx,cy+r*.82);g.stroke();g.lineCap='butt'}
 /* set-speed dial glyph (speed-limit-ring style) */
-function setdial(cx,cy,r,col){g.strokeStyle=col;g.lineWidth=r*.2;g.beginPath();g.arc(cx,cy,r,0.7,5.58);g.stroke();g.fillStyle=col;g.beginPath();g.moveTo(cx,cy-r*1.25);g.lineTo(cx-r*.3,cy-r*.78);g.lineTo(cx+r*.3,cy-r*.78);g.closePath();g.fill()}
+function setdial(cx,cy,r,col){if(ok('setspeed')){var w=r*2.6;g.drawImage(tinted('setspeed',col),cx-w/2,cy-w/2,w,w);return}
+ setdialDrawn(cx,cy,r,col)}
+function setdialDrawn(cx,cy,r,col){g.strokeStyle=col;g.lineWidth=r*.2;g.beginPath();g.arc(cx,cy,r,0.7,5.58);g.stroke();g.fillStyle=col;g.beginPath();g.moveTo(cx,cy-r*1.25);g.lineTo(cx-r*.3,cy-r*.78);g.lineTo(cx+r*.3,cy-r*.78);g.closePath();g.fill()}
 /* parking-sensor arcs at the car's four corners, like the cluster: hidden when nothing is in range (255 cm),
    grey when far, amber nearer, red close. front arcs reach ahead of the car, rear arcs behind it (towards you) */
 function parkArcs(G,cx,fy,ry,hw){var P=S&&S.park;if(!P)return;
@@ -1608,16 +1628,18 @@ function draw(){var G=geom();g.clearRect(0,0,G.W,G.H);if(!S)return;
   if(leadS&&Math.abs(d-leadS.d)<2.2&&Math.abs(y-(leadS.y||0))<1.3)return;
   var cl=o.ml&&o.ml.c?o.ml.c:o.c;
   if(o.cross){var col=cl=='pedestrian'?AP_BLUE:AMBER,h=Math.max(16,1.7*ppm);cl=='two_wheel'?bikeIcon(X(G,d,y,off0),by,h,col):pedIcon(X(G,d,y,off0),by,h,col);warn={t:cl=='two_wheel'?'Cyclist crossing':'Pedestrian crossing',c:col};return}
-  if(cl=='four_wheel'||(!o.stationary&&o.len>=2.5)){carIcon(X(G,d,y,off0),by,Math.max(12,1.9*ppm),false)}
+  var side=Math.abs(y-(P?egoX(d):off0))>1.9;
+  if(cl=='two_wheel'&&motoSprite(X(G,d,y,off0),by,ppm))return;
+  if(cl=='four_wheel'||(!o.stationary&&o.len>=2.5)){var cw=Math.max(12,1.9*ppm);if(!carSprite(X(G,d,y,off0),by,cw,false,side))carIcon(X(G,d,y,off0),by,cw,false)}
   else if(Math.abs(y)>1.0){g.fillStyle='rgba(150,160,170,.45)';g.beginPath();g.arc(X(G,d,y,off0),by,Math.max(3,.4*ppm),0,6.3);g.fill()}
  });
  /* lead car + distance */
- if(leadS){var d=leadS.d,y=leadS.y||0,by=Y(G,d),w=Math.max(22,1.95*PPM(G,d));carIcon(X(G,d,y,off0),by,w,leadS.vr<-1.5);
+ if(leadS){var d=leadS.d,y=leadS.y||0,by=Y(G,d),w=Math.max(22,1.95*PPM(G,d));if(!carSprite(X(G,d,y,off0),by,w,leadS.vr<-1.5,false))carIcon(X(G,d,y,off0),by,w,leadS.vr<-1.5);
   g.fillStyle=alc?'rgba(80,150,255,.95)':'rgba(160,170,180,.8)';g.font='600 '+Math.round(G.H*.028)+'px system-ui';g.textAlign='center';g.fillText(d.toFixed(0)+' m',X(G,d,y,off0),by+G.H*.042)}
  /* EGO car at the bottom (our own Model S, red) */
  var ew=Math.max(60,G.pxB*1.9),eby=G.yB+(G.H-G.yB)*0.02;
  if(EGO.complete&&EGO.naturalWidth){var iw=ew*1.55,ih=iw*EGO.naturalHeight/EGO.naturalWidth,arcB=(iw*0.36*1.36)*0.62-ih*0.06;eby=Math.min(eby,G.H-8-arcB);var ex0=G.cx-iw/2,ey0=eby-ih*0.97;
-  parkArcs(G,G.cx,ey0+ih*0.30,eby-ih*0.06,iw*0.36);g.drawImage(EGO,ex0,ey0,iw,ih)}
+  parkArcs(G,G.cx,ey0+ih*0.30,eby-ih*0.06,iw*0.36);g.drawImage(SPR.ego,ex0,ey0,iw,ih)}
  else{parkArcs(G,G.cx,eby-ew*0.62,eby,ew*0.5);carIcon(G.cx,eby,ew,false,'rgba(210,60,40,.55)')}
  /* speed-limit sign, left of the road */
  var limv=S.lim&&typeof S.lim=='object'?S.lim.v:S.lim,limk=S.lim&&typeof S.lim=='object'?S.lim.kmh!==false:true;
@@ -1651,7 +1673,7 @@ function upd(d){S=d;draw()}
 function demoLoop(){var t=Date.now()/1000,bend=Math.sin(t*0.22)*0.00002;
  function poly(o){return [bend,0,0.03*Math.sin(t*0.3),o]}
  var lead={d:40+12*Math.sin(t*0.35),y:0.2*Math.sin(t*0.3),vr:-2.5*Math.sin(t*0.5)};
- var o=[{d:lead.d,y:lead.y,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4},{d:26,y:-5.5,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4},{d:33,y:5.5,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4}];
+ var o=[{d:lead.d,y:lead.y,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4},{d:26,y:-5.5,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4},{d:33,y:4.2,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4},{d:18,y:-4.0,c:'two_wheel',ml:{c:'two_wheel'},stationary:false,len:2}];
  if(Math.sin(t*0.3)>0.5)o.push({d:15,y:-4+8*((t*0.25)%1),c:'unknown',ml:{c:'pedestrian'},cross:true,vy:1.0});
  upd({v:21+5*Math.sin(t*0.2),cruise:90,acc:true,op:true,alc:Math.sin(t*0.15)>-0.2,model:{p:poly(0),l:poly(-1.85),r:poly(1.85),pl:0.9,pr:0.9},lead:lead,o:o,lim:{v:50,kmh:true},park:{f:{l:255,r:150,ss:1},r:{l:180,r:Math.round(45+40*Math.sin(t*0.7)),ss:1}},soc:63,gear:'drive',pw:{kw:-(10+30*Math.max(0,Math.sin(t*0.6)))},alert:''});
  requestAnimationFrame(demoLoop)}
