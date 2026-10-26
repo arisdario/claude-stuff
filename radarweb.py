@@ -1194,7 +1194,7 @@ function card(m,raw){var r=raw[m.addr]||{};var h='<section'+(r.age>2?' class=sta
 var CH={},SORT='recent',VIEW='all',MARKT=0,OPEN={};
 function track(d){var raw=d.raw||{},t=Date.now()/1000;Object.keys(raw).forEach(function(k){
  var b=(raw[k].hex||'').split(' ').filter(Boolean).map(function(x){return parseInt(x,16)}),c=CH[k];
- if(!c){CH[k]={b:b,first:t,last:0,bl:{},bn:{},byl:{},byn:{},polls:0,chg:0,hist:[[t,raw[k].hex]],vals:[[t,b]],base:MARKT?b.slice():null};return}
+ if(!c){CH[k]={b:b,first:t,last:0,bl:{},bn:{},byl:{},byn:{},polls:0,chg:0,hist:[[t,raw[k].hex]],vals:[[t,b]],base:MARKT?b.slice():null,notch:MARKT?{}:null};return}
  c.vals.push([t,b]);if(c.vals.length>120)c.vals.shift();   // 60 s of values for the byte graphs
  c.polls++;var any=false;
  for(var i=0;i<Math.max(b.length,c.b.length);i++){var x=(b[i]===undefined||c.b[i]===undefined)?255:(b[i]^c.b[i]);if(!x)continue;any=true;c.byl[i]=t;c.byn[i]=(c.byn[i]||0)+1;
@@ -1205,20 +1205,23 @@ function noisy(c,n){return c.polls>=10&&(n||0)/c.polls>0.3}
 function qbit(c,n){return !noisy(c,c.byn[n>>3])}   // a bit counts as quiet when its byte isn't a counter / live value
 function qlast(c){var m=0;for(var k in c.bl)if(qbit(c,+k)&&c.bl[k]>m)m=c.bl[k];return m}   // last change of a quiet bit
 function nbits(c){return Object.keys(c.bn).length}
-function dmark(c){if(!c.base)return 0;var n=0;for(var i=0;i<Math.max(c.b.length,c.base.length);i++){var x=(c.b[i]||0)^(c.base[i]||0);while(x){n+=x&1;x>>=1}}return n}
-function bcol(c,i,t){var st='';if(c.base&&c.b[i]!==c.base[i])st='box-shadow:inset 0 0 0 2px #1a73e8;';
+// Mark works like SavvyCAN's "notch": every bit that had already flipped before Mark is ignored; the mark column counts
+// bits that flipped after it (also a press-and-release that came back to the old value). Press Mark again to notch more.
+function newbit(c,n){return c.notch&&!c.notch[n]&&c.bl[n]>MARKT}
+function dmark(c){var m=0;for(var k in c.bl)if(newbit(c,+k))m++;return m}
+function bcol(c,i,t){var st='';for(var j=0;j<8;j++)if(newbit(c,i*8+j)){st='box-shadow:inset 0 0 0 2px #1a73e8;';break}
  if(noisy(c,c.byn[i]))return st+'color:var(--mut)';if(!c.byl[i])return st;var a=t-c.byl[i];
  return st+(a<1.5?'background:#e5484d;color:#fff':a<5?'background:#f08a00;color:#000':a<30?'background:rgba(240,138,0,.25)':'')}
 function ago(t,x){return x?(t-x<100?(t-x).toFixed(1):Math.round(t-x))+'':'-'}
 function canSort(m){SORT=m;show(D)}function canView(m){VIEW=m;show(D)}function canOpen(k){OPEN[k]=!OPEN[k];show(D)}
-function canMark(){MARKT=Date.now()/1000;for(var k in CH)CH[k].base=CH[k].b.slice();show(D)}
+function canMark(){MARKT=Date.now()/1000;for(var k in CH){var c=CH[k];c.base=c.b.slice();c.notch={};for(var n in c.bn)c.notch[n]=1}if(VIEW=='all')VIEW='mark';show(D)}
 function canReset(){CH={};MARKT=0;OPEN={};if(D)track(D);show(D)}
 function bitgrid(c,t){var h='<table class=mono style="margin:6px 0"><tr><td>byte \\ bit</td>';for(var j=7;j>=0;j--)h+='<td>'+j+'</td>';h+='<td>hex</td></tr>';
  for(var i=0;i<c.b.length;i++){h+='<tr><td>'+i+'</td>';for(var j=7;j>=0;j--){var n=i*8+j,f=c.bn[n]||0,a=c.bl[n]?t-c.bl[n]:1e9,
-   bg=a<1.5&&qbit(c,n)?'#e5484d':!qbit(c,n)&&f?'rgba(128,128,128,.35)':f?'rgba(26,115,232,'+Math.min(0.9,0.2+0.15*Math.log(1+f))+')':'';
+   bg=newbit(c,n)?'#2fbf71':a<1.5&&qbit(c,n)?'#e5484d':!qbit(c,n)&&f?'rgba(128,128,128,.35)':f?'rgba(26,115,232,'+Math.min(0.9,0.2+0.15*Math.log(1+f))+')':'';
    h+='<td title="bit '+n+' (Intel start bit) &middot; '+f+' flips'+(c.bl[n]?' &middot; last '+ago(t,c.bl[n])+' s ago':'')+'" style="text-align:center;'+(bg?'background:'+bg:'')+'">'+(c.b[i]>>j&1)+'</td>'}
   h+='<td>'+('0'+c.b[i].toString(16)).slice(-2)+'</td></tr>'}
- h+='</table>'+bytegraphs(c,t)+'<div style="color:var(--mut)">blue = flipped (darker = more often), grey = in a byte that changes constantly, red = just now. Hover a bit for its number and count.</div><div class=mono style="margin-top:6px">';
+ h+='</table>'+bytegraphs(c,t)+'<div style="color:var(--mut)">green = flipped after Mark (and never before), blue = flipped (darker = more often), grey = in a byte that changes constantly, red = just now. Hover a bit for its number and count.</div><div class=mono style="margin-top:6px">';
  c.hist.forEach(function(e){h+=ago(t,e[0])+' s ago &nbsp; '+e[1]+'<br>'});return h+'</div>'}
 function bytegraphs(c,t){   // value of each byte over the last 60 s (like SavvyCAN's graphs), only bytes that changed
  var h='<div style="display:flex;flex-wrap:wrap;gap:8px;margin:6px 0">',W=180,H=44;
@@ -1231,14 +1234,15 @@ function bytegraphs(c,t){   // value of each byte over the last 60 s (like Savvy
 function allcan(raw){var t=Date.now()/1000,q=Q.toLowerCase(),btn=function(cur,v,f,l){return '<button class=chipb'+(cur==v?' style="background:#1a73e8;color:#fff"':'')+' onclick="'+f+'(\''+v+'\')">'+l+'</button>'};
  var h='<section class=wide><h2>Every CAN address seen (any bus) <small>'+Object.keys(raw).length+' addresses'+(MARKT?' &middot; mark set '+ago(t,MARKT)+' s ago':'')+'</small></h2>'+
   '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0">sort '+btn(SORT,'recent','canSort','last change')+btn(SORT,'rate','canSort','changes/s')+btn(SORT,'bits','canSort','bits changing')+btn(SORT,'addr','canSort','address')+btn(SORT,'hz','canSort','Hz')+btn(SORT,'bus','canSort','bus')+
-  ' &nbsp; show '+btn(VIEW,'all','canView','all')+btn(VIEW,'changing','canView','changed in 30 s')+btn(VIEW,'mark','canView','differs from mark')+btn(VIEW,'static','canView','never changed')+
+  ' &nbsp; show '+btn(VIEW,'all','canView','all')+btn(VIEW,'changing','canView','changed in 30 s')+btn(VIEW,'mark','canView','new since mark')+btn(VIEW,'static','canView','never changed')+
   ' &nbsp; <button class=chipb onclick="canMark()" style="background:#2fbf71;color:#fff">Mark</button><button class=chipb onclick="canReset()">Reset stats</button></div>'+
-  '<div style="color:var(--mut);margin-bottom:6px">Changed <span style="background:#e5484d;color:#fff">&lt;1.5 s</span> <span style="background:#f08a00;color:#000">&lt;5 s</span> <span style="background:rgba(240,138,0,.25)">&lt;30 s</span> ago &middot; grey = changes almost every update (counter / live value) &middot; <span style="box-shadow:inset 0 0 0 2px #1a73e8">outlined</span> = differs from Mark &middot; "last chg" ignores grey bytes. Bytes of IDs nothing decodes refresh twice a second, so very short blips can be missed.</div>'+
+  '<div style="color:var(--mut);margin-bottom:6px">Changed <span style="background:#e5484d;color:#fff">&lt;1.5 s</span> <span style="background:#f08a00;color:#000">&lt;5 s</span> <span style="background:rgba(240,138,0,.25)">&lt;30 s</span> ago &middot; grey = changes almost every update (counter / live value) &middot; <span style="box-shadow:inset 0 0 0 2px #1a73e8">outlined</span> = has a bit that flipped after Mark and never before (wait 30 s, then Mark, then do one thing) &middot; "last chg" ignores grey bytes. Bytes of IDs nothing decodes refresh twice a second, so very short blips can be missed.</div>'+
   '<input id=f1 placeholder="filter by address / name / bus, e.g. 0x3d8, UI_, src 1" value="'+Q+'" oninput="Q=this.value;show(D);var e=document.getElementById(\'f1\');e.focus();e.setSelectionRange(Q.length,Q.length)">'+
   '<div style="overflow-x:auto"><table class=mono><tr><td>addr</td><td>name (if in DBC)</td><td>bus</td><td>Hz</td><td>age s</td><td>last chg s</td><td>chg/s</td><td>bits</td><td>mark</td><td>data</td></tr>';
  var ks=Object.keys(raw).filter(function(k){var e=raw[k],c=CH[k];if(!c)return false;if(q&&(hx(k)+' '+e.name+' src '+e.src).toLowerCase().indexOf(q)<0)return false;
   if(VIEW=='changing')return t-qlast(c)<30;if(VIEW=='mark')return dmark(c)>0;if(VIEW=='static')return !c.chg;return true});
  var rate=function(k){var c=CH[k];return c.chg/Math.max(1,t-c.first)},key={recent:function(k){return -qlast(CH[k])},rate:function(k){return -rate(k)},bits:function(k){return -nbits(CH[k])},addr:function(k){return +k},hz:function(k){return -raw[k].hz},bus:function(k){return raw[k].src*4096+(+k)}}[SORT];
+ if(VIEW=='mark')key=function(k){return -dmark(CH[k])};
  ks.sort(function(a,b){return (key(a)-key(b))||(a-b)});
  ks.forEach(function(k){var e=raw[k],c=CH[k],ql=qlast(c),dm=dmark(c),d='';
   for(var i=0;i<c.b.length;i++)d+='<span style="padding:0 2px;border-radius:3px;'+bcol(c,i,t)+'" title="byte '+i+' &middot; '+(c.byn[i]||0)+' changes'+(c.byl[i]?' &middot; last '+ago(t,c.byl[i])+' s ago':'')+'">'+('0'+c.b[i].toString(16)).slice(-2)+'</span> ';
