@@ -1660,7 +1660,7 @@ function draw(){var G=geom();g.clearRect(0,0,G.W,G.H);if(!S)return;
  else{parkArcs(G,G.cx,eby-ew*0.62,eby,ew*0.5);carIcon(G.cx,eby,ew,false,'rgba(210,60,40,.55)')}
  /* speed-limit sign, left of the road */
  var limv=S.lim&&typeof S.lim=='object'?S.lim.v:S.lim,limk=S.lim&&typeof S.lim=='object'?S.lim.kmh!==false:true;
- if(limv>0){var lkmh=limk?limv:limv*1.609344,sv=Math.round(MPH?(limk?limv*0.621371:limv):lkmh),sr=Math.min(G.H*.072,G.W*.055),sx=Math.max(sr+10,G.cx-G.pxB*3.4),sy=G.H*0.52;g.beginPath();g.arc(sx,sy,sr,0,6.2832);g.fillStyle='#fff';g.fill();g.lineWidth=sr*.3;g.strokeStyle='#d8232a';g.stroke();g.fillStyle='#111';g.textAlign='center';g.font='700 '+Math.round(sr*(sv>=100?.72:.95))+'px system-ui';g.fillText(sv,sx,sy+sr*.33)}
+ if(limv>0){var lkmh=limk?limv:limv*1.609344,sv=Math.round(MPH?(limk?limv*0.621371:limv):lkmh),sr=G.H*.042,wx=G.cx+G.H*.2,sx=wx+G.H*.11,sy=G.H*.11;if(sx+sr>G.W-8){sx=wx;sy=G.H*.11+G.H*.1}   /* next to the steering wheel; below it when the screen is too narrow */g.beginPath();g.arc(sx,sy,sr,0,6.2832);g.fillStyle='#fff';g.fill();g.lineWidth=sr*.3;g.strokeStyle='#d8232a';g.stroke();g.fillStyle='#111';g.textAlign='center';g.font='700 '+Math.round(sr*(sv>=100?.72:.95))+'px system-ui';g.fillText(sv,sx,sy+sr*.33)}
  /* ===== top overlays ===== */
  var spd=Math.round((S.v||0)*(MPH?2.236936:3.6));
  g.textAlign='center';g.fillStyle='#fff';g.font='300 '+Math.round(G.H*.16)+'px system-ui';g.fillText(spd,G.cx,G.H*.17);
