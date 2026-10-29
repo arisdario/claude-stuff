@@ -1553,10 +1553,11 @@ html,body{margin:0;height:100%;background:#0a0b0d;overflow:hidden;font-family:sy
 #map .leaflet-tile{filter:brightness(1.35) contrast(1.05)}
 #map .leaflet-control-attribution{background:rgba(0,0,0,.4);color:#6b7480;font-size:9px}#map .leaflet-control-attribution a{color:#8b949e}
 #arrow{width:0;height:0;border-left:10px solid transparent;border-right:10px solid transparent;border-bottom:26px solid #e5383b;filter:drop-shadow(0 0 4px rgba(0,0,0,.8));transform-origin:50% 60%}
-@media (max-aspect-ratio:11/10){#map{display:none}}
+@media (max-aspect-ratio:11/10){#map{width:100vw;height:62vh;-webkit-mask-image:linear-gradient(to bottom,#000 0%,#000 45%,transparent 100%);mask-image:linear-gradient(to bottom,#000 0%,#000 45%,transparent 100%)}#map.on{opacity:.6}}
+#map.on{opacity:1}
 #nav{position:fixed;right:10px;top:10px;z-index:50}#nav summary{list-style:none;cursor:pointer;width:34px;height:34px;display:flex;align-items:center;justify-content:center;background:rgba(28,33,40,.6);border:1px solid #2a2f36;border-radius:8px;font-size:17px;color:#aab1b8}#nav summary::-webkit-details-marker{display:none}#nav>div{position:absolute;right:0;top:42px;background:#14171b;border:1px solid #2a2f36;border-radius:8px;padding:6px 0;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.5)}#nav a{display:block;padding:9px 14px;color:#cfd6dd;text-decoration:none;font-size:13px;white-space:nowrap}#nav a:hover{background:#20252b}
 </style></head><body><div id=map></div><canvas id=c></canvas>
-<details id=nav><summary>&#9776;</summary><div><span id=conn style="display:block;padding:9px 14px;color:#8a9098;font-size:13px">connecting&hellip;</span><a href="#" id=unit onclick="return unitTog()">units: km/h</a><a href="#" onclick="document.getElementById('egof').click();return false">upload images (.webp)</a><a href="/">road view</a><a href="/map">CAN data</a><a href="/top">top-down</a><a href="/video">video</a><a href="?demo=1">demo</a></div></details>
+<details id=nav><summary>&#9776;</summary><div><span id=conn style="display:block;padding:9px 14px;color:#8a9098;font-size:13px">connecting&hellip;</span><a href="#" id=unit onclick="return unitTog()">units: km/h</a><a href="#" id=locsw onclick="return geoStart(true)">map: use this phone's location</a><a href="#" onclick="document.getElementById('egof').click();return false">upload images (.webp)</a><a href="/">road view</a><a href="/map">CAN data</a><a href="/top">top-down</a><a href="/video">video</a><a href="?demo=1">demo</a></div></details>
 <input type=file id=egof accept="image/webp" multiple style="display:none" onchange="egoUp(this)">
 <script>
 var cv=document.getElementById('c'),g=cv.getContext('2d'),S=null,demo=/demo/.test(location.search);
@@ -1696,17 +1697,31 @@ function draw(){var G=geom();g.clearRect(0,0,G.W,G.H);if(!S)return;
 }
 /* left map: CARTO dark tiles (OpenStreetMap data), follows the car (1 Hz fix from MCU_locationStatus), red arrow + blue trail of where you drove */
 var MAPL=null,MK=null,TL=null,TRK=[],LASTLL=null;
-function mapUpd(gp){if(!gp||typeof L=='undefined')return;var md=document.getElementById('map');if(md&&getComputedStyle(md).display=='none')return;
+function mapUpd(gp){if(!gp||typeof L=='undefined')return;var md=document.getElementById('map');
  if(!MAPL){MAPL=L.map('map',{zoomControl:false,dragging:false,scrollWheelZoom:false,doubleClickZoom:false,boxZoom:false,keyboard:false,touchZoom:false,tap:false});
   L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:19,subdomains:'abcd',attribution:'&copy; OpenStreetMap &copy; CARTO'}).addTo(MAPL);
   TL=L.polyline([],{color:'#1f7bff',weight:7,opacity:.9,lineCap:'round'}).addTo(MAPL);
   MK=L.marker([gp.lat,gp.lon],{icon:L.divIcon({className:'',html:'<div id=arrow></div>',iconSize:[20,26],iconAnchor:[10,15]}),interactive:false}).addTo(MAPL);
-  MAPL.setView([gp.lat,gp.lon],16,{animate:false});md.style.opacity=1}
+  MAPL.setView([gp.lat,gp.lon],16,{animate:false});md.classList.add('on')}
  var ll=[gp.lat,gp.lon];if(LASTLL&&LASTLL[0]==ll[0]&&LASTLL[1]==ll[1])return;LASTLL=ll;
  TRK.push(ll);if(TRK.length>900)TRK.shift();TL.setLatLngs(TRK);MK.setLatLng(ll);
  var a=document.getElementById('arrow');if(a&&gp.hdg!=null)a.style.transform='rotate('+gp.hdg+'deg)';
  var z=(S&&S.v>25)?15:16;if(MAPL.getZoom()!=z)MAPL.setView(ll,z,{animate:true});else MAPL.panTo(ll,{animate:true,duration:.9})}
-function upd(d){S=d;draw();try{mapUpd(d.gps)}catch(e){}}
+/* the phone's own location (asks for permission once; needs https or localhost). Used while fresh (<5 s), else the car's GPS */
+var PHONE=null,GEOID=null,PREV=null;
+function geoMsg(t){var a=document.getElementById('locsw');if(a)a.textContent=t}
+function geoStart(user){if(!navigator.geolocation){geoMsg('map: no location in this browser');return false}
+ if(!window.isSecureContext){geoMsg('map: location needs https (open via the tunnel)');return false}
+ if(GEOID!==null){if(!user)return false;navigator.geolocation.clearWatch(GEOID)}
+ geoMsg('map: waiting for location…');
+ GEOID=navigator.geolocation.watchPosition(function(p){var c=p.coords,h=(c.heading!=null&&!isNaN(c.heading)&&c.speed>0.5)?c.heading:null;
+   if(h==null&&PREV){var dy=c.latitude-PREV[0],dx=(c.longitude-PREV[1])*Math.cos(c.latitude*Math.PI/180);if(Math.abs(dx)+Math.abs(dy)>2e-5)h=(Math.atan2(dx,dy)*180/Math.PI+360)%360;else if(PHONE)h=PHONE.hdg}
+   if(!PREV||Math.abs(c.latitude-PREV[0])+Math.abs(c.longitude-PREV[1])>2e-5)PREV=[c.latitude,c.longitude];
+   PHONE={lat:+c.latitude.toFixed(6),lon:+c.longitude.toFixed(6),hdg:h,acc:c.accuracy,t:Date.now()};geoMsg('map: phone location (±'+Math.round(c.accuracy)+' m)');try{mapUpd(PHONE)}catch(e){}},
+  function(e){geoMsg(e.code==1?'map: location blocked - allow it in the browser settings':'map: no location fix yet (tap to retry)')},
+  {enableHighAccuracy:true,maximumAge:1000,timeout:20000});return false}
+function gpsNow(d){if(PHONE&&Date.now()-PHONE.t<5000)return PHONE;return d&&d.gps}
+function upd(d){S=d;draw();try{mapUpd(gpsNow(d))}catch(e){}}
 function demoLoop(){var t=Date.now()/1000,bend=Math.sin(t*0.22)*0.00002;
  function poly(o){return [bend,0,0.03*Math.sin(t*0.3),o]}
  var lead={d:40+12*Math.sin(t*0.35),y:0.2*Math.sin(t*0.3),vr:-2.5*Math.sin(t*0.5)};
@@ -1714,7 +1729,7 @@ function demoLoop(){var t=Date.now()/1000,bend=Math.sin(t*0.22)*0.00002;
  if(Math.sin(t*0.3)>0.5)o.push({d:15,y:-4+8*((t*0.25)%1),c:'unknown',ml:{c:'pedestrian'},cross:true,vy:1.0});
  upd({v:21+5*Math.sin(t*0.2),cruise:90,acc:true,op:true,alc:Math.sin(t*0.15)>-0.2,model:{p:poly(0),l:poly(-1.85),r:poly(1.85),pl:0.9,pr:0.9},lead:lead,o:o,lim:{v:50,kmh:true},park:{f:{l:255,r:150,ss:1},r:{l:180,r:Math.round(45+40*Math.sin(t*0.7)),ss:1}},soc:63,gear:'drive',pw:{kw:-8+48*Math.max(0,Math.sin(t*0.4))},gps:(function(){var th=t*0.05;return {lat:59.9139+0.003*Math.sin(th),lon:10.7522+0.006*Math.cos(th),hdg:(Math.atan2(-0.006*Math.sin(th)*0.5,0.003*Math.cos(th))*57.3+360)%360}})(),alert:''});
  requestAnimationFrame(demoLoop)}
-unitUI();
+unitUI();if(!demo)geoStart(false);
 if(demo){document.getElementById('conn').textContent='demo data';demoLoop()}
 else{var es=new EventSource('/api/stream');es.onmessage=function(e){document.getElementById('conn').textContent='live';upd(JSON.parse(e.data))};es.onerror=function(){document.getElementById('conn').textContent='disconnected, retrying&hellip;'};setInterval(draw,200)}
 </script></body></html>
