@@ -562,7 +562,7 @@ class CarController():
       self.DAS_221_lcAborting = 1
       self.warningCounter = 300
       self.warningNeeded = 1
-    if CS.hasTeslaIcIntegration:
+    if CS.hasTeslaIcIntegration or self.AHB.auto_or_test():   # AHBAUTO: /data/ahb_auto or /data/ahb_test, see AHB_module
       highLowBeamStatus,highLowBeamReason,ahbIsEnabled = self.AHB.update(CS,frame,self.ahbLead1)
       if frame % 5 == 0:
         self.cc_counter = (self.cc_counter + 1) % 40 #use this to change status once a second

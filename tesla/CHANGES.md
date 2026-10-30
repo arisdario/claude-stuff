@@ -105,3 +105,25 @@ controller are not modelled.
   actually driven in the 25 Oct log, so it is not used.
 - Vision: the camera model's path is used (improved above). Detecting pedestrians/cyclists from vision would need a
   newer openpilot driving model; the old one only gives path, lanes and a lead car.
+
+# Auto high beam (AHB) on a pre-AP car with MCU2
+
+**Why it never worked:** `AHB_module.py` only acts when the MCU sends `MCU_chassisControl.MCU_ahlbEnable = 1`, the
+setting from the Autopilot menu. Your MCU2 has no Autopilot menu and sends 0 (decoded from your car: `60 02 10 3c c1
+cf`), so AHB stopped at its first check. The decision was also only sent with `has_tesla_ic_integration = True`, which
+on this car would take lane change (`MCU_pedalSafetyEnable`) and the speed limit from MCU settings it never sends.
+
+**How it works (Tesla's design, unchanged):** the system can only **dip** the beams. "On" is *undecided*, meaning your
+stalk decides - so for auto high beam you push the stalk to high beam and leave it; it dips for traffic.
+
+| File | Effect |
+|---|---|
+| `touch /data/ahb_auto` | AHB without the MCU setting and without IC integration; high beam allowed from **70 km/h**, dipped again below **60 km/h** |
+| `touch /data/ahb_test` | Parked, lights on, stalk in high beam: dips and releases every 2 s - shows whether your light controller obeys the (fake) Autopilot computer at all. `rm` it after |
+
+Unchanged on purpose: dipping for oncoming/preceding traffic (radar car within 100 m, camera lead, bright camera image
+= headlights/street lights, 5 s hold). Without them it would dazzle other drivers.
+
+**Test first, parked:** `touch /data/ahb_test`, restart openpilot (or reboot), lights on, stalk in high beam. If the beams
+dip every 2 s, the car obeys and `/data/ahb_auto` will work. If nothing happens, the light controller ignores the fake
+Autopilot computer on a no-AP config (like the cluster) - tell me. Tests: `python3 tesla/tests/test_ahb.py` (10).
