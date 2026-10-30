@@ -93,6 +93,15 @@ edges, nearby radar objects, the free space on each side, GPS, and which openpil
 (`/data/media/0/realdata`) cover it. `/events` shows them on a map, as a list, and as a chart of free space and
 steering around the moment you took over.
 
+Each event is also **analysed** against what openpilot did. It takes the radar object that was in your path when you
+acted (braked / steered) and works back through the 15 s: when the radar first saw it, when openpilot's lead matched it
+(radar-confirmed or camera only), whether the car was slowing without your foot on the brake and how hard, whether
+openpilot warned (forward collision warning or any alert), and how many seconds to contact were left. The verdict
+says it in words (e.g. *radar saw it 6.0 s before you; openpilot lead 2.0 s before; slowed only 0.8 s before; no
+warning*). **Late** = openpilot slowed less than 1.5 s before you and did not warn. The top of `/events` sums it up:
+how many were late, how often openpilot never took the object as its lead, and how much earlier the radar saw things
+than openpilot's lead - the head start better software could use.
+
 Road edges come from the 0.8.3 driving model (`tesla/model083`); with the stock 0.7.5 model only lane lines and radar
 objects are used. Files: `/data/interventions/ev_*.json` (about 75-200 KB each; the newest 500 are kept). The GPS in
 them is your position: keep them private.

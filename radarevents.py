@@ -93,9 +93,104 @@ def sample(st, now):
   if e: s['edge'] = [[round(interp(x, X_IDXS, e['l']), 2) for x in (0, 10, 20, 40)],
                      [round(interp(x, X_IDXS, e['r']), 2) for x in (0, 10, 20, 40)]]
   if g.get('lat') is not None: s['gps'] = [g['lat'], g['lon'], g.get('hdg')]
-  s['obj'] = [[o.get('d'), o.get('y'), o.get('vy'), o.get('c'), 1 if o.get('stationary') else 0]
-              for o in (st.get('o') or []) if (o.get('d') or 99) < 40 and abs(o.get('y') or 99) < 6][:12]
+  # radar objects: out to 200 m (a slow truck matters long before it is close), with track id and closing speed
+  objs = [o for o in (st.get('o') or []) if 0 < (o.get('d') or 999) < 200 and abs(o.get('y') or 99) < 6]
+  objs.sort(key=lambda o: o['d'])
+  s['obj'] = [[o.get('d'), o.get('y'), o.get('vy'), o.get('c'), 1 if o.get('stationary') else 0, o.get('s'), o.get('vr')]
+              for o in objs[:16]]
+  # what openpilot is doing: its lead (radar-confirmed or camera only), planner target, warnings, actual accel
+  s['a'] = None if st.get('a') is None else round(st['a'], 2)
+  ld = st.get('lead')
+  s['lead'] = [ld.get('d'), ld.get('vr'), 1 if ld.get('radar') else 0] if ld else None
+  pl = st.get('plan') or {}
+  s['aT'] = pl.get('aT')
+  s['fcw'] = bool(pl.get('fcw') or (ld and ld.get('fcw')))
+  s['alert'] = (st.get('alert') or '')[:40]
+  if p: s['pp'] = [round(x, 7) for x in p]
   return s
+
+
+IN_PATH_M = 1.6          # m either side of the predicted path counts as "in my lane" for the analysis
+SLOW_A = -0.5            # m/s2: "openpilot slowed" = the car decelerating this much without the brake pedal
+TRACK_GAP_S = 0.6        # a radar track may drop out this long and still be the same object
+LATE_S = 1.5             # openpilot slowing less than this before you acted counts as late
+
+
+def _in_path(o, s):
+  pp = s.get('pp')
+  return abs((o[1] or 0.0) - (poly_y(pp, o[0]) if pp else 0.0)) < IN_PATH_M
+
+
+def _ttc(o):
+  return o[0] / -o[6] if (o[6] or 0) < -0.5 else None
+
+
+def analyze(samples, t0, kind):
+  """What happened before you acted. Times are seconds BEFORE t0, None = never:
+  radar_saw   the radar first saw the hazard (the in-path object most urgent when you acted)
+  op_lead     openpilot's lead matched it (op_lead_radar: radar-confirmed, else camera only)
+  op_slowed   the car was decelerating (no brake pedal, engaged) - op_max_decel how hard
+  warned      forward collision warning or an openpilot alert
+  ttc         seconds to contact with the hazard when you acted"""
+  pre = [x for x in samples if x['t'] <= t0 + 0.05]
+  out = {'hazard': None, 'radar_saw': None, 'radar_saw_d': None, 'op_lead': None, 'op_lead_radar': None,
+         'op_slowed': None, 'op_max_decel': None, 'warned': None, 'ttc': None, 'late': None, 'verdict': ''}
+  if not pre: return out
+  at = pre[-1]
+  cand = [o for o in at.get('obj') or [] if len(o) >= 7 and o[5] is not None and _in_path(o, at)]
+  hz = min(cand, key=lambda o: (_ttc(o) if _ttc(o) is not None else 1e9, o[0])) if cand else None
+  if hz:
+    sid = hz[5]
+    out['hazard'] = {'d': hz[0], 'vr': hz[6], 'cls': hz[3], 'stationary': bool(hz[4]), 'id': sid}
+    if _ttc(hz) is not None: out['ttc'] = round(_ttc(hz), 1)
+    first, last_seen, hd = None, at['t'], {}
+    for x in reversed(pre):                                   # radar: back while this track id is present
+      m = [o for o in x.get('obj') or [] if len(o) >= 7 and o[5] == sid]
+      if m:
+        first = last_seen = x['t']; hd[x['t']] = m[0][0]
+      elif last_seen - x['t'] > TRACK_GAP_S:
+        break
+    if first is not None:
+      out['radar_saw'] = round(t0 - first, 1); out['radar_saw_d'] = hd[first]
+    lf = lr = None
+    for x in reversed(pre):                                   # openpilot's lead: back while it matches this object
+      d, ld = hd.get(x['t']), x.get('lead')
+      if d is not None and ld and ld[0] is not None and abs(ld[0] - d) < max(5.0, 0.1 * d):
+        lf, lr = x['t'], ld[2]
+      elif lf is not None and x['t'] < t0 - 0.3:
+        break
+    if lf is not None: out['op_lead'] = round(t0 - lf, 1); out['op_lead_radar'] = bool(lr)
+  win = [x for x in pre if t0 - x['t'] <= 10.0]
+  start, mx = None, 0.0
+  for x in reversed(win):                                     # the latest stretch of openpilot slowing before t0
+    a = x.get('a')
+    if a is not None and a < SLOW_A and x['op'] and not x['br']:
+      start = x['t']; mx = min(mx, a)
+    elif start is not None and x['t'] < t0 - 0.3:
+      break
+  if start is not None: out['op_slowed'] = round(t0 - start, 1); out['op_max_decel'] = round(mx, 2)
+  w = [x['t'] for x in win if x.get('fcw') or x.get('alert')]
+  if w: out['warned'] = round(t0 - min(w), 1)
+  if hz: out['late'] = (out['op_slowed'] is None or out['op_slowed'] < LATE_S) and out['warned'] is None
+  out['verdict'] = _verdict(out, kind)
+  return out
+
+
+def _verdict(a, kind):
+  if a['hazard'] is None:
+    return 'no radar object in your path - a steering / lane-position event' if kind in ('steer', 'close', 'mark') \
+      else 'no radar object in your path when you acted'
+  p = []
+  rs, ol, sl, wn = a['radar_saw'], a['op_lead'], a['op_slowed'], a['warned']
+  if rs is not None: p.append('radar saw it %.1f s before you (%s m)' % (rs, a['radar_saw_d']))
+  if ol is None: p.append('openpilot never took it as its lead')
+  else: p.append('openpilot lead %.1f s before (%s)' % (ol, 'radar' if a['op_lead_radar'] else 'camera only'))
+  if sl is None: p.append('openpilot did not slow down')
+  elif sl < LATE_S: p.append('openpilot slowed only %.1f s before you' % sl)
+  else: p.append('openpilot was slowing %.1f s before (max %.1f m/s2)' % (sl, a['op_max_decel']))
+  p.append('no warning' if wn is None else 'warned %.1f s before' % wn)
+  if a['ttc'] is not None: p.append('%.1f s to contact when you acted' % a['ttc'])
+  return '; '.join(p)
 
 
 class Recorder:
@@ -180,6 +275,14 @@ class Recorder:
           'gps': at.get('gps') or next((x['gps'] for x in reversed(samples) if x.get('gps')), None),
           'min_clear': mins, 'video': self._segments(t0), 'samples': samples}
     if p.get('disengaged'): ev['disengaged'] = p['disengaged']
+    act = t0                     # when you actually started acting (brake / gas / steering), not when openpilot switched off
+    if p['type'] in ('disengage', 'steer'):
+      for x in reversed([x for x in samples if x['t'] <= t0 + 0.05]):
+        if x['br'] or x['gas'] or x['sp']: act = x['t']
+        elif x['t'] < t0 - 0.05: break
+    ev['acted'] = round(act, 2)
+    try: ev['analysis'] = analyze(samples, act, p['type'])
+    except Exception as e: ev['analysis'] = {'verdict': 'analysis failed: %s' % e}
     if self.write: self._write(ev)
     return ev
 

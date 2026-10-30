@@ -356,7 +356,7 @@ def _worker(prof=None):
     if messaging is None:
         print('no openpilot messaging here (not on the EON): live data is off. Open /?demo=1 for the demo scene, or use radarreplay.py to replay a recording.'); return
     can = messaging.sub_sock('can'); subs = {}
-    for svc in ('carState', 'controlsState', 'radarState', 'model'):
+    for svc in ('carState', 'controlsState', 'radarState', 'model', 'plan'):
         # conflate: keep only the newest message - only the latest state is used, and a reader that falls behind
         # (busy page threads, camera encoding) otherwise gets "Reader was evicted, reconnecting". Not for 'can'.
         try: subs[svc] = messaging.sub_sock(svc, conflate=True)
@@ -505,7 +505,11 @@ def _worker(prof=None):
                         except Exception: pass
                     elif svc == 'radarState':
                         l = ev.radarState.leadOne
-                        STATE['lead'] = {'d': round(l.dRel, 1), 'y': round(l.yRel, 2), 'vr': round(l.vRel, 1)} if l.status else None
+                        STATE['lead'] = {'d': round(l.dRel, 1), 'y': round(l.yRel, 2), 'vr': round(l.vRel, 1),
+                                         'radar': bool(l.radar), 'fcw': bool(l.fcw)} if l.status else None
+                    elif svc == 'plan':     # what openpilot's planner intends (for the intervention analysis)
+                        p = ev.plan
+                        STATE['plan'] = {'aT': round(p.aTarget, 2), 'vT': round(p.vTarget, 2), 'fcw': bool(p.fcw), 'lead': bool(p.hasLead)}
                 except Exception: pass
         if now >= nxt:
             nxt = now + 0.1; objs = []
@@ -558,7 +562,7 @@ def _worker(prof=None):
                 SNAP[0] = json.dumps(STATE); SNAP[1] = now
             if EVREC is not None:        # 10 Hz: interventions and close passes (radarevents.py); never lets an error stop the loop
                 try:
-                    _ev = EVREC.update({k: STATE.get(k) for k in ('v', 'ang', 'op', 'acc', 'drv', 'model', 'o', 'gps')}, now)
+                    _ev = EVREC.update({k: STATE.get(k) for k in ('v', 'a', 'ang', 'op', 'acc', 'drv', 'model', 'o', 'gps', 'lead', 'plan', 'alert')}, now)
                     if _ev: STATE['lastev'] = {'type': _ev['type'], 'cause': _ev['cause'], 'side': _ev['side'], 't': _ev['t'], 'file': _ev.get('file')}
                 except Exception as _e:
                     print('radarevents:', _e)
@@ -1581,40 +1585,50 @@ th{color:var(--mut);font-weight:500}tr.ev{cursor:pointer}tr.ev:hover,tr.sel{back
 .tag{padding:1px 7px;border-radius:99px;font-size:12px;font-weight:600;color:#000}
 .wrap{overflow-x:auto}canvas{width:100%;height:220px;display:block}.mut{color:var(--mut)}.empty{color:var(--mut);padding:20px}
 </style></head><body>
-<header><b>Interventions &amp; close passes</b><span class=mut id=cnt></span><a href="/dash">dash</a><a href="/">road view</a><a href="/trips">trips</a></header>
+<header><b>Interventions &amp; close passes</b><span class=mut id=cnt></span><span id=summ></span><a href="/dash">dash</a><a href="/">road view</a><a href="/trips">trips</a></header>
 <main>
 <section><h2>Where</h2><div id=map></div></section>
-<section><h2 id=dt>Pick an event</h2><canvas id=c1></canvas><canvas id=c2 style="height:150px"></canvas><div id=info class=mut></div></section>
+<section><h2 id=dt>Pick an event</h2><canvas id=c1></canvas><canvas id=c2 style="height:150px"></canvas><canvas id=c3 style="height:150px"></canvas><div id=verdict style="margin:8px 0;line-height:1.5"></div><div id=info class=mut></div></section>
 <section style="grid-column:1/-1"><h2>Events <span class=mut>(newest first; clearance = free space beside the car: road edge / static object, smallest in the 5 s before)</span></h2><div class=wrap><table id=tb></table></div></section>
 </main>
 <script>
 var COL={steer:'#3d8bff',disengage:'#e5484d',close:'#f5a524',mark:'#2fbf71'},NAME={steer:'you steered',disengage:'disengaged',close:'close pass',mark:'marked'};
 var map=null,LAY=null,ROWS=[],SEL=null;
 function f2(x){return x==null?'-':(+x).toFixed(2)}
+function sb(x){return x==null?'<span style="color:#e5484d">never</span>':(+x).toFixed(1)+' s'}
+function summary(){var hz=ROWS.filter(function(e){return e.analysis&&e.analysis.hazard});if(!hz.length){document.getElementById('summ').textContent='';return}
+ var late=hz.filter(function(e){return e.analysis.late}).length,nol=hz.filter(function(e){return e.analysis.op_lead==null}).length,
+  gain=hz.filter(function(e){return e.analysis.radar_saw!=null}).map(function(e){return e.analysis.radar_saw-(e.analysis.op_lead||0)}),
+  avg=gain.length?gain.reduce(function(a,b){return a+b},0)/gain.length:0;
+ document.getElementById('summ').innerHTML='&middot; '+hz.length+' with something in your path: <b style="color:#e5484d">'+late+' late</b> (openpilot slowed &lt;1.5 s before you, no warning), '+nol+' never its lead, radar saw it on average <b>'+avg.toFixed(1)+' s</b> before openpilot\'s lead'}
 function minside(m,s){var a=[m['edge_'+s],m['obj_'+s]].filter(function(v){return v!=null});return a.length?Math.min.apply(null,a):null}
-function load(){fetch('/api/events').then(function(r){return r.json()}).then(function(rows){ROWS=rows;document.getElementById('cnt').textContent=rows.length+' recorded';table();pins()})}
-function table(){var h='<tr><th>when</th><th>what</th><th>cause</th><th>side</th><th>km/h</th><th>clear L</th><th>clear R</th><th>lane L/R</th><th>video</th></tr>';
- if(!ROWS.length)h+='<tr><td colspan=9 class=empty>Nothing yet. Events appear here when you correct the steering, disengage, pass close to a curb/wall, or press Mark on /dash.</td></tr>';
- ROWS.forEach(function(e,i){var m=e.min_clear||{};h+='<tr class="ev'+(SEL==i?' sel':'')+'" onclick="pick('+i+')"><td>'+e.time+'</td><td><span class=tag style="background:'+(COL[e.type]||'#888')+'">'+(NAME[e.type]||e.type)+'</span></td><td>'+(e.cause||'')+(e.disengaged?' + off ('+e.disengaged+')':'')+'</td><td>'+(e.side||'-')+'</td><td>'+e.kmh+'</td><td>'+f2(minside(m,'l'))+'</td><td>'+f2(minside(m,'r'))+'</td><td>'+f2(m.lane_l)+' / '+f2(m.lane_r)+'</td><td class=mut>'+((e.video||[]).join(', ')||'-')+'</td></tr>'});
+function load(){fetch('/api/events').then(function(r){return r.json()}).then(function(rows){ROWS=rows;document.getElementById('cnt').textContent=rows.length+' recorded';table();pins();summary()})}
+function table(){var h='<tr><th>when</th><th>what</th><th>cause</th><th>side</th><th>km/h</th><th>clear L</th><th>clear R</th><th>radar saw</th><th>op lead</th><th>op slowed</th><th>warned</th><th>video</th></tr>';
+ if(!ROWS.length)h+='<tr><td colspan=12 class=empty>Nothing yet. Events appear here when you correct the steering, disengage, pass close to a curb/wall, or press Mark on /dash.</td></tr>';
+ ROWS.forEach(function(e,i){var m=e.min_clear||{};h+='<tr class="ev'+(SEL==i?' sel':'')+'" onclick="pick('+i+')"><td>'+e.time+'</td><td><span class=tag style="background:'+(COL[e.type]||'#888')+'">'+(NAME[e.type]||e.type)+'</span></td><td>'+(e.cause||'')+(e.disengaged?' + off ('+e.disengaged+')':'')+'</td><td>'+(e.side||'-')+'</td><td>'+e.kmh+'</td><td>'+f2(minside(m,'l'))+'</td><td>'+f2(minside(m,'r'))+'</td>'+(function(a){return a&&a.hazard?'<td>'+sb(a.radar_saw)+'</td><td>'+sb(a.op_lead)+'</td><td'+(a.late?' style="color:#e5484d;font-weight:600"':'')+'>'+sb(a.op_slowed)+'</td><td>'+sb(a.warned)+'</td>':'<td colspan=4 class=mut>no object in path</td>'})(e.analysis)+'<td class=mut>'+((e.video||[]).join(', ')||'-')+'</td></tr>'});
  document.getElementById('tb').innerHTML=h}
 function pins(){if(typeof L=='undefined')return;if(!map){map=L.map('map');L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:19,subdomains:'abcd',attribution:'&copy; OpenStreetMap &copy; CARTO'}).addTo(map);LAY=L.layerGroup().addTo(map)}
  LAY.clearLayers();var b=[];ROWS.forEach(function(e,i){if(!e.gps)return;var ll=[e.gps[0],e.gps[1]];b.push(ll);L.circleMarker(ll,{radius:7,color:COL[e.type]||'#888',fillOpacity:.8}).on('click',function(){pick(i)}).bindTooltip(e.time+' '+(NAME[e.type]||e.type)).addTo(LAY)});
  if(b.length)map.fitBounds(b,{padding:[30,30],maxZoom:16});else map.setView([0,0],2)}
-function pick(i){SEL=i;table();var e=ROWS[i];fetch('/api/event?f='+encodeURIComponent(e.file)).then(function(r){return r.json()}).then(function(ev){chart(ev)});if(map&&e.gps)map.setView([e.gps[0],e.gps[1]],17)}
+function pick(i){SEL=i;table();summary();var e=ROWS[i];fetch('/api/event?f='+encodeURIComponent(e.file)).then(function(r){return r.json()}).then(function(ev){chart(ev)});if(map&&e.gps)map.setView([e.gps[0],e.gps[1]],17)}
 function chart(ev){var S=ev.samples||[],t0=ev.t;document.getElementById('dt').textContent=ev.time+' - '+(NAME[ev.type]||ev.type)+' ('+(ev.cause||'')+')';
  plot('c1',S,t0,[['edge L','c','edge_l','#3d8bff',[]],['object L','c','obj_l','#9ec5ff',[4,3]],['lane L','c','lane_l','#56606b',[2,3]],['edge R','c','edge_r','#f5a524',[]],['object R','c','obj_r','#ffd27a',[4,3]],['lane R','c','lane_r','#7a6a52',[2,3]]],0,3,'free space beside the car (m)');
- plot('c2',S,t0,[['your steering torque','tq',null,'#e5484d',[]],['steering angle /10','ang',null,'#8b949e',[]]],null,null,'steering');
+ plot('c2',S,t0,[['your steering torque','tq',null,'#e5484d',[]],['steering angle /10','ang',null,'#8b949e',[]]],null,null,'steering',ev.acted);
+ plot('c3',S,t0,[['car accel (m/s2)','a',null,'#2fbf71',[]],['planner target','aT',null,'#3d8bff',[4,3]]],-4,2,'speed control: did openpilot slow?',ev.acted,'fcw');
+ var a=ev.analysis||{};document.getElementById('verdict').innerHTML=a.verdict?('<b>'+(a.late?'<span style="color:#e5484d">Late: </span>':'')+'</b>'+a.verdict):'';
  var on=S.filter(function(x){return x.op}).length;document.getElementById('info').innerHTML='Speed '+ev.kmh+' km/h &middot; openpilot engaged in '+Math.round(100*on/Math.max(1,S.length))+'% of the samples &middot; video: '+((ev.video||[]).join(', ')||'-')+' &middot; <a href="/api/event?f='+encodeURIComponent(ev.file||'')+'" style="color:#8b949e">raw json</a>'}
-function plot(id,S,t0,series,lo,hi,title){var cv=document.getElementById(id),r=Math.min(2,devicePixelRatio||1),W=cv.clientWidth,H=cv.clientHeight;cv.width=W*r;cv.height=H*r;var g=cv.getContext('2d');g.setTransform(r,0,0,r,0,0);g.clearRect(0,0,W,H);
+function plot(id,S,t0,series,lo,hi,title,acted,markKey){var cv=document.getElementById(id),r=Math.min(2,devicePixelRatio||1),W=cv.clientWidth,H=cv.clientHeight;cv.width=W*r;cv.height=H*r;var g=cv.getContext('2d');g.setTransform(r,0,0,r,0,0);g.clearRect(0,0,W,H);
  var vals=function(x,s){var v=s[2]?(x[s[1]]||{})[s[2]]:x[s[1]];return v==null?null:(s[1]=='ang'?v/10:v)};
  if(lo==null){lo=1e9;hi=-1e9;S.forEach(function(x){series.forEach(function(s){var v=vals(x,s);if(v!=null){lo=Math.min(lo,v);hi=Math.max(hi,v)}})});if(lo>hi){lo=-1;hi=1}var pad=(hi-lo)*.1+.1;lo-=pad;hi+=pad}
  var L0=36,R0=8,T=18,B=22,tx=function(t){return L0+(t-t0+15)/20*(W-L0-R0)},ty=function(v){return T+(1-(v-lo)/(hi-lo))*(H-T-B)};
  g.fillStyle='#8b949e';g.font='11px system-ui';g.fillText(title,L0,12);g.strokeStyle='#2a2f36';g.lineWidth=1;
- for(var k=0;k<=4;k++){var v=lo+(hi-lo)*k/4,y=ty(v);g.beginPath();g.moveTo(L0,y);g.lineTo(W-R0,y);g.stroke();g.fillText(v.toFixed(1),2,y+4)}
+ for(var k=0;k<=4;k++){var v=lo+(hi-lo)*k/4,y=ty(v);g.beginPath();g.moveTo(L0,y);g.lineTo(W-R0,y);g.stroke();g.fillText(v.toFixed(hi-lo<2?2:1),2,y+4)}
  [-15,-10,-5,0,5].forEach(function(s){g.fillText((s>0?'+':'')+s+'s',tx(t0+s)-8,H-6)});
  S.forEach(function(x,i){if(!x.op&&i>0){g.fillStyle='rgba(229,72,77,.10)';g.fillRect(tx(S[i-1].t),T,tx(x.t)-tx(S[i-1].t)+1,H-T-B)}});
  if(lo<0&&hi>0){g.strokeStyle='#444b54';g.beginPath();g.moveTo(L0,ty(0));g.lineTo(W-R0,ty(0));g.stroke()}
  g.strokeStyle='#e8edf2';g.setLineDash([3,3]);g.beginPath();g.moveTo(tx(t0),T);g.lineTo(tx(t0),H-B);g.stroke();g.setLineDash([]);
+ if(acted&&Math.abs(acted-t0)>0.05){g.strokeStyle='#f5a524';g.beginPath();g.moveTo(tx(acted),T);g.lineTo(tx(acted),H-B);g.stroke();g.fillStyle='#f5a524';g.fillText('you acted',tx(acted)-50,T+24)}
+ if(markKey)S.forEach(function(x){if(x[markKey]){g.fillStyle='#e5484d';g.beginPath();g.moveTo(tx(x.t),T+2);g.lineTo(tx(x.t)-4,T+10);g.lineTo(tx(x.t)+4,T+10);g.fill()}});
  var lx=L0+g.measureText(title).width+18;series.forEach(function(s){g.strokeStyle=s[3];g.setLineDash(s[4]);g.lineWidth=2;g.beginPath();var on=false;S.forEach(function(x){var v=vals(x,s);if(v==null){on=false;return}v=Math.max(lo,Math.min(hi,v));if(!on){g.moveTo(tx(x.t),ty(v));on=true}else g.lineTo(tx(x.t),ty(v))});g.stroke();g.setLineDash([]);
   g.fillStyle=s[3];g.fillRect(lx,6,10,3);g.fillStyle='#c9ced4';g.fillText(s[0],lx+13,11);lx+=g.measureText(s[0]).width+26});
  g.fillStyle='rgba(229,72,77,.6)';g.fillText('red shade = openpilot off',W-R0-130,T+12)}

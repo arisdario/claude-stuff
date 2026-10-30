@@ -12,8 +12,10 @@ import radarevents as RE  # noqa: E402
 LANE_L = [0, 0, 0, 1.75]; LANE_R = [0, 0, 0, -1.75]; PATH = [0, 0, 0, 0.0]
 
 
-def state(op=True, v=20.0, sp=False, br=False, gas=False, tq=0.0, edge_l=3.5, edge_r=-3.5, objs=None, gps=(45.0, 9.0, 90.0)):
-  return {'v': v, 'ang': 1.0, 'op': op, 'acc': op, 'drv': {'sp': sp, 'st': tq, 'br': br, 'gas': gas},
+def state(op=True, v=20.0, sp=False, br=False, gas=False, tq=0.0, edge_l=3.5, edge_r=-3.5, objs=None, gps=(45.0, 9.0, 90.0),
+          lead=None, a=0.0, fcw=False, alert=''):
+  return {'v': v, 'a': a, 'ang': 1.0, 'op': op, 'acc': op, 'drv': {'sp': sp, 'st': tq, 'br': br, 'gas': gas},
+          'lead': lead, 'plan': {'aT': a, 'vT': v, 'fcw': fcw, 'lead': lead is not None}, 'alert': alert,
           'model': {'p': PATH, 'l': LANE_L, 'r': LANE_R, 'pl': 0.9, 'pr': 0.9,
                     'e': {'l': [edge_l] * 33, 'r': [edge_r] * 33, 'sl': 0.3, 'sr': 0.3}},
           'o': objs or [], 'gps': {'lat': gps[0], 'lon': gps[1], 'hdg': gps[2]}}
@@ -117,6 +119,74 @@ class TestRecorder(unittest.TestCase):
     try: run(self.rec, [(100, state()), (5, state(sp=True)), (60, state())])
     finally: RE.MAX_FILES = old
     self.assertEqual(len([x for x in os.listdir(self.dir) if x.startswith('ev_')]), 3)
+
+
+def truck_run(lead_last=20, slow_last=8, fcw_from=None, brake=True):
+  """30 m/s towards a truck at 5 m/s: radar track 7 from 180 m, 60 samples (6 s); openpilot's lead only for the last
+  lead_last samples, car decelerating for the last slow_last; then the driver brakes and openpilot disengages"""
+  seq = [(100, state())]
+  d = 180.0
+  for i in range(60):
+    left = 60 - i
+    truck = [{'d': round(d, 1), 'y': 0.2, 'vy': 0.0, 'c': 'four_wheel', 'stationary': False, 's': 7, 'vr': -25.0}]
+    lead = {'d': round(d, 1), 'vr': -25.0, 'radar': True} if left <= lead_last else None
+    seq.append((1, state(objs=truck, lead=lead, a=-1.0 if left <= slow_last else 0.0,
+                         fcw=fcw_from is not None and left <= fcw_from)))
+    d -= 2.5
+  truck = lambda dd: [{'d': dd, 'y': 0.2, 'vy': 0.0, 'c': 'four_wheel', 'stationary': False, 's': 7, 'vr': -25.0}]
+  ld = (lambda dd: {'d': dd, 'vr': -25.0, 'radar': True}) if lead_last > 0 else (lambda dd: None)
+  if brake:
+    seq += [(1, state(br=True, objs=truck(d), lead=ld(d), a=-1.0))]
+    seq += [(1, state(br=True, objs=truck(d - 2.5), lead=ld(d - 2.5), a=-3.0))]
+    seq += [(60, state(op=False, br=True))]
+  return seq
+
+
+class TestAnalysis(unittest.TestCase):
+  def setUp(self):
+    self.rec = RE.Recorder(out_dir=tempfile.mkdtemp(), segment_dir='/nonexistent')
+
+  def test_openpilot_late_no_warning(self):
+    evs, _ = run(self.rec, truck_run())
+    self.assertEqual(len(evs), 1); a = evs[0]['analysis']
+    self.assertEqual((evs[0]['type'], evs[0]['cause']), ('disengage', 'brake'))
+    self.assertEqual(a['hazard']['id'], 7)
+    self.assertAlmostEqual(a['radar_saw'], 6.0, delta=0.15)        # radar had it 6 s before you braked
+    self.assertAlmostEqual(a['radar_saw_d'], 180.0, delta=0.1)
+    self.assertAlmostEqual(a['op_lead'], 2.0, delta=0.15)          # openpilot's lead only 2 s before
+    self.assertTrue(a['op_lead_radar'])
+    self.assertAlmostEqual(a['op_slowed'], 0.8, delta=0.15)
+    self.assertIsNone(a['warned']); self.assertTrue(a['late'])
+    self.assertAlmostEqual(a['ttc'], (180.0 - 60 * 2.5) / 25.0, delta=0.15)
+    self.assertIn('no warning', a['verdict'])
+
+  def test_acted_is_when_the_brake_went_down(self):
+    evs, _ = run(self.rec, truck_run())
+    self.assertAlmostEqual(evs[0]['t'] - evs[0]['acted'], 0.2, delta=0.05)
+
+  def test_openpilot_in_time(self):
+    evs, _ = run(self.rec, truck_run(lead_last=55, slow_last=40, fcw_from=30))
+    a = evs[0]['analysis']
+    self.assertAlmostEqual(a['op_slowed'], 4.0, delta=0.15)
+    self.assertAlmostEqual(a['warned'], 3.0, delta=0.15)
+    self.assertFalse(a['late'])
+    self.assertIn('was slowing', a['verdict'])
+
+  def test_never_its_lead(self):
+    evs, _ = run(self.rec, truck_run(lead_last=0, slow_last=0))
+    a = evs[0]['analysis']
+    self.assertIsNone(a['op_lead']); self.assertIsNone(a['op_slowed'])
+    self.assertIn('never took it as its lead', a['verdict'])
+
+  def test_lateral_event_has_no_hazard(self):
+    evs, _ = run(self.rec, [(100, state(edge_r=-1.4)), (5, state(edge_r=-1.4, sp=True)), (60, state())])
+    a = evs[0]['analysis']
+    self.assertIsNone(a['hazard']); self.assertIn('steering / lane-position', a['verdict'])
+
+  def test_object_beside_the_path_is_not_the_hazard(self):
+    car_next_lane = [{'d': 30.0, 'y': 3.6, 'vy': 0.0, 'c': 'four_wheel', 'stationary': False, 's': 3, 'vr': -10.0}]
+    evs, _ = run(self.rec, [(100, state(objs=car_next_lane)), (2, state(br=True, objs=car_next_lane)), (60, state(op=False))])
+    self.assertIsNone(evs[0]['analysis']['hazard'])
 
 
 if __name__ == '__main__':
