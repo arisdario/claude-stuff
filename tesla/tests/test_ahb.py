@@ -86,14 +86,43 @@ class TestAHB(unittest.TestCase):
     self.c.frameInfoGain = 400                       # oncoming headlights / street lights
     self.assertEqual(self.step(CS())[0], OFF)
 
-  def test_stalk_down_means_low_beam(self):
+  def test_flash_pull_leaves_it_to_the_driver(self):
     self.flag(A.AHB_AUTO_FILE)
+    self.assertEqual(self.step(CS(stalk=2))[:2], (UNDECIDED, SNA))
+
+  def test_managed_stalk_normal_switches_on_when_clear(self):
+    self.flag(A.AHB_AUTO_FILE)
+    st, reason, en = self.step(CS(stalk=0))
+    self.assertEqual((st, reason), (A.AHBDecision.DAS_HIGH_BEAM_ON, ON)); self.assertTrue(en)
+
+  def test_managed_switches_off_for_traffic_and_back_on(self):
+    self.flag(A.AHB_AUTO_FILE)
+    self.assertEqual(self.step(CS(stalk=0))[0], A.AHBDecision.DAS_HIGH_BEAM_ON)
+    self.c.ahbInfoData.radarCarDetected = True
+    self.assertEqual(self.step(CS(stalk=0))[0], OFF)
+    self.c.ahbInfoData.radarCarDetected = False
+    self.assertEqual(self.step(CS(stalk=0), ms=2000)[0], OFF)            # still within the 5 s hold
+    self.assertEqual(self.step(CS(stalk=0), ms=3500)[0], A.AHBDecision.DAS_HIGH_BEAM_ON)
+
+  def test_managed_off_when_bright_or_slow(self):
+    self.flag(A.AHB_AUTO_FILE)
+    self.c.frameInfoGain = 300
+    self.assertEqual(self.step(CS(stalk=0))[0], OFF)
+    self.c.frameInfoGain = 510
+    self.assertEqual(self.step(CS(stalk=0, kmh=15))[0], OFF)
+
+  def test_managed_needs_the_flag(self):
     self.assertEqual(self.step(CS(stalk=0))[:2], (UNDECIDED, SNA))
 
   def test_parked_test_mode_toggles(self):
     self.flag(A.AHB_TEST_FILE)
     seen = set(self.step(CS(kmh=0), ms=2000)[0] for _ in range(4))
-    self.assertEqual(seen, {OFF, UNDECIDED})
+    self.assertEqual(seen, {OFF, UNDECIDED})                           # stalk high: dip / release
+
+  def test_parked_test_mode_stalk_normal_tries_on(self):
+    self.flag(A.AHB_TEST_FILE)
+    seen = set(self.step(CS(kmh=0, stalk=0), ms=2000)[0] for _ in range(4))
+    self.assertEqual(seen, {A.AHBDecision.DAS_HIGH_BEAM_ON, OFF})      # stalk normal: DAS on / off
 
   def test_auto_or_test_tells_carcontroller_to_send(self):
     self.assertFalse(self.c.auto_or_test())

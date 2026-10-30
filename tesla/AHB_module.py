@@ -7,14 +7,19 @@ import time
 DEBUG = False
 
 # AHBAUTO: a pre-AP car with MCU2 never sends MCU_chassisControl.MCU_ahlbEnable (there is no Autopilot menu), so the
-# check "AHB enabled in CID" below always fails. touch /data/ahb_auto to use your own switch instead. The car only
-# obeys a DIP from here (OFF); "on" is UNDECIDED = your stalk decides, so leave the stalk in the high-beam position.
+# check "AHB enabled in CID" below always fails. touch /data/ahb_auto to use your own switch instead.
+#   stalk in normal position  -> the code manages the beams: DAS decision ON when the road is clear, OFF otherwise
+#                                (works only if the light controller obeys DAS "on" - check with /data/ahb_test)
+#   stalk in high-beam position -> Tesla's way: you hold high, the code dips (OFF) for traffic, else UNDECIDED (stalk)
+#   stalk pulled (flash)      -> UNDECIDED, the driver wins
 # Oncoming/preceding traffic checks (radar, camera, image brightness, hold time) stay exactly as they are.
 AHB_AUTO_FILE = '/data/ahb_auto'
 AHB_AUTO_ON_MS = 30.0 / 3.6      # auto mode: high beam allowed from 30 km/h (country roads at 50-60 are where it matters) ...
 AHB_AUTO_OFF_MS = 20.0 / 3.6     # ... and dipped again below 20 km/h (the gap stops flicker, not a high threshold)
-# AHBTEST: touch /data/ahb_test, parked with lights on and the stalk in high beam: dips and releases every 2 s, so you
-# can see whether your light controller obeys the (fake) Autopilot computer at all. rm the file when done.
+# AHBTEST: touch /data/ahb_test, parked with lights on, every 2 s:
+#   stalk in high-beam position -> dip / release   (does the car obey a DAS dip?)
+#   stalk in normal position    -> high on / off   (does the car obey DAS "on"? needed for code-managed high beam)
+# rm the file when done.
 AHB_TEST_FILE = '/data/ahb_test'
 
 class AHBReason():
@@ -96,20 +101,25 @@ class AHBController():
         self.frameInfoGain = frameInfoGain
       _debug("AHB Camera has new data [ frame - " + str(self.frameInfoData.frameId) + "]  = " + str(frameInfoGain) + ", exposure = " + str(exposureTime) + ", frame duration = " + str(frameDuration))
     auto, test = self._flag_files(tms_now)
-    #AHBTEST: parked, lights on, stalk in high beam -> dip / release every 2 s
-    if test and CS.v_ego < 0.5 and CS.ahbHighBeamStalkPosition == 1:
+    #AHBTEST: parked -> stalk high: dip / release every 2 s;  stalk normal: DAS high on / off every 2 s
+    if test and CS.v_ego < 0.5 and CS.ahbHighBeamStalkPosition in (0, 1):
       self.ahbIsEnabled = True
-      dip = (tms_now // 2000) % 2 == 0
-      return self.set_and_return(CS, frame, AHBDecision.DAS_HIGH_BEAM_OFF if dip else AHBDecision.DAS_HIGH_BEAM_UNDECIDED,
-                                 AHBReason.HIGH_BEAM_OFF_REASON_MOVING_RADAR_TARGET if dip else AHBReason.HIGH_BEAM_ON)
+      first_half = (tms_now // 2000) % 2 == 0
+      if CS.ahbHighBeamStalkPosition == 1:
+        return self.set_and_return(CS, frame, AHBDecision.DAS_HIGH_BEAM_OFF if first_half else AHBDecision.DAS_HIGH_BEAM_UNDECIDED,
+                                   AHBReason.HIGH_BEAM_OFF_REASON_MOVING_RADAR_TARGET if first_half else AHBReason.HIGH_BEAM_ON)
+      return self.set_and_return(CS, frame, AHBDecision.DAS_HIGH_BEAM_ON if first_half else AHBDecision.DAS_HIGH_BEAM_OFF,
+                                 AHBReason.HIGH_BEAM_ON if first_half else AHBReason.HIGH_BEAM_OFF_REASON_MOVING_RADAR_TARGET)
     #if AHB not enabled, then return OFF (AHBAUTO: /data/ahb_auto replaces the MCU setting)
     if CS.ahbEnabled != 1 and not auto:
       _debug("AHB not enabled in CID")
       highLowBeamStatus = AHBDecision.DAS_HIGH_BEAM_UNDECIDED
       highLowBeamReason = AHBReason.HIGH_BEAM_OFF_REASON_SNA
       return self.set_and_return(CS,frame,highLowBeamStatus,highLowBeamReason)
-    #if stalk is not in the high beam position, return UNDECIDED
-    if (CS.ahbHighBeamStalkPosition != 1):
+    #AHBAUTO code-managed: stalk in normal position, the code switches high beam on and off itself
+    managed = auto and CS.ahbHighBeamStalkPosition == 0
+    #if stalk is not in the high beam position, return UNDECIDED (code-managed: only when you pull it to flash)
+    if (CS.ahbHighBeamStalkPosition != 1) and not managed:
       _debug("High Beam not on")
       highLowBeamStatus = AHBDecision.DAS_HIGH_BEAM_UNDECIDED
       highLowBeamReason = AHBReason.HIGH_BEAM_OFF_REASON_SNA
@@ -169,8 +179,8 @@ class AHBController():
       highLowBeamStatus = AHBDecision.DAS_HIGH_BEAM_OFF
       highLowBeamReason = AHBReason.HIGH_BEAM_OFF_REASON_MOVING_RADAR_TARGET
       return self.set_and_return(CS,frame,highLowBeamStatus,highLowBeamReason) 
-    #we got here, high beam should be on
-    highLowBeamStatus = AHBDecision.DAS_HIGH_BEAM_UNDECIDED
+    #we got here, high beam should be on (code-managed: say ON; otherwise UNDECIDED lets the stalk keep high beam)
+    highLowBeamStatus = AHBDecision.DAS_HIGH_BEAM_ON if managed else AHBDecision.DAS_HIGH_BEAM_UNDECIDED
     highLowBeamReason = AHBReason.HIGH_BEAM_ON
     _debug("All conditions met, turn lights ON")
     return self.set_and_return(CS,frame,highLowBeamStatus,highLowBeamReason)

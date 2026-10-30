@@ -113,17 +113,25 @@ setting from the Autopilot menu. Your MCU2 has no Autopilot menu and sends 0 (de
 cf`), so AHB stopped at its first check. The decision was also only sent with `has_tesla_ic_integration = True`, which
 on this car would take lane change (`MCU_pedalSafetyEnable`) and the speed limit from MCU settings it never sends.
 
-**How it works (Tesla's design, unchanged):** the system can only **dip** the beams. "On" is *undecided*, meaning your
-stalk decides - so for auto high beam you push the stalk to high beam and leave it; it dips for traffic.
+**`touch /data/ahb_auto`** replaces that MCU setting. What happens then depends on the stalk:
 
-| File | Effect |
+| Stalk | What the code sends (fake Autopilot computer, `DAS_bodyControls`) |
 |---|---|
-| `touch /data/ahb_auto` | AHB without the MCU setting and without IC integration; high beam allowed from **30 km/h**, dipped again below **20 km/h** (the gap stops flicker) |
-| `touch /data/ahb_test` | Parked, lights on, stalk in high beam: dips and releases every 2 s - shows whether your light controller obeys the (fake) Autopilot computer at all. `rm` it after |
+| **normal** | **code-managed**: high beam **ON** when the road is clear, **OFF** otherwise |
+| high-beam position | Tesla's way: dips (OFF) for traffic, otherwise leaves it to your stalk (high) |
+| pulled (flash) | nothing - you decide |
 
-Unchanged on purpose: dipping for oncoming/preceding traffic (radar car within 100 m, camera lead, bright camera image
-= headlights/street lights, 5 s hold). Without them it would dazzle other drivers.
+"Clear" = 30 km/h or faster (dipped again below 20 km/h), dark camera image (gain at maximum: no headlights or street
+lights), no moving car on radar within 100 m, no lead car on camera, and 5 s since the last one. Those traffic checks
+are unchanged on purpose: without them it would dazzle other drivers.
 
-**Test first, parked:** `touch /data/ahb_test`, restart openpilot (or reboot), lights on, stalk in high beam. If the beams
-dip every 2 s, the car obeys and `/data/ahb_auto` will work. If nothing happens, the light controller ignores the fake
-Autopilot computer on a no-AP config (like the cluster) - tell me. Tests: `python3 tesla/tests/test_ahb.py` (11).
+**Test first, parked** - your light controller may ignore the fake Autopilot computer on a no-AP config (like the
+cluster did). `touch /data/ahb_test`, restart openpilot (or reboot), headlights on, then every 2 s:
+
+| Stalk | You should see | Means |
+|---|---|---|
+| **normal** | high beam on / off | the car obeys DAS "on": code-managed high beam works - `touch /data/ahb_auto` |
+| high-beam position | high beam dips / comes back | the car obeys a DAS dip: the stalk-up way works |
+
+Nothing in either: the light controller ignores DAS on this car; tell me. `rm /data/ahb_test` when done. Tests:
+`python3 tesla/tests/test_ahb.py` (16).
