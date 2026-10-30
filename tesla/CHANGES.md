@@ -118,7 +118,7 @@ stalk decides - so for auto high beam you push the stalk to high beam and leave 
 
 | File | Effect |
 |---|---|
-| `touch /data/ahb_auto` | AHB without the MCU setting and without IC integration; high beam allowed from **70 km/h**, dipped again below **60 km/h** |
+| `touch /data/ahb_auto` | AHB without the MCU setting and without IC integration; high beam allowed from **30 km/h**, dipped again below **20 km/h** (the gap stops flicker) |
 | `touch /data/ahb_test` | Parked, lights on, stalk in high beam: dips and releases every 2 s - shows whether your light controller obeys the (fake) Autopilot computer at all. `rm` it after |
 
 Unchanged on purpose: dipping for oncoming/preceding traffic (radar car within 100 m, camera lead, bright camera image
@@ -126,4 +126,4 @@ Unchanged on purpose: dipping for oncoming/preceding traffic (radar car within 1
 
 **Test first, parked:** `touch /data/ahb_test`, restart openpilot (or reboot), lights on, stalk in high beam. If the beams
 dip every 2 s, the car obeys and `/data/ahb_auto` will work. If nothing happens, the light controller ignores the fake
-Autopilot computer on a no-AP config (like the cluster) - tell me. Tests: `python3 tesla/tests/test_ahb.py` (10).
+Autopilot computer on a no-AP config (like the cluster) - tell me. Tests: `python3 tesla/tests/test_ahb.py` (11).

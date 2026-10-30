@@ -56,16 +56,20 @@ class TestAHB(unittest.TestCase):
     st, reason, en = self.step(CS(kmh=100))
     self.assertEqual((st, reason), (UNDECIDED, ON)); self.assertTrue(en)
 
-  def test_auto_below_70_dips(self):
+  def test_auto_below_30_dips(self):
     self.flag(A.AHB_AUTO_FILE)
-    self.assertEqual(self.step(CS(kmh=55))[0], OFF)
+    self.assertEqual(self.step(CS(kmh=18))[0], OFF)
+
+  def test_auto_country_road_speed_is_high_beam(self):
+    self.flag(A.AHB_AUTO_FILE)
+    self.assertEqual(self.step(CS(kmh=55))[1], ON)
 
   def test_auto_hysteresis(self):
     self.flag(A.AHB_AUTO_FILE)
-    self.assertEqual(self.step(CS(kmh=72))[1], ON)
-    self.assertEqual(self.step(CS(kmh=65))[1], ON)   # between 60 and 70: stays allowed
-    self.assertEqual(self.step(CS(kmh=58))[0], OFF)
-    self.assertEqual(self.step(CS(kmh=65))[0], OFF)  # between 60 and 70 from below: stays dipped
+    self.assertEqual(self.step(CS(kmh=32))[1], ON)
+    self.assertEqual(self.step(CS(kmh=25))[1], ON)   # between 20 and 30: stays allowed
+    self.assertEqual(self.step(CS(kmh=18))[0], OFF)
+    self.assertEqual(self.step(CS(kmh=25))[0], OFF)  # between 20 and 30 from below: stays dipped
 
   def test_auto_still_dips_for_traffic(self):
     self.flag(A.AHB_AUTO_FILE)

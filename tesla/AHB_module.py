@@ -11,8 +11,8 @@ DEBUG = False
 # obeys a DIP from here (OFF); "on" is UNDECIDED = your stalk decides, so leave the stalk in the high-beam position.
 # Oncoming/preceding traffic checks (radar, camera, image brightness, hold time) stay exactly as they are.
 AHB_AUTO_FILE = '/data/ahb_auto'
-AHB_AUTO_ON_MS = 70.0 / 3.6      # auto mode: high beam allowed from 70 km/h ...
-AHB_AUTO_OFF_MS = 60.0 / 3.6     # ... and dipped again below 60 km/h (no flicker around 70)
+AHB_AUTO_ON_MS = 30.0 / 3.6      # auto mode: high beam allowed from 30 km/h (country roads at 50-60 are where it matters) ...
+AHB_AUTO_OFF_MS = 20.0 / 3.6     # ... and dipped again below 20 km/h (the gap stops flicker, not a high threshold)
 # AHBTEST: touch /data/ahb_test, parked with lights on and the stalk in high beam: dips and releases every 2 s, so you
 # can see whether your light controller obeys the (fake) Autopilot computer at all. rm the file when done.
 AHB_TEST_FILE = '/data/ahb_test'
@@ -117,12 +117,12 @@ class AHBController():
       return self.set_and_return(CS,frame,highLowBeamStatus,highLowBeamReason) 
     else :
       self.ahbIsEnabled = True
-    #AHBAUTO: only from 70 km/h, dipped below 60 km/h
+    #AHBAUTO: only from 30 km/h, dipped below 20 km/h
     if auto and CS.ahbEnabled != 1:
       if CS.v_ego >= AHB_AUTO_ON_MS: self.auto_allowed = True
       elif CS.v_ego < AHB_AUTO_OFF_MS: self.auto_allowed = False
       if not self.auto_allowed:
-        _debug("AHB auto: below 70 km/h")
+        _debug("AHB auto: below 30 km/h")
         return self.set_and_return(CS,frame,AHBDecision.DAS_HIGH_BEAM_OFF,AHBReason.HIGH_BEAM_OFF_REASON_SNA)
     #if moving below 10mph take no decision, then return undecided
     if CS.v_ego < 4.47:
