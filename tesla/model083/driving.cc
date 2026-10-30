@@ -4,6 +4,7 @@
 // The outputs are converted by model083_adapter.h into the 0.7.5 "model" and "cameraOdometry" messages.
 // Unlike stock 0.7.5, path/lane points and stds are always published (stock only did that with DEBUG set), so
 // PCC_module's camera curve limit gets the path points it reads.
+// Road edges (no 0.7.5 field) are published in the unused ModelData.freePath list, see model083_adapter.h.
 #include <string.h>
 #include <assert.h>
 #include <fcntl.h>
@@ -140,6 +141,11 @@ void model_publish(PubSocket *sock, uint32_t frame_id,
 
   fill_lead(framed.initLead(), ld);
   fill_lead(framed.initLeadFuture(), lf);
+
+  // road edges ride in the unused freePath list (format in model083_adapter.h road_edges)
+  float edges[m083::ROAD_EDGE_PACK_N];
+  m083::road_edges(o, edges);
+  framed.setFreePath(kj::ArrayPtr<const float>(edges, m083::ROAD_EDGE_PACK_N));
 
   auto meta = framed.initMeta();
   meta.setDesireState(kj::ArrayPtr<const float>(mt.desire_state, DESIRE_LEN));

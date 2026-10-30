@@ -226,4 +226,18 @@ inline void desire_to_083(const float *desire_075, float *desire_083) {
   for (int i = 1; i < DESIRE_N; i++) desire_083[i] = desire_075[i - 1];
 }
 
+// Road edges (curbs, walls, end of the drivable surface) have no field in the 0.7.5 message; they travel in the
+// unused ModelData.freePath list:  [ROAD_EDGE_FORMAT, left edge y x33, right edge y x33, left std, right std]
+// y is left-positive at the X_IDXS distances, like the lanes. radarweb reads them (empty list = old model).
+const float ROAD_EDGE_FORMAT = 1.0f;
+const int ROAD_EDGE_PACK_N = 1 + 2 * TRAJECTORY_SIZE + 2;
+inline void road_edges(const float *out, float *pack) {
+  pack[0] = ROAD_EDGE_FORMAT;
+  for (int k = 0; k < 2; k++) {
+    const float *e = out + RE_IDX + k * TRAJECTORY_SIZE * 2;       // 0.8.3 fill_xyzt(road_edges[k], ..., 2, -1)
+    for (int i = 0; i < TRAJECTORY_SIZE; i++) pack[1 + k * TRAJECTORY_SIZE + i] = -e[2 * i];
+    pack[1 + 2 * TRAJECTORY_SIZE + k] = expf(out[RE_IDX + 2 * TRAJECTORY_SIZE * (2 + k)]);
+  }
+}
+
 }  // namespace m083

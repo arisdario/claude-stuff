@@ -89,6 +89,19 @@ int main() {
   near("pose rot std", ps.rot_std[0], 0.002, 1e-6);
   near("pose trans", ps.trans[0], 19.9, 1e-5);
 
+  // road edges: fill_xyzt(road_edges[k], &re[k*33*2], 2, -1) reads y = data[i*2 + 0]; std = exp(re[2*33*(2+k)])
+  for (int k = 0; k < 2; k++) {
+    float *e = o + RE_IDX + k * TRAJECTORY_SIZE * 2;
+    for (int i = 0; i < TRAJECTORY_SIZE; i++) e[i * 2 + 1 + (-1)] = (k == 0 ? -3.2f : 2.9f);  // device: left edge 3.2 m left
+    o[RE_IDX + 2 * TRAJECTORY_SIZE * (2 + k)] = logf(k == 0 ? 0.4f : 0.6f);
+  }
+  float pk[ROAD_EDGE_PACK_N]; road_edges(o, pk);
+  check(pk[0] == ROAD_EDGE_FORMAT, "road-edge pack format tag", pk[0], ROAD_EDGE_FORMAT);
+  near("left road edge (left +)", pk[1 + 10], 3.2, 1e-5);
+  near("right road edge (left +)", pk[1 + TRAJECTORY_SIZE + 10], -2.9, 1e-5);
+  near("left road edge std", pk[1 + 2 * TRAJECTORY_SIZE], 0.4, 1e-5);
+  near("right road edge std", pk[1 + 2 * TRAJECTORY_SIZE + 1], 0.6, 1e-5);
+
   // desire input: 0.7.5 modeld sets vec[desire - 1]; laneChangeLeft (3) -> index 2 -> 0.8.3 index 3
   float d75[DESIRE_N] = {0}, d83[DESIRE_N]; d75[2] = 1.0f; desire_to_083(d75, d83);
   check(d83[3] == 1.0f && d83[2] == 0.0f && d83[0] == 0.0f, "desire one-hot shifted to the 0.8.3 index", d83[3], 1.0);

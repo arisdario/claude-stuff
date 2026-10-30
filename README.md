@@ -13,6 +13,7 @@ shows and what the classifier learns from.
 | `radarweb.py` | EON | Web server: road/top/learn pages. Reads CAN from openpilot's `can` socket (nothing is sent to the car). Saves `/learn` labels with 2 s of track history, runs the model, retrains automatically when parked. |
 | `radarml.py` | EON (+ laptop) | Pure python (no numpy/sklearn): full radar object-frame decoder (bit layout from tesla-radar-driver's DBC), INFRA3DRC-style features (mean/std/min/max/median/span of each signal over the track history), model inference, and the on-car trainer. |
 | `radarlearn_train.py` | laptop | Optional, more thorough trainer (scikit-learn, nested grid search, group cross-validation). |
+| `radarevents.py` | EON | Records your interventions (steering corrections, disengages), close passes to curbs/walls/static objects, and Mark presses: 15 s before + 5 s after each, shown on `/events`. Optional: radarweb runs without it. |
 | `radartrip.py` | EON (+ laptop) | Drive logs on a map. Used by `/trips`; on a laptop `python3 radartrip.py map_*.jsonl` writes a self-contained `.html` per log. The output contains your GPS track: keep it private. |
 | `radar_classify_live.py` | Pi/laptop + CAN adapter | Optional: same classifier on a radar on a **bench**, via [tesla-radar-driver](https://github.com/SamSkjord/tesla-radar-driver). Never on a car. |
 
@@ -43,7 +44,7 @@ CAN hat on a Raspberry Pi; CANalyst-II on macOS also needs `pip install canalyst
 ## Run on the EON
 
 ```
-scp radarweb.py radarml.py root@<EON-IP>:/data/          # next to /data/radarlog.py
+scp radarweb.py radarml.py radarevents.py radartrip.py root@<EON-IP>:/data/          # next to /data/radarlog.py
 ssh root@<EON-IP>
 cd /data/openpilot && PYTHONPATH=/data/openpilot:/data nohup python3 /data/radarweb.py 8088 >/dev/null 2>&1 &
 ```
@@ -81,6 +82,20 @@ class "unknown". radarweb detects crossing from the track's sideways motion (las
 radar's lateral speed): 2-5 km/h = pedestrian, 5-25 km/h = cyclist, faster = vehicle. Your own rotation in turns makes
 everything ahead sweep sideways; that sweep is measured from the stationary objects and subtracted, and detection pauses
 in sharp turns and while manoeuvring (steering past 90 deg). Shown with `~` like other inferred classes.
+
+## Interventions and close passes (`/events`)
+
+With openpilot engaged, radarweb records an event when you **correct the steering** (0.3 s or longer), when openpilot
+**disengages** (cause: brake / accelerator / steering / cancel), when the car passes **within 0.3 m of a road edge or a
+stationary radar object** for half a second (even if you don't take over), or when you press **Mark** on `/dash`. Each
+event keeps 15 s before and 5 s after at 10 Hz: speed, steering angle and your torque, pedals, lane lines, path, road
+edges, nearby radar objects, the free space on each side, GPS, and which openpilot video segments
+(`/data/media/0/realdata`) cover it. `/events` shows them on a map, as a list, and as a chart of free space and
+steering around the moment you took over.
+
+Road edges come from the 0.8.3 driving model (`tesla/model083`); with the stock 0.7.5 model only lane lines and radar
+objects are used. Files: `/data/interventions/ev_*.json` (about 75-200 KB each; the newest 500 are kept). The GPS in
+them is your position: keep them private.
 
 ## Logs
 

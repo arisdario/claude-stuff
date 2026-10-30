@@ -19,6 +19,11 @@ except ImportError:      # not on the EON (e.g. replay on a Mac): decoders and p
     messaging = None
 from radarlog import decode_a, decode_b, decode_sgu, decode_alerts, CLASS, MOVING
 import radarml
+try:
+    import radarevents          # intervention / close-pass recorder (radarevents.py next to radarweb.py)
+    EVREC = radarevents.Recorder(out_dir=os.environ.get('RADARWEB_EVENTS', radarevents.EVENT_DIR))
+except Exception as _e_rec:
+    radarevents = None; EVREC = None; print('radarevents not available - no intervention recording:', _e_rec)
 
 def _arg(i, cast, default):
     try: return cast(sys.argv[i])
@@ -462,6 +467,11 @@ def _worker(prof=None):
                         STATE['v'] = round(ev.carState.vEgo, 2); STATE['ang'] = round(ev.carState.steeringAngle, 1)
                         try: STATE['gear'] = str(ev.carState.gearShifter)
                         except Exception: pass
+                        try:                    # driver inputs, for the intervention recorder (radarevents.py)
+                            cs = ev.carState
+                            STATE['drv'] = {'sp': bool(cs.steeringPressed), 'st': round(float(cs.steeringTorque), 2),
+                                            'br': bool(cs.brakePressed), 'gas': bool(cs.gasPressed)}
+                        except Exception: pass
                         try: STATE['a'] = float(ev.carState.aEgo)
                         except Exception: pass
                         try: STATE['acc'] = bool(ev.carState.cruiseState.enabled and ev.carState.cruiseState.speed > 0.5)   # 'enabled' alone is true while parked, speed is 0 until a set speed exists
@@ -487,6 +497,12 @@ def _worker(prof=None):
                             return [float(x) for x in np.polyfit(range(len(pts)), pts, 3)] if len(pts) > 10 else None
                         STATE['model'] = {'p': poly(mm.path), 'l': poly(mm.leftLane), 'r': poly(mm.rightLane),
                                           'pl': round(mm.leftLane.prob, 2), 'pr': round(mm.rightLane.prob, 2)}
+                        try:                    # road edges from the 0.8.3 model adapter (tesla/model083), in freePath
+                            fp = list(mm.freePath)
+                            if len(fp) == 69 and fp[0] == 1.0:      # [format, left y x33, right y x33, stdL, stdR], left +
+                                STATE['model']['e'] = {'l': [round(v, 2) for v in fp[1:34]], 'r': [round(v, 2) for v in fp[34:67]],
+                                                       'sl': round(fp[67], 2), 'sr': round(fp[68], 2)}
+                        except Exception: pass
                     elif svc == 'radarState':
                         l = ev.radarState.leadOne
                         STATE['lead'] = {'d': round(l.dRel, 1), 'y': round(l.yRel, 2), 'vr': round(l.vRel, 1)} if l.status else None
@@ -540,6 +556,12 @@ def _worker(prof=None):
                 STATE['t'] = round(now, 2); STATE['o'] = [dict((key, o[key]) for key in PUB_KEYS if key in o) for o in objs]
                 STATE['status'] = {k: v for k, v in status.items()}
                 SNAP[0] = json.dumps(STATE); SNAP[1] = now
+            if EVREC is not None:        # 10 Hz: interventions and close passes (radarevents.py); never lets an error stop the loop
+                try:
+                    _ev = EVREC.update({k: STATE.get(k) for k in ('v', 'ang', 'op', 'acc', 'drv', 'model', 'o', 'gps')}, now)
+                    if _ev: STATE['lastev'] = {'type': _ev['type'], 'cause': _ev['cause'], 'side': _ev['side'], 't': _ev['t'], 'file': _ev.get('file')}
+                except Exception as _e:
+                    print('radarevents:', _e)
         if now >= tick:
             dt = max(0.001, now - last_tick); last_tick = now; tick = now + 1.0
             try: autotrain_tick(now)
@@ -1541,6 +1563,65 @@ def recal_start():
     return {'ok': True, 'msg': RECAL['msg']}
 
 
+EVENTS = r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Interventions</title>
+<link rel=stylesheet href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+:root{--bg:#0d0f12;--card:#161a1f;--line:#2a2f36;--fg:#e8edf2;--mut:#8b949e;--blue:#3d8bff;--org:#f5a524;--red:#e5484d;--grn:#2fbf71}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:14px system-ui,Segoe UI,Roboto,sans-serif}
+header{display:flex;gap:14px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}header a{color:var(--mut)}
+main{padding:12px 16px;display:grid;gap:12px;grid-template-columns:minmax(0,1fr)}
+@media (min-width:1000px){main{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}
+h2{font-size:13px;color:var(--mut);margin:0 0 8px;font-weight:600}
+#map{height:42vh;border-radius:8px}#map .leaflet-tile{filter:brightness(1.3)}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}td,th{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{color:var(--mut);font-weight:500}tr.ev{cursor:pointer}tr.ev:hover,tr.sel{background:#1f252c}
+.tag{padding:1px 7px;border-radius:99px;font-size:12px;font-weight:600;color:#000}
+.wrap{overflow-x:auto}canvas{width:100%;height:220px;display:block}.mut{color:var(--mut)}.empty{color:var(--mut);padding:20px}
+</style></head><body>
+<header><b>Interventions &amp; close passes</b><span class=mut id=cnt></span><a href="/dash">dash</a><a href="/">road view</a><a href="/trips">trips</a></header>
+<main>
+<section><h2>Where</h2><div id=map></div></section>
+<section><h2 id=dt>Pick an event</h2><canvas id=c1></canvas><canvas id=c2 style="height:150px"></canvas><div id=info class=mut></div></section>
+<section style="grid-column:1/-1"><h2>Events <span class=mut>(newest first; clearance = free space beside the car: road edge / static object, smallest in the 5 s before)</span></h2><div class=wrap><table id=tb></table></div></section>
+</main>
+<script>
+var COL={steer:'#3d8bff',disengage:'#e5484d',close:'#f5a524',mark:'#2fbf71'},NAME={steer:'you steered',disengage:'disengaged',close:'close pass',mark:'marked'};
+var map=null,LAY=null,ROWS=[],SEL=null;
+function f2(x){return x==null?'-':(+x).toFixed(2)}
+function minside(m,s){var a=[m['edge_'+s],m['obj_'+s]].filter(function(v){return v!=null});return a.length?Math.min.apply(null,a):null}
+function load(){fetch('/api/events').then(function(r){return r.json()}).then(function(rows){ROWS=rows;document.getElementById('cnt').textContent=rows.length+' recorded';table();pins()})}
+function table(){var h='<tr><th>when</th><th>what</th><th>cause</th><th>side</th><th>km/h</th><th>clear L</th><th>clear R</th><th>lane L/R</th><th>video</th></tr>';
+ if(!ROWS.length)h+='<tr><td colspan=9 class=empty>Nothing yet. Events appear here when you correct the steering, disengage, pass close to a curb/wall, or press Mark on /dash.</td></tr>';
+ ROWS.forEach(function(e,i){var m=e.min_clear||{};h+='<tr class="ev'+(SEL==i?' sel':'')+'" onclick="pick('+i+')"><td>'+e.time+'</td><td><span class=tag style="background:'+(COL[e.type]||'#888')+'">'+(NAME[e.type]||e.type)+'</span></td><td>'+(e.cause||'')+(e.disengaged?' + off ('+e.disengaged+')':'')+'</td><td>'+(e.side||'-')+'</td><td>'+e.kmh+'</td><td>'+f2(minside(m,'l'))+'</td><td>'+f2(minside(m,'r'))+'</td><td>'+f2(m.lane_l)+' / '+f2(m.lane_r)+'</td><td class=mut>'+((e.video||[]).join(', ')||'-')+'</td></tr>'});
+ document.getElementById('tb').innerHTML=h}
+function pins(){if(typeof L=='undefined')return;if(!map){map=L.map('map');L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:19,subdomains:'abcd',attribution:'&copy; OpenStreetMap &copy; CARTO'}).addTo(map);LAY=L.layerGroup().addTo(map)}
+ LAY.clearLayers();var b=[];ROWS.forEach(function(e,i){if(!e.gps)return;var ll=[e.gps[0],e.gps[1]];b.push(ll);L.circleMarker(ll,{radius:7,color:COL[e.type]||'#888',fillOpacity:.8}).on('click',function(){pick(i)}).bindTooltip(e.time+' '+(NAME[e.type]||e.type)).addTo(LAY)});
+ if(b.length)map.fitBounds(b,{padding:[30,30],maxZoom:16});else map.setView([0,0],2)}
+function pick(i){SEL=i;table();var e=ROWS[i];fetch('/api/event?f='+encodeURIComponent(e.file)).then(function(r){return r.json()}).then(function(ev){chart(ev)});if(map&&e.gps)map.setView([e.gps[0],e.gps[1]],17)}
+function chart(ev){var S=ev.samples||[],t0=ev.t;document.getElementById('dt').textContent=ev.time+' - '+(NAME[ev.type]||ev.type)+' ('+(ev.cause||'')+')';
+ plot('c1',S,t0,[['edge L','c','edge_l','#3d8bff',[]],['object L','c','obj_l','#9ec5ff',[4,3]],['lane L','c','lane_l','#56606b',[2,3]],['edge R','c','edge_r','#f5a524',[]],['object R','c','obj_r','#ffd27a',[4,3]],['lane R','c','lane_r','#7a6a52',[2,3]]],0,3,'free space beside the car (m)');
+ plot('c2',S,t0,[['your steering torque','tq',null,'#e5484d',[]],['steering angle /10','ang',null,'#8b949e',[]]],null,null,'steering');
+ var on=S.filter(function(x){return x.op}).length;document.getElementById('info').innerHTML='Speed '+ev.kmh+' km/h &middot; openpilot engaged in '+Math.round(100*on/Math.max(1,S.length))+'% of the samples &middot; video: '+((ev.video||[]).join(', ')||'-')+' &middot; <a href="/api/event?f='+encodeURIComponent(ev.file||'')+'" style="color:#8b949e">raw json</a>'}
+function plot(id,S,t0,series,lo,hi,title){var cv=document.getElementById(id),r=Math.min(2,devicePixelRatio||1),W=cv.clientWidth,H=cv.clientHeight;cv.width=W*r;cv.height=H*r;var g=cv.getContext('2d');g.setTransform(r,0,0,r,0,0);g.clearRect(0,0,W,H);
+ var vals=function(x,s){var v=s[2]?(x[s[1]]||{})[s[2]]:x[s[1]];return v==null?null:(s[1]=='ang'?v/10:v)};
+ if(lo==null){lo=1e9;hi=-1e9;S.forEach(function(x){series.forEach(function(s){var v=vals(x,s);if(v!=null){lo=Math.min(lo,v);hi=Math.max(hi,v)}})});if(lo>hi){lo=-1;hi=1}var pad=(hi-lo)*.1+.1;lo-=pad;hi+=pad}
+ var L0=36,R0=8,T=18,B=22,tx=function(t){return L0+(t-t0+15)/20*(W-L0-R0)},ty=function(v){return T+(1-(v-lo)/(hi-lo))*(H-T-B)};
+ g.fillStyle='#8b949e';g.font='11px system-ui';g.fillText(title,L0,12);g.strokeStyle='#2a2f36';g.lineWidth=1;
+ for(var k=0;k<=4;k++){var v=lo+(hi-lo)*k/4,y=ty(v);g.beginPath();g.moveTo(L0,y);g.lineTo(W-R0,y);g.stroke();g.fillText(v.toFixed(1),2,y+4)}
+ [-15,-10,-5,0,5].forEach(function(s){g.fillText((s>0?'+':'')+s+'s',tx(t0+s)-8,H-6)});
+ S.forEach(function(x,i){if(!x.op&&i>0){g.fillStyle='rgba(229,72,77,.10)';g.fillRect(tx(S[i-1].t),T,tx(x.t)-tx(S[i-1].t)+1,H-T-B)}});
+ if(lo<0&&hi>0){g.strokeStyle='#444b54';g.beginPath();g.moveTo(L0,ty(0));g.lineTo(W-R0,ty(0));g.stroke()}
+ g.strokeStyle='#e8edf2';g.setLineDash([3,3]);g.beginPath();g.moveTo(tx(t0),T);g.lineTo(tx(t0),H-B);g.stroke();g.setLineDash([]);
+ var lx=L0+g.measureText(title).width+18;series.forEach(function(s){g.strokeStyle=s[3];g.setLineDash(s[4]);g.lineWidth=2;g.beginPath();var on=false;S.forEach(function(x){var v=vals(x,s);if(v==null){on=false;return}v=Math.max(lo,Math.min(hi,v));if(!on){g.moveTo(tx(x.t),ty(v));on=true}else g.lineTo(tx(x.t),ty(v))});g.stroke();g.setLineDash([]);
+  g.fillStyle=s[3];g.fillRect(lx,6,10,3);g.fillStyle='#c9ced4';g.fillText(s[0],lx+13,11);lx+=g.measureText(s[0]).width+26});
+ g.fillStyle='rgba(229,72,77,.6)';g.fillText('red shade = openpilot off',W-R0-130,T+12)}
+load();setInterval(load,15000);addEventListener('resize',function(){if(SEL!=null)pick(SEL)});
+</script></body></html>
+"""
+
 DASH = r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,user-scalable=no">
 <title>Instrument view</title>
 <link rel=stylesheet href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
@@ -1556,8 +1637,12 @@ html,body{margin:0;height:100%;background:#0a0b0d;overflow:hidden;font-family:sy
 @media (max-aspect-ratio:11/10){#map{width:100vw;height:62vh;-webkit-mask-image:linear-gradient(to bottom,#000 0%,#000 45%,transparent 100%);mask-image:linear-gradient(to bottom,#000 0%,#000 45%,transparent 100%)}#map.on{opacity:.6}}
 #map.on{opacity:1}
 #nav{position:fixed;right:10px;top:10px;z-index:50}#nav summary{list-style:none;cursor:pointer;width:34px;height:34px;display:flex;align-items:center;justify-content:center;background:rgba(28,33,40,.6);border:1px solid #2a2f36;border-radius:8px;font-size:17px;color:#aab1b8}#nav summary::-webkit-details-marker{display:none}#nav>div{position:absolute;right:0;top:42px;background:#14171b;border:1px solid #2a2f36;border-radius:8px;padding:6px 0;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.5)}#nav a{display:block;padding:9px 14px;color:#cfd6dd;text-decoration:none;font-size:13px;white-space:nowrap}#nav a:hover{background:#20252b}
+#markb{position:fixed;left:12px;top:12px;z-index:40;background:rgba(28,33,40,.75);color:#e8edf2;border:1px solid #3a414a;border-radius:10px;padding:10px 14px;font:600 14px system-ui,sans-serif}
+#markb:active{background:#2fbf71;color:#000}
+#evtoast{position:fixed;left:50%;transform:translateX(-50%);bottom:14%;z-index:40;background:rgba(0,0,0,.75);border:1px solid #f5a524;color:#f5a524;border-radius:10px;padding:8px 14px;font:600 14px system-ui,sans-serif;display:none}
 </style></head><body><div id=map></div><canvas id=c></canvas>
-<details id=nav><summary>&#9776;</summary><div><span id=conn style="display:block;padding:9px 14px;color:#8a9098;font-size:13px">connecting&hellip;</span><a href="#" id=unit onclick="return unitTog()">units: km/h</a><a href="#" id=locsw onclick="return geoStart(true)">map: use this phone's location</a><a href="#" onclick="document.getElementById('egof').click();return false">upload images (.webp)</a><a href="/">road view</a><a href="/map">CAN data</a><a href="/top">top-down</a><a href="/video">video</a><a href="?demo=1">demo</a></div></details>
+<button id=markb onclick="return markNow()" title="record this moment (too close, odd behaviour)">&#9873; Mark</button><div id=evtoast></div>
+<details id=nav><summary>&#9776;</summary><div><span id=conn style="display:block;padding:9px 14px;color:#8a9098;font-size:13px">connecting&hellip;</span><a href="#" id=unit onclick="return unitTog()">units: km/h</a><a href="#" id=locsw onclick="return geoStart(true)">map: use this phone's location</a><a href="#" onclick="document.getElementById('egof').click();return false">upload images (.webp)</a><a href="/events">interventions</a><a href="/">road view</a><a href="/map">CAN data</a><a href="/top">top-down</a><a href="/video">video</a><a href="?demo=1">demo</a></div></details>
 <input type=file id=egof accept="image/webp" multiple style="display:none" onchange="egoUp(this)">
 <script>
 var cv=document.getElementById('c'),g=cv.getContext('2d'),S=null,demo=/demo/.test(location.search);
@@ -1721,7 +1806,12 @@ function geoStart(user){if(!navigator.geolocation){geoMsg('map: no location in t
   function(e){geoMsg(e.code==1?'map: location blocked - allow it in the browser settings':'map: no location fix yet (tap to retry)')},
   {enableHighAccuracy:true,maximumAge:1000,timeout:20000});return false}
 function gpsNow(d){if(PHONE&&Date.now()-PHONE.t<5000)return PHONE;return d&&d.gps}
-function upd(d){S=d;draw();try{mapUpd(gpsNow(d))}catch(e){}}
+/* Mark: records this moment as an event (radarevents.py, viewable on /events); toast when any event is saved */
+var LASTEV=null,EVT=null,EVNAME={steer:'your steering correction',disengage:'disengage',close:'close pass',mark:'mark'};
+function evToast(t){var e=document.getElementById('evtoast');e.textContent=t;e.style.display='block';clearTimeout(EVT);EVT=setTimeout(function(){e.style.display='none'},3500)}
+function markNow(){fetch('/api/mark',{method:'POST',body:'marked on /dash'}).then(function(r){evToast(r.ok?'Marked - saved in 5 s':'Mark failed (recorder not available)')}).catch(function(){evToast('Mark failed')});return false}
+function evSeen(d){var e=d&&d.lastev;if(!e)return;if(LASTEV===null){LASTEV=e.t;return}if(e.t!==LASTEV){LASTEV=e.t;evToast('Recorded: '+(EVNAME[e.type]||e.type)+(e.side?' ('+e.side+')':''))}}
+function upd(d){S=d;draw();try{mapUpd(gpsNow(d))}catch(e){}try{evSeen(d)}catch(e){}}
 function demoLoop(){var t=Date.now()/1000,bend=Math.sin(t*0.22)*0.00002;
  function poly(o){return [bend,0,0.03*Math.sin(t*0.3),o]}
  var lead={d:40+12*Math.sin(t*0.35),y:0.2*Math.sin(t*0.3),vr:-2.5*Math.sin(t*0.5)};
@@ -1789,6 +1879,15 @@ class H(BaseHTTPRequestHandler):
         elif self.path == '/api/map':
             msgs, rawv = build_map(time.time()); d = {'msgs': msgs, 'raw': rawv, 'car': MAP['car'], 'ctl': MAP['ctl'], 'logfile': MAP.get('logfile'), 'v': STATE.get('v', 0), 'acc': STATE.get('acc', False), 'alc': STATE.get('alc', False)}
             b = json.dumps(d, default=str).encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        elif self.path == '/api/events':
+            b = json.dumps(radarevents.list_events(EVREC.out_dir) if EVREC else []).encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        elif self.path.startswith('/api/event?'):
+            import urllib.parse as _up
+            f_ = (_up.parse_qs(self.path.split('?', 1)[1]).get('f') or [''])[0]
+            ev = radarevents.load_event(f_, EVREC.out_dir) if EVREC else None
+            b = json.dumps(ev).encode(); self.send_response(200 if ev else 404); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        elif self.path.split('?')[0] == '/events':
+            b = EVENTS.encode(); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path == '/api/trips':
             b = json.dumps(trips_list()).encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path.startswith('/api/trip?'):
@@ -1906,6 +2005,14 @@ class H(BaseHTTPRequestHandler):
                     pass
             b = json.dumps({'ok': ok, 'text': txt, 'file': LABEL_FILE}).encode()
             self.send_response(200 if ok else 500); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        elif self.path.split('?')[0] == '/api/mark':
+            # /dash "Mark" button: records the moment as an event (radarevents), body = optional short note
+            try:
+                n = int(self.headers.get('Content-Length', '0') or '0'); note = self.rfile.read(min(n, 120)).decode('utf8', 'replace').strip()
+            except Exception: note = ''
+            ok = EVREC is not None
+            if ok: EVREC.mark(note or 'marked on /dash')
+            b = json.dumps({'ok': ok}).encode(); self.send_response(200 if ok else 503); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path.split('?')[0] == '/api/icon':
             # /dash menu "upload car image": stores a .webp into ICON_DIR (served at /icons/<name>). Behind the same
             # password as every page; only [\w.-]+.webp names, a real WebP header, and at most 512 KB.

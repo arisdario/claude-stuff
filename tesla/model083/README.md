@@ -21,10 +21,11 @@ What the adapter converts, so 0.7.5 sees what it expects:
 - **desire**: 0.7.5 feeds and reads it shifted by one; shifted for the model and back for the planners
 - **pose** (`cameraOdometry`): already radians in 0.8.3
 - path/lane **points are always published** (stock 0.7.5 only with `DEBUG` set)
+- **road edges** (curbs, walls; no 0.7.5 field) go into the unused `freePath` list: radarweb's intervention recorder uses them
 
 ## Tested here (not on the car)
 
-- `test_adapter.cc`: 32 checks on a synthetic 0.8.3 output written with 0.8.3's own read formulas - all pass
+- `test_adapter.cc`: 37 checks on a synthetic 0.8.3 output written with 0.8.3's own read formulas - all pass
   (`g++ -std=c++11 -O2 -o /tmp/t test_adapter.cc && /tmp/t`)
 - `driving.cc`, and 0.7.5's unchanged `modeld.cc` with the new `driving.h`, compile against Tinkla 0.7.5.a's headers
   and its message schema (cereal 0b329dc)
