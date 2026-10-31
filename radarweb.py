@@ -24,6 +24,11 @@ try:
     EVREC = radarevents.Recorder(out_dir=os.environ.get('RADARWEB_EVENTS', radarevents.EVENT_DIR))
 except Exception as _e_rec:
     radarevents = None; EVREC = None; print('radarevents not available - no intervention recording:', _e_rec)
+try:
+    import radarpark            # radar distance vs parking sensors at stops (radarpark.py next to radarweb.py)
+    PARKCAL = radarpark.OffsetMeter(os.environ.get('RADARWEB_PARKCAL', radarpark.SAVE_FILE))
+except Exception as _e_pk:
+    radarpark = None; PARKCAL = None; print('radarpark not available - no radar offset check:', _e_pk)
 
 def _arg(i, cast, default):
     try: return cast(sys.argv[i])
@@ -566,6 +571,12 @@ def _worker(prof=None):
                     if _ev: STATE['lastev'] = {'type': _ev['type'], 'cause': _ev['cause'], 'side': _ev['side'], 't': _ev['t'], 'file': _ev.get('file')}
                 except Exception as _e:
                     print('radarevents:', _e)
+            if PARKCAL is not None:      # 10 Hz: radar distance vs parking-sensor gap whenever standing behind something
+                try:
+                    if PARKCAL.update(now, STATE.get('v'), STATE.get('park'), STATE.get('o')) or 'parkcal' not in STATE:
+                        STATE['parkcal'] = PARKCAL.summary()
+                except Exception as _e:
+                    print('radarpark:', _e)
         if now >= tick:
             dt = max(0.001, now - last_tick); last_tick = now; tick = now + 1.0
             try: autotrain_tick(now)
@@ -1122,6 +1133,9 @@ html,body{margin:0;height:100%;background:#0d0f12;overflow:hidden;font-family:sy
 canvas{display:block;width:100vw;height:100vh}
 #nav{position:fixed;right:10px;bottom:8px;z-index:50}#nav summary{list-style:none;cursor:pointer;width:36px;height:36px;display:flex;align-items:center;justify-content:center;background:#1c2128;border:1px solid #30363d;border-radius:8px;font-size:18px;color:#cfd6dd}#nav summary::-webkit-details-marker{display:none}#nav[open] summary{background:#262c35}#nav>div{position:absolute;right:0;bottom:44px;background:#1c2128;border:1px solid #30363d;border-radius:8px;padding:6px 0;min-width:190px;box-shadow:0 8px 24px rgba(0,0,0,.45)}#nav a,#nav>div span{display:block;padding:9px 14px;color:#cfd6dd;text-decoration:none;font-size:13px;white-space:nowrap}#nav a:hover{background:#262c35}
 html.fr #nav{display:none}
+#pk{position:fixed;left:14px;top:12px;z-index:40;color:#cfd6dd;font:13px system-ui,sans-serif;background:rgba(13,15,18,.72);border:1px solid #30363d;border-radius:10px;padding:8px 11px;max-width:min(88vw,430px);line-height:1.5}
+#pk b{color:#fff}#pk button{margin-top:6px;background:#1c2128;color:#e8edf2;border:1px solid #3a414a;border-radius:8px;padding:6px 10px;font:600 13px system-ui,sans-serif}
+html.fr #pk{display:none}
 html.emb,html.emb body{background:transparent}
 #scene{position:fixed;inset:0}#gp{position:absolute;inset:0}
 .m3{display:none;position:absolute}
@@ -1132,7 +1146,7 @@ html.emb .m3{display:block}
 html.emb #roof,html.emb #sl,html.emb #sr{display:none}
 #sh{background:rgba(0,0,0,.6);filter:blur(12px);border-radius:40%}
 .sd{background:linear-gradient(180deg,#2d353f 0,#3a444f 45%,#232a32 100%);box-shadow:inset 0 0 0 1px rgba(238,242,246,.35)}
-</style></head><body><div id=scene><div id=gp><canvas id=c></canvas><div class='m3' id=sh></div><div class='m3 sd' id=sl></div><div class='m3 sd' id=sr></div><img class='m3' id=rear><img class='m3' id=roof></div></div><details id=nav><summary>☰</summary><div><span id=conn style="color:#9aa0a6">connecting…</span><a href="/">road view</a><a href="/top">top-down view</a><a href="?demo=1">demo</a></div></details>
+</style></head><body><div id=scene><div id=gp><canvas id=c></canvas><div class='m3' id=sh></div><div class='m3 sd' id=sl></div><div class='m3 sd' id=sr></div><img class='m3' id=rear><img class='m3' id=roof></div></div><div id=pk><div id=pkst>parking sensors: waiting for data</div><div id=pkcal></div><button id=pksnd onclick="return sndTog()">&#128264; park beep: off</button></div><details id=nav><summary>☰</summary><div><span id=conn style="color:#9aa0a6">connecting…</span><a href="/">road view</a><a href="/top">top-down view</a><a href="?demo=1">demo</a></div></details>
 <script>if(window.top!==window)document.documentElement.className='fr'+(/embed=1/.test(location.search)?' emb':'');var EMB=/embed=1/.test(location.search)</script><script>
 /* all-round proximity "wave" view, display only. FRONT: the radar (left / centre / right) plus the two front corner parking sensors. REAR: the two rear corner parking sensors. A glowing wave follows the car outline and moves away from it as the distance grows (up to 2.8 m). */
 var cv=document.getElementById('c'),g=cv.getContext('2d'),S=null,demo=/demo/.test(location.search),DMAX=4.8,RMAX=6.5;
@@ -1181,9 +1195,24 @@ function draw(){var W=cv.clientWidth,H=cv.clientHeight,dpr=devicePixelRatio||1;c
   var t=best.a*Math.PI/180,r=bnd(t)+.16*sc+Math.min(best.d,DMAX)*sc*.2+50*u,x=cx+Math.cos(t)*r,y=cy+Math.sin(t)*r,txt=best.d<.3?'Stop':fmt(best.d);g.font='700 '+Math.round(26*u)+'px system-ui';g.textAlign='center';g.lineWidth=5;g.strokeStyle='rgba(0,0,0,.75)';g.strokeText(txt,x,y);g.fillStyle='#fff';g.fillText(txt,x,y)});
  g.textAlign='center';g.font='500 '+Math.round(16*u)+'px system-ui';g.fillStyle=EMB?'rgba(0,0,0,0)':'rgba(255,255,255,.7)';g.fillText(S?Math.round(S.v*3.6)+' km/h':'',W/2,H*.06);
  var any=A.some(function(p){return p.d!=null&&p.d<DMAX});if(!any&&!EMB){g.font='600 '+Math.round(22*u)+'px system-ui';g.fillStyle='rgba(255,255,255,.55)';g.fillText('clear',W/2,H*.12)}
- g.textAlign='left';g.font='500 '+Math.round(13*u)+'px system-ui';g.fillStyle=EMB?'rgba(0,0,0,0)':'rgba(255,255,255,.6)';g.fillText(P?'front: radar + corner sensors - rear: corner sensors (decode not yet verified) - display only':'front: radar only - no parking-sensor data - display only',14,H-40)}
-function upd(s){S=s;draw()}
-function demoState(t){return {v:0.6,park:{f:{l:Math.round(70+(Math.sin(t/2.5)+1)*60),r:255,ss:1},r:{l:Math.round(45+(Math.sin(t/1.7)+1)*100),r:Math.round(90+(Math.sin(t/2.1+1)+1)*90),ss:1}},o:[{d:1.2+(Math.sin(t/2)+1)*1.2,y:.1,pe:90}]}}
+ g.textAlign='left';g.font='500 '+Math.round(13*u)+'px system-ui';g.fillStyle=EMB?'rgba(0,0,0,0)':'rgba(255,255,255,.6)';g.fillText(P?'front: radar + corner sensors - rear: corner sensors (checked against your drives; they report only below ~10 km/h) - display only':'front: radar only - no parking-sensor data - display only',14,H-40)}
+/* parking sensors: status, radar-vs-sensor offset (radarpark.py), and an optional park-assist beep (phones allow sound
+   only after a tap, hence the button). The beep speeds up as the closest corner gets nearer, below 3 m/s only. */
+var SND=false,AC=null,NEXTB=0;
+function sndTog(){SND=!SND;if(SND&&!AC){try{AC=new (window.AudioContext||window.webkitAudioContext)()}catch(e){AC=null}}if(AC&&AC.state=='suspended')AC.resume();
+ document.getElementById('pksnd').innerHTML=SND?'&#128266; park beep: on':'&#128264; park beep: off';return false}
+function beep(ms){if(!AC)return;try{var o=AC.createOscillator(),gn=AC.createGain();o.frequency.value=1800;gn.gain.value=.12;o.connect(gn);gn.connect(AC.destination);o.start();o.stop(AC.currentTime+ms/1000)}catch(e){}}
+function minPark(P){var m=null;['f','r'].forEach(function(k){var z=P&&P[k];if(!z)return;[z.l,z.r].forEach(function(v){if(v!=null&&v>0&&v<255&&(m==null||v<m))m=v})});return m}
+function pkUpd(s){var P=s&&s.park,m=minPark(P),v=(s&&s.v)||0,st=document.getElementById('pkst'),ca=document.getElementById('pkcal');if(!st)return;
+ var on=P&&((P.f&&P.f.ss==1)||(P.r&&P.r.ss==1));
+ st.innerHTML=!P?'Parking sensors: <b>no data</b> (they report only below ~10 km/h)':on?'Parking sensors: <b>active</b>'+(m!=null?' &middot; closest <b>'+m+' cm</b>':' &middot; nothing in range'):'Parking sensors: off (above ~10 km/h)';
+ var c=s&&s.parkcal;
+ if(c&&c.n){ca.innerHTML='Radar vs sensors: radar reads <b>'+(c.offset_m>=0?'+':'')+c.offset_m.toFixed(2)+' m</b> more than the bumper gap ('+c.n+' stop'+(c.n>1?'s':'')+(c.iqr_m!=null?', spread '+c.iqr_m.toFixed(2)+' m':'')+')'}
+ else ca.innerHTML='Radar vs sensors: no stop measured yet - stand still behind a car for 2 s';
+ if(c&&c.missed)ca.innerHTML+='<br>Radar saw nothing in front in <b>'+c.missed+'</b> stop'+(c.missed>1?'s':'')+' while the sensors did (up to '+c.missed_max_gap_m.toFixed(2)+' m) - its short-range blind spot';
+ if(SND&&m!=null&&v<3&&on){var per=m<30?200:m<60?260:m<100?500:m<150?900:0,now=Date.now();if(per&&now>=NEXTB){beep(m<30?190:90);NEXTB=now+per}}}
+function upd(s){S=s;draw();try{pkUpd(s)}catch(e){}}
+function demoState(t){return {v:0.6,parkcal:{n:12,offset_m:0.37,iqr_m:0.06,missed:2,missed_max_gap_m:0.62},park:{f:{l:Math.round(70+(Math.sin(t/2.5)+1)*60),r:255,ss:1},r:{l:Math.round(45+(Math.sin(t/1.7)+1)*100),r:Math.round(90+(Math.sin(t/2.1+1)+1)*90),ss:1}},o:[{d:1.2+(Math.sin(t/2)+1)*1.2,y:.1,pe:90}]}}
 if(demo){document.getElementById('conn').textContent='demo data';var t0=Date.now();(function loop(){upd(demoState((Date.now()-t0)/1000));setTimeout(loop,60)})()}
 else{var es=new EventSource('/api/stream');es.onmessage=function(e){document.getElementById('conn').textContent='live';upd(JSON.parse(e.data))};es.onerror=function(){document.getElementById('conn').textContent='disconnected, retrying…'}}
 setInterval(function(){if(S&&!demo)draw()},100);onresize=draw;draw();
@@ -1714,11 +1743,13 @@ function setdialDrawn(cx,cy,r,col){g.strokeStyle=col;g.lineWidth=r*.2;g.beginPat
    grey when far, amber nearer, red close. front arcs reach ahead of the car, rear arcs behind it (towards you) */
 function parkArcs(G,cx,fy,ry,hw){var P=S&&S.park;if(!P)return;
  function col(cm){return cm>=255||cm<=0?null:cm<60?'rgba(229,40,40,.85)':cm<120?'rgba(245,165,36,.75)':'rgba(200,206,214,.42)'}
- var R=hw*1.15,T=hw*0.42;g.save();g.lineCap='butt';
+ var R=hw*1.15,T=hw*0.42,best=null;g.save();g.lineCap='butt';
  [['f','l',fy,-1,Math.PI,1.5*Math.PI],['f','r',fy,1,1.5*Math.PI,2*Math.PI],['r','l',ry,-1,.5*Math.PI,Math.PI],['r','r',ry,1,0,.5*Math.PI]].forEach(function(a){
   var s=P[a[0]];if(!s)return;var c=col(s[a[1]]);if(!c)return;var x=cx+a[3]*hw*0.72;
   g.save();g.translate(x,a[2]);g.scale(1,0.62);g.beginPath();g.arc(0,0,R,a[4],a[5]);g.lineWidth=T;g.strokeStyle=c;g.stroke();
-  g.beginPath();g.arc(0,0,R+T/2,a[4],a[5]);g.lineWidth=1.5;g.strokeStyle='rgba(235,240,245,.55)';g.stroke();g.restore()});
+  g.beginPath();g.arc(0,0,R+T/2,a[4],a[5]);g.lineWidth=1.5;g.strokeStyle='rgba(235,240,245,.55)';g.stroke();g.restore();
+  var cm=s[a[1]];if(best==null||cm<best[0]){var mid=(a[4]+a[5])/2;best=[cm,x+Math.cos(mid)*(R+T*1.4),a[2]+Math.sin(mid)*(R+T*1.4)*0.62,c]}});
+ if(best){g.font='700 '+Math.round(Math.max(12,hw*.32))+'px system-ui';g.textAlign='center';g.fillStyle='rgba(0,0,0,.65)';g.fillText(best[0]+' cm',best[1]+1,best[2]+1);g.fillStyle=best[3].replace(/[\d.]+\)$/,'1)');g.fillText(best[0]+' cm',best[1],best[2])}   /* closest corner, like the car shows */
  g.restore()}
 var PWH=[];/* rolling kW history for the energy sparkline */
 function draw(){var G=geom();g.clearRect(0,0,G.W,G.H);if(!S)return;

@@ -14,6 +14,7 @@ shows and what the classifier learns from.
 | `radarml.py` | EON (+ laptop) | Pure python (no numpy/sklearn): full radar object-frame decoder (bit layout from tesla-radar-driver's DBC), INFRA3DRC-style features (mean/std/min/max/median/span of each signal over the track history), model inference, and the on-car trainer. |
 | `radarlearn_train.py` | laptop | Optional, more thorough trainer (scikit-learn, nested grid search, group cross-validation). |
 | `radarevents.py` | EON | Records your interventions (steering corrections, disengages), close passes to curbs/walls/static objects, and Mark presses: 15 s before + 5 s after each, shown on `/events`. Optional: radarweb runs without it. |
+| `radarpark.py` | EON | Checks the radar's distance against the parking sensors at every stop behind something (median offset, and stops where the radar missed a close car). Shown on `/near`. Optional. |
 | `radartrip.py` | EON (+ laptop) | Drive logs on a map. Used by `/trips`; on a laptop `python3 radartrip.py map_*.jsonl` writes a self-contained `.html` per log. The output contains your GPS track: keep it private. |
 | `radar_classify_live.py` | Pi/laptop + CAN adapter | Optional: same classifier on a radar on a **bench**, via [tesla-radar-driver](https://github.com/SamSkjord/tesla-radar-driver). Never on a car. |
 
@@ -44,7 +45,7 @@ CAN hat on a Raspberry Pi; CANalyst-II on macOS also needs `pip install canalyst
 ## Run on the EON
 
 ```
-scp radarweb.py radarml.py radarevents.py radartrip.py root@<EON-IP>:/data/          # next to /data/radarlog.py
+scp radarweb.py radarml.py radarevents.py radarpark.py radartrip.py root@<EON-IP>:/data/          # next to /data/radarlog.py
 ssh root@<EON-IP>
 cd /data/openpilot && PYTHONPATH=/data/openpilot:/data nohup python3 /data/radarweb.py 8088 >/dev/null 2>&1 &
 ```
@@ -105,6 +106,20 @@ than openpilot's lead - the head start better software could use.
 Road edges come from the 0.8.3 driving model (`tesla/model083`); with the stock 0.7.5 model only lane lines and radar
 objects are used. Files: `/data/interventions/ev_*.json` (about 75-200 KB each; the newest 500 are kept). The GPS in
 them is your position: keep them private.
+
+## Parking sensors (`/near`)
+
+The two front and two rear corner sensors (`0x32E` / `0x33E`, cm, 255 = nothing) report only below about 10 km/h -
+checked against your drives (136-138 cm standing, 111/114 cm creeping, nothing above 10 km/h). `/near` shows them
+around the car with the closest distance, `/dash` writes the closest one next to its arc, and **park beep** on `/near`
+(tap once: phones allow sound only after a tap) beeps faster as the closest corner gets nearer.
+
+**Radar vs sensors:** every stop of 2 s or more behind something within 0.4-2 m gives one measurement - the radar's
+distance to the object straight ahead minus the bumper gap from the closer front sensor. The median over stops is the
+radar's distance offset (how far behind the bumper it measures from), roughly +-10 cm because the corner sensors look
+slightly diagonally. Stops where the sensors saw something close but the radar nothing straight ahead are counted too:
+that is the radar's short-range blind spot on your car. Kept in `/data/radar_offset.json`; nothing is changed in
+openpilot - it tells you whether its radar distance settings match your car.
 
 ## Logs
 
