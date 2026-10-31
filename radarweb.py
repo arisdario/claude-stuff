@@ -1907,7 +1907,7 @@ function demoLoop(){var t=Date.now()/1000,bend=Math.sin(t*0.22)*0.00002;
  requestAnimationFrame(demoLoop)}
 unitUI();if(!demo)geoStart(false);
 if(demo){document.getElementById('conn').textContent='demo data';demoLoop()}
-else{var es=new EventSource('/api/stream');es.onmessage=function(e){document.getElementById('conn').textContent='live';upd(JSON.parse(e.data))};es.onerror=function(){document.getElementById('conn').textContent='disconnected, retrying&hellip;'};setInterval(draw,200)}
+else{var es=new EventSource('/api/stream');es.onmessage=function(e){document.getElementById('conn').textContent='live';upd(JSON.parse(e.data))};es.onerror=function(){document.getElementById('conn').textContent='disconnected, retrying…'};setInterval(draw,200)}
 </script></body></html>
 """
 
@@ -1970,6 +1970,39 @@ def uds_start(q):
     return {'ok': True, 'queued': len(UDSC.queue)}
 
 
+GNAV = r"""<style>
+.gnav{position:fixed;right:10px;bottom:8px;z-index:60;font:13px system-ui,-apple-system,sans-serif}
+.gnav summary{list-style:none;cursor:pointer;width:36px;height:36px;display:flex;align-items:center;justify-content:center;background:#1c2128;border:1px solid #30363d;border-radius:8px;font-size:18px;color:#cfd6dd}
+.gnav summary::-webkit-details-marker{display:none}.gnav[open] summary{background:#262c35}
+.gnav>div{position:absolute;right:0;bottom:44px;background:#1c2128;border:1px solid #30363d;border-radius:8px;padding:6px 0;min-width:190px;box-shadow:0 8px 24px rgba(0,0,0,.45)}
+.gnav a{display:block;padding:9px 14px;color:#cfd6dd;text-decoration:none;white-space:nowrap}.gnav a:hover{background:#262c35}
+#nav>div,.gnav>div{max-height:calc(100vh - 70px);overflow-y:auto}
+.gnav-h{padding:8px 14px 4px;color:#8a9098;font-size:11px;letter-spacing:.06em;text-transform:uppercase;border-top:1px solid #30363d;margin-top:4px}
+.gnav-h:first-child{border-top:0;margin-top:0}
+a.gnav-on{color:#fff!important;font-weight:600;box-shadow:inset 3px 0 0 #1a73e8}
+</style><script>(function(){
+// one menu on every page: the page's own actions stay, the list of pages is the same everywhere
+var P=[['/','Road view'],['/dash','Dash'],['/near','Near view'],['/top','Top-down view'],['/video','Video'],['/events','Interventions'],['/trips','Trips'],['/map','CAN data & diagnostics'],['/learn','Label objects'],['/ml','Model training'],['/calib','Calibrate radar']];
+var here=location.pathname.replace(/\/+$/,'')||'/';if(here=='/index.html')here='/';
+function add(box){var h=document.createElement('div');h.className='gnav-h';h.textContent='Pages';box.appendChild(h);
+ P.forEach(function(p){var a=document.createElement('a');a.href=p[0];a.textContent=p[1];if(p[0]==here)a.className='gnav-on';box.appendChild(a)})}
+function go(){var box=document.querySelector('details#nav>div');
+ if(box){Array.prototype.slice.call(box.querySelectorAll('a')).forEach(function(a){var h=a.getAttribute('href')||'';if(h.charAt(0)=='/')a.parentNode.removeChild(a)});add(box);return}
+ var d=document.createElement('details');d.className='gnav';d.innerHTML='<summary>&#9776;</summary><div></div>';add(d.lastChild);document.body.appendChild(d)}
+if(document.readyState=='loading')document.addEventListener('DOMContentLoaded',go);else go();
+document.addEventListener('click',function(e){var o=document.querySelector('details#nav[open],details.gnav[open]');if(o&&!o.contains(e.target))o.removeAttribute('open')});
+})();</script>"""
+_PAGES = {}
+
+
+def _pg(h):
+    """page HTML with the global menu added (cached per page)"""
+    b = _PAGES.get(id(h))
+    if b is None:
+        b = _PAGES[id(h)] = (h.replace('</body>', GNAV + '</body>', 1) if '</body>' in h else h + GNAV).encode()
+    return b
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _snap(self):
@@ -2002,7 +2035,7 @@ class H(BaseHTTPRequestHandler):
             ev = radarevents.load_event(f_, EVREC.out_dir) if EVREC else None
             b = json.dumps(ev).encode(); self.send_response(200 if ev else 404); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path.split('?')[0] == '/events':
-            b = EVENTS.encode(); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+            b = _pg(EVENTS); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path == '/api/trips':
             b = json.dumps(trips_list()).encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path.startswith('/api/trip?'):
@@ -2011,13 +2044,13 @@ class H(BaseHTTPRequestHandler):
             b = json.dumps(trip_get(f_)).encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path.split('?')[0] == '/trips':
             import radartrip
-            b = radartrip.VIEWER.encode(); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+            b = _pg(radartrip.VIEWER); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path == '/api/ml':
             b = json.dumps(ml_summary(), default=str).encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path.split('?')[0] == '/ml':
-            b = MLPAGE.encode(); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+            b = _pg(MLPAGE); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path.split('?')[0] == '/map':
-            b = MAPP.encode(); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+            b = _pg(MAPP); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path == '/api/stream':
             self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.send_header('Cache-Control', 'no-cache'); self.end_headers()
             try:
@@ -2026,9 +2059,9 @@ class H(BaseHTTPRequestHandler):
             except Exception: pass
         elif self.path.split('?')[0] in ('/', '/index.html', '/top', '/near', '/calib', '/learn', '/dash'):
             p = self.path.split('?')[0]
-            b = (TOP if p == '/top' else NEAR if p == '/near' else CALIB if p == '/calib' else LEARN if p == '/learn' else DASH if p == '/dash' else ROAD).encode(); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+            b = _pg(TOP if p == '/top' else NEAR if p == '/near' else CALIB if p == '/calib' else LEARN if p == '/learn' else DASH if p == '/dash' else ROAD); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path.split('?')[0] == '/video':
-            b = VIDEO.encode(); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+            b = _pg(VIDEO); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path.split('?')[0] == '/api/video':
             import re as _re
             m_ = _re.search(r'cam=(\w+)', self.path); cam = m_.group(1) if m_ and m_.group(1) in CAMS else 'road'
