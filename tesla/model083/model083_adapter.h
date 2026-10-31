@@ -208,8 +208,12 @@ inline void meta(const float *out, Meta &M) {
   M.gas = sigm(m[DESIRE_N + 1]);
   M.brake = sigm(m[DESIRE_N + 2]);
   M.steer = sigm(m[DESIRE_N + 3]);
-  for (int i = 0; i < 4; i++)
-    softmax(&m[DESIRE_N + OTHER_META_N + i * DESIRE_N], &M.desire_pred[i * DESIRE_N], DESIRE_N);
+  for (int i = 0; i < 4; i++) {           // desire_pred is read [desire - 1] too (controlsd LDW flags), so shift like desire_state
+    float dp[DESIRE_N];
+    softmax(&m[DESIRE_N + OTHER_META_N + i * DESIRE_N], dp, DESIRE_N);
+    for (int j = 0; j < DESIRE_N - 1; j++) M.desire_pred[i * DESIRE_N + j] = dp[j + 1];
+    M.desire_pred[i * DESIRE_N + (DESIRE_N - 1)] = 0.0f;
+  }
 }
 
 inline void pose(const float *out, Pose &P) {

@@ -53,6 +53,8 @@ int main() {
   // --- meta: laneChangeLeft (enum 3) most likely in the 0.8.3 model's indexing ---
   for (int i = 0; i < DESIRE_N; i++) o[DESIRE_STATE_IDX + i] = (i == 3) ? 6.0f : 0.0f;
   o[DESIRE_STATE_IDX + DESIRE_N + 0] = 2.0f;                                      // engaged logit
+  // desire_pred group 0: laneChangeRight (enum 4) most likely in the 0.8.3 indexing
+  o[DESIRE_STATE_IDX + DESIRE_N + OTHER_META_N + 0 * DESIRE_N + 4] = 6.0f;
   // --- pose: rotation in rad already in 0.8.3 ---
   o[POSE_IDX + 3] = 0.01f; o[POSE_IDX + 9] = logf(0.002f); o[POSE_IDX + 0] = 19.9f;
 
@@ -84,6 +86,9 @@ int main() {
   near("longitudinal speed at 5 s", g.speed[5], 20.0, 1e-4);
   // 0.7.5 lane_planner reads desireState[laneChangeLeft - 1] = [2]
   check(m.desire_state[2] > 0.9, "desireState[laneChangeLeft - 1] (0.7.5 read)", m.desire_state[2], 0.98);
+  // desirePrediction is read [desire - 1] too: laneChangeRight (4) -> [3]. Shifted like desire_state, not raw softmax.
+  check(m.desire_pred[3] > 0.9, "desirePrediction[laneChangeRight - 1] (shifted)", m.desire_pred[3], 0.98);
+  check(m.desire_pred[2] < 0.1, "desirePrediction not off-by-one (slot 2 is not it)", m.desire_pred[2], 0.0);
   near("engaged prob", m.engaged, 1.0 / (1.0 + exp(-2.0)), 1e-5);
   near("pose rot (rad, unchanged)", ps.rot[0], 0.01, 1e-7);
   near("pose rot std", ps.rot_std[0], 0.002, 1e-6);
