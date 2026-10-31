@@ -121,6 +121,28 @@ slightly diagonally. Stops where the sensors saw something close but the radar n
 that is the radar's short-range blind spot on your car. Kept in `/data/radar_offset.json`; nothing is changed in
 openpilot - it tells you whether its radar distance settings match your car.
 
+## Module diagnostics, read-only (`/map` → Diagnostics)
+
+Reads identification (VIN, part number, software version) and stored fault codes from the car's modules over UDS,
+using only services that need **no security access**, in the module's default session:
+`0x22` ReadDataByIdentifier, `0x19` ReadDTCInformation (sub-functions 0x01/0x02/0x0A), `0x3E` TesterPresent, plus
+ISO-TP flow control. Never SecurityAccess, writes, routines, resets, session changes, clearing fault codes or
+communication control. A module that refuses is shown as refusing; nothing stronger is tried.
+
+Same rule in three places, each enough on its own:
+1. `radaruds.py` (radarweb) only builds read-only single frames for the listed modules.
+2. `tesla/uds_relay.py` (in carcontroller, which owns `sendcan`) re-checks every frame and passes it only in
+   **Park, standing still, openpilot off**, at most 20 frames/s. Off unless `/data/uds_read` exists.
+3. `tesla/panda_uds_read_only.patch` (optional, recommended): the panda firmware refuses anything else on the
+   diagnostic request ids. Without it the Tesla safety hook passes every frame (`tesla_tx_hook` returns true;
+   `TESLA_TX_MSGS` is declared but never checked).
+
+Enable: copy `tesla/uds_relay.py` and `tesla/carcontroller.py` to `selfdrive/car/tesla/`, optionally
+`cd panda && git apply .../tesla/panda_uds_read_only.patch` (the panda reflashes on the next boot),
+`touch /data/uds_read`, restart. Answers are expected on request id + 0x10 (radar 0x641 → 0x651, ESP 0x645 → 0x655).
+The gateway polls some modules on the same ids; answers that don't match our request are ignored.
+Tests: `tests/test_radaruds.py`, `tesla/tests/test_uds_relay.py`.
+
 ## Logs
 
 `/data/maplog/map_YYYYMMDD_HHMMSS.jsonl` is written by radarweb itself, one line per second (speed, openpilot/cruise

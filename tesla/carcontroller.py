@@ -17,6 +17,7 @@ from selfdrive.car.tesla.PCC_module import PCCController
 from selfdrive.car.tesla.HSO_module import HSOController
 from selfdrive.car.tesla.speed_utils.movingaverage import MovingAverage
 from selfdrive.car.tesla.AHB_module import AHBController
+from selfdrive.car.tesla.uds_relay import UdsRelay
 import cereal.messaging as messaging
 
 # Steer angle limits
@@ -96,6 +97,7 @@ class CarController():
     self.HSO = HSOController(self)
     self.GYRO = GYROController()
     self.AHB = AHBController(self)
+    self.UDS = UdsRelay()          # radarweb's read-only diagnostic requests, parked only (off unless /data/uds_read)
     self.sent_DAS_bootID = False
     self.speedlimit = None
     self.trafficevents = messaging.sub_sock('trafficEvents', conflate=True)
@@ -396,7 +398,7 @@ class CarController():
       apply_angle = CS.angle_steers
 
     # Send CAN commands.
-    can_sends = []
+    can_sends = self.UDS.update(enabled, CS)
 
     #if using radar, we need to send the VIN
     if CS.useTeslaRadar and (frame % 100 == 0):

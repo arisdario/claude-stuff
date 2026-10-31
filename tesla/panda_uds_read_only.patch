@@ -1,0 +1,61 @@
+diff --git a/board/safety/safety_tesla.h b/board/safety/safety_tesla.h
+index 66b94ee..fd499c4 100644
+--- a/board/safety/safety_tesla.h
++++ b/board/safety/safety_tesla.h
+@@ -1467,6 +1467,45 @@ static int tesla_rx_hook(CAN_FIFOMailBox_TypeDef *to_push)
+ // else
+ //     block all commands that produce actuation
+ 
++// Read-only diagnostics (radarweb -> tesla/uds_relay.py): on the module diagnostic request ids only ISO-TP single
++// frames with ReadDataByIdentifier (0x22), ReadDTCInformation 0x01/0x02/0x0A (0x19) or TesterPresent (0x3E), and
++// flow-control "continue" frames, may be sent. Never SecurityAccess, writes, routines, resets, session changes,
++// clearing fault codes or communication control.
++static bool tesla_is_uds_request(uint32_t addr) {
++  return (addr == 0x630U) || (addr == 0x641U) || (addr == 0x643U) || (addr == 0x644U) || (addr == 0x645U) ||
++         (addr == 0x647U) || (addr == 0x649U) || (addr == 0x64BU) || (addr == 0x64CU) || (addr == 0x64DU) ||
++         (addr == 0x64EU) || (addr == 0x64FU) || (addr == 0x671U) || (addr == 0x672U) || (addr == 0x673U) ||
++         (addr == 0x6E0U) || (addr == 0x6E2U) || (addr == 0x730U);
++}
++
++static bool tesla_uds_read_only(CAN_FIFOMailBox_TypeDef *to_send) {
++  int len = GET_LEN(to_send);
++  int b0 = GET_BYTE(to_send, 0);
++  int pci = b0 >> 4;
++  int n = b0 & 0xF;
++  bool ok = false;
++  if (len == 8) {
++    if (pci == 3) {
++      ok = (n == 0);
++    } else if ((pci == 0) && (n >= 1) && (n <= 7)) {
++      int sid = GET_BYTE(to_send, 1);
++      int sub = GET_BYTE(to_send, 2);
++      if (sid == 0x22) {
++        ok = (n >= 3) && (((n - 1) % 2) == 0);
++      } else if (sid == 0x19) {
++        ok = (n >= 2) && ((sub == 0x01) || (sub == 0x02) || (sub == 0x0A));
++      } else if (sid == 0x3E) {
++        ok = (n == 2) && ((sub == 0x00) || (sub == 0x80));
++      } else {
++        ok = false;
++      }
++    } else {
++      ok = false;
++    }
++  }
++  return ok;
++}
++
+ static int tesla_tx_hook(CAN_FIFOMailBox_TypeDef *to_send)
+ {
+ 
+@@ -1475,6 +1514,10 @@ static int tesla_tx_hook(CAN_FIFOMailBox_TypeDef *to_send)
+ 
+   addr = to_send->RIR >> 21;
+ 
++  if (tesla_is_uds_request(addr)) {
++    return tesla_uds_read_only(to_send);
++  }
++
+   //capture message for radarVIN and settings
+   if (addr == 0x560) {
+     int id = (to_send->RDLR & 0xFF);

@@ -56,15 +56,19 @@ class TestRecorder(unittest.TestCase):
     self.dir = tempfile.mkdtemp(); self.rec = RE.Recorder(out_dir=self.dir, segment_dir=self.dir)
 
   def test_steer_correction_records_pre_and_post(self):
-    evs, _ = run(self.rec, [(200, state()), (5, state(sp=True, tq=1.5)), (60, state())])
+    evs, _ = run(self.rec, [(200, state()), (5, state(sp=True, tq=2.5)), (60, state())])
     self.assertEqual(len(evs), 1); ev = evs[0]
     self.assertEqual(ev['type'], 'steer')
     span = ev['samples'][-1]['t'] - ev['samples'][0]['t']
     self.assertGreater(span, RE.PRE_S + RE.POST_S - 0.6)
     self.assertTrue(os.path.exists(os.path.join(self.dir, ev['file'])))
 
+  def test_resting_hands_are_not_a_correction(self):
+    evs, _ = run(self.rec, [(100, state()), (200, state(sp=True, tq=0.6)), (60, state())])   # hands on, light grip
+    self.assertEqual(evs, [])
+
   def test_short_touch_is_not_an_intervention(self):
-    evs, _ = run(self.rec, [(100, state()), (2, state(sp=True)), (80, state())])
+    evs, _ = run(self.rec, [(100, state()), (2, state(sp=True, tq=2.5)), (80, state())])
     self.assertEqual(evs, [])
 
   def test_disengage_by_brake(self):
@@ -72,7 +76,7 @@ class TestRecorder(unittest.TestCase):
     self.assertEqual([(e['type'], e['cause'], e['side']) for e in evs], [('disengage', 'brake', None)])   # nothing close
 
   def test_steer_then_disengage_is_one_event(self):
-    evs, _ = run(self.rec, [(100, state()), (5, state(sp=True)), (70, state(op=False, sp=True))])
+    evs, _ = run(self.rec, [(100, state()), (5, state(sp=True, tq=2.5)), (70, state(op=False, sp=True, tq=2.5))])
     self.assertEqual(len(evs), 1)
     self.assertEqual(evs[0]['type'], 'steer'); self.assertEqual(evs[0]['disengaged'], 'steer')
 
@@ -97,16 +101,16 @@ class TestRecorder(unittest.TestCase):
     self.assertEqual((evs[0]['type'], evs[0]['cause']), ('mark', 'wall on the right'))
 
   def test_rate_limit(self):
-    seq = [(100, state())] + [(5, state(sp=True)), (20, state())] * 3 + [(60, state())]
+    seq = [(100, state())] + [(5, state(sp=True, tq=2.5)), (20, state())] * 3 + [(60, state())]
     evs, _ = run(self.rec, seq)
     self.assertEqual(len(evs), 1)                       # three corrections within MIN_GAP_S -> one event
 
   def test_side_from_where_it_was_close(self):
-    evs, _ = run(self.rec, [(100, state(edge_l=1.4)), (5, state(edge_l=1.4, sp=True)), (60, state(edge_l=1.4))])
+    evs, _ = run(self.rec, [(100, state(edge_l=1.4)), (5, state(edge_l=1.4, sp=True, tq=2.5)), (60, state(edge_l=1.4))])
     self.assertEqual(evs[0]['side'], 'left')
 
   def test_list_and_load(self):
-    run(self.rec, [(100, state()), (5, state(sp=True)), (60, state())])
+    run(self.rec, [(100, state()), (5, state(sp=True, tq=2.5)), (60, state())])
     rows = RE.list_events(self.dir)
     self.assertEqual(len(rows), 1); self.assertNotIn('samples', rows[0])
     self.assertIsNotNone(RE.load_event(rows[0]['file'], self.dir))
@@ -116,7 +120,7 @@ class TestRecorder(unittest.TestCase):
     for i in range(5):
       with open(os.path.join(self.dir, 'ev_2026010%d_000000_steer.json' % i), 'w') as f: json.dump({}, f)
     old = RE.MAX_FILES; RE.MAX_FILES = 3
-    try: run(self.rec, [(100, state()), (5, state(sp=True)), (60, state())])
+    try: run(self.rec, [(100, state()), (5, state(sp=True, tq=2.5)), (60, state())])
     finally: RE.MAX_FILES = old
     self.assertEqual(len([x for x in os.listdir(self.dir) if x.startswith('ev_')]), 3)
 
@@ -179,7 +183,7 @@ class TestAnalysis(unittest.TestCase):
     self.assertIn('never took it as its lead', a['verdict'])
 
   def test_lateral_event_has_no_hazard(self):
-    evs, _ = run(self.rec, [(100, state(edge_r=-1.4)), (5, state(edge_r=-1.4, sp=True)), (60, state())])
+    evs, _ = run(self.rec, [(100, state(edge_r=-1.4)), (5, state(edge_r=-1.4, sp=True, tq=2.5)), (60, state())])
     a = evs[0]['analysis']
     self.assertIsNone(a['hazard']); self.assertIn('steering / lane-position', a['verdict'])
 

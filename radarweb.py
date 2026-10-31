@@ -25,6 +25,19 @@ try:
 except Exception as _e_rec:
     radarevents = None; EVREC = None; print('radarevents not available - no intervention recording:', _e_rec)
 try:
+    import radarsens            # wheels (slip, tyres), sun, fleet speed, map curvature check (radarsens.py next to radarweb.py)
+    WHEELMON = radarsens.WheelMonitor(os.environ.get('RADARWEB_WHEELS', radarsens.SAVE_FILE)); CURVECHK = radarsens.CurveCheck()
+except Exception as _e_sn:
+    radarsens = None; WHEELMON = None; CURVECHK = None; print('radarsens not available - no wheel/sun/fleet data:', _e_sn)
+try:
+    import radaruds             # read-only diagnostics (UDS, no security access) sent through tesla/uds_relay.py
+    import socket as _sock_uds
+    _UDS_OUT = _sock_uds.socket(_sock_uds.AF_INET, _sock_uds.SOCK_DGRAM)
+    def _uds_send(addr, bus, data): _UDS_OUT.sendto(bytes([addr & 0xFF, addr >> 8, bus]) + bytes(data), ('127.0.0.1', 47710))
+    UDSC = radaruds.UdsClient(_uds_send)
+except Exception as _e_ud:
+    radaruds = None; UDSC = None; print('radaruds not available - no module diagnostics:', _e_ud)
+try:
     import radarpark            # radar distance vs parking sensors at stops (radarpark.py next to radarweb.py)
     PARKCAL = radarpark.OffsetMeter(os.environ.get('RADARWEB_PARKCAL', radarpark.SAVE_FILE))
 except Exception as _e_pk:
@@ -118,7 +131,8 @@ OBJFULL = {}; SNAP = [None, 0.0]; TICK = [0]
 # PERF (from a RADARWEB_PROFILE run on the EON: half the busy time was the per-CAN-frame loop): only these IDs are handled
 # on every frame - radar objects/status, the IDs decoded in the loop, multiplexed messages. All others just get counted,
 # and their latest bytes (for /map and the log) refreshed twice a second.
-HOT = set([0x108, 0x2F8, 0x32E, 0x33E, 0x102, 0x302, 0x382, 0x212, 0x232, 0x3D2, 0x754, 0x51E, 0x6F2, 0x300, 0x301, 0x501]) | set(range(0x310, 0x36F)) | set(MUXINFO)
+HOT = set([0x108, 0x2F8, 0x32E, 0x33E, 0x102, 0x302, 0x382, 0x212, 0x232, 0x3D2, 0x754, 0x51E, 0x6F2, 0x300, 0x301, 0x501,
+           0x155, 0x370])   # 0x155 ESP_B: 8-bit wheel pulse counters wrap several times a second - every frame counts; 0x370 EPAS | set(range(0x310, 0x36F)) | set(MUXINFO)
 RAWDUE = [0.0]; SUBDUE = [0.0]
 # radar_decode: radarml.decode_pair decodes each object frame pair once (radarlog's decode_a/decode_b + decode_ab did it
 # twice, bit by bit). It is only trusted after it gave exactly radarlog's values for the first DEC_CHECK object frames
@@ -377,6 +391,9 @@ def _worker(prof=None):
         for ev in messaging.drain_sock(can, wait_for_one=False):
             for m in ev.can:
                 a = m.address; ka = a | RADAR_KEY if (m.src & 0x7F) == RADAR_SRC else a; r = RAW.get(ka)   # radar bus kept apart: it reuses car IDs
+                if UDSC is not None and UDSC.cur is not None and a == UDSC.cur['addr'] + 0x10 and m.src < 0x80:   # answer to our diagnostic request
+                    try: UDSC.feed(a, 1 if m.src == RADAR_SRC else 0, bytes(m.dat), now)
+                    except Exception as _e: print('radaruds:', _e)
                 if r is not None and not raw_due and a not in HOT:
                     r[1] += 1; continue      # PERF: an ID nothing decodes - count it (Hz on /map), refresh its bytes twice a second
                 d = m.dat; ld = len(d)
@@ -385,6 +402,8 @@ def _worker(prof=None):
                     if len(RAW) >= 600: continue
                     r = RAW[ka] = [m.src, 0, b'', now, 0, 0.0]
                 r[0] = m.src; r[1] += 1; r[2] = bytes(d); r[3] = now
+                if a == 0x155 and ld >= 4 and m.src == 0 and WHEELMON is not None:    # ESP_B wheel pulses (radarsens)
+                    WHEELMON.feed(r[2])
                 if a == 0x108 and ld == 8 and m.src != RADAR_SRC:      # DI_torque1: motor torque Nm (16|13, 0.25), rpm (32|16), pedal % (48|8, 0.4)
                     try:
                         _v = int.from_bytes(r[2], 'little'); _t = (_v >> 16) & 0x1FFF; _w = (_v >> 32) & 0xFFFF
@@ -571,6 +590,12 @@ def _worker(prof=None):
                     if _ev: STATE['lastev'] = {'type': _ev['type'], 'cause': _ev['cause'], 'side': _ev['side'], 't': _ev['t'], 'file': _ev.get('file')}
                 except Exception as _e:
                     print('radarevents:', _e)
+            if UDSC is not None and UDSC.busy():     # diagnostic requests: one at a time, only while parked
+                try:
+                    if not uds_parked(): UDSC.queue = []
+                    UDSC.poll(now)
+                except Exception as _e:
+                    print('radaruds:', _e)
             if PARKCAL is not None:      # 10 Hz: radar distance vs parking-sensor gap whenever standing behind something
                 try:
                     if PARKCAL.update(now, STATE.get('v'), STATE.get('park'), STATE.get('o')) or 'parkcal' not in STATE:
@@ -1336,9 +1361,25 @@ function udsDecode(hex){var b=hx2a(hex);if(!b.length)return null;var pci=b[0]>>4
  if(pci==2)return {svc:'(continuation)',detail:'consecutive frame '+(b[0]&15),kind:'ct'};
  if(pci==3)return {svc:'(flow control)',detail:'',kind:'ct'};
  return udsPayload(b)}
+var UDSD=null,UDSMSG='',UDST=0;
+function udsPoll(){var t=Date.now();if(t-UDST<900)return;UDST=t;fetch('/api/uds').then(function(r){return r.json()}).then(function(j){UDSD=j}).catch(function(){})}
+function udsGo(o){UDSMSG='sending…';fetch('/api/uds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)}).then(function(r){return r.json()}).then(function(j){UDSMSG=j.ok?('reading '+j.queued+' requests…'):j.msg;UDST=0;udsPoll();show(D)}).catch(function(){UDSMSG='request failed'});return false}
+function udsSection(){udsPoll();var u=UDSD,b=function(o,l,c){return '<button class=chipb'+(c?' style="background:'+c+';color:#fff"':'')+' onclick=\'udsGo('+JSON.stringify(o)+')\'>'+l+'</button>'};
+ var h='<section class=wide><h2>Read from the modules <small>UDS, no security access: identification (0x22) and fault codes (0x19) only &middot; nothing is written, reset or cleared</small></h2>';
+ if(!u){return h+'<div style="color:var(--mut)">loading…</div></section>'}
+ if(!u.available)return h+'<div style="color:var(--mut)">radaruds.py is not next to radarweb.py.</div></section>';
+ var st=!u.enabled?'<b style="color:#f08a00">off</b> &mdash; to enable: <code>touch /data/uds_read</code> on the EON, then restart openpilot (the carcontroller relay reads it)':!u.parked?'<b style="color:#f08a00">waiting</b> &mdash; only in Park, standing still, openpilot off':u.busy?'<b style="color:#1a73e8">reading</b> &mdash; '+u.queued+' requests left':'<b style="color:#2fbf71">ready</b>';
+ h+='<div style="margin:4px 0 8px">'+st+(UDSMSG?' &middot; <span style="color:var(--mut)">'+UDSMSG+'</span>':'')+'</div>';
+ h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">'+b({do:'scan'},'Find modules (VIN, part, software)','#1a73e8')+b({do:'dtc_all'},'Read all fault codes','#e5484d')+'</div>';
+ h+='<div style="overflow-x:auto"><table class=mono style="border-collapse:separate;border-spacing:10px 4px;margin-left:-10px"><tr><td>module</td><td>id &middot; bus</td><td>answers</td><td>identification</td><td>fault codes</td><td></td></tr>';
+ (u.modules||[]).forEach(function(m){var id=Object.keys(m.ident).map(function(k){return k+': <b>'+m.ident[k]+'</b>'}).join('<br>');
+  var dt=m.dtcs==null?'<span style="color:var(--mut)">not read</span>':!m.dtcs.length?'<span style="color:#2fbf71">none</span>':m.dtcs.map(function(d){return '<span style="color:'+(d.active?'#e5484d':d.confirmed?'#f08a00':'#8b949e')+'">'+d.code+'</span> <small>'+d.flags.join(', ')+'</small>'}).join('<br>');
+  var er=m.errors.length&&!m.answered?'<span style="color:var(--mut)">'+m.errors[m.errors.length-1].error+'</span>':m.errors.length?'<small style="color:var(--mut)">'+m.errors.map(function(e){return e.req.slice(0,6)+': '+e.error}).join('<br>')+'</small>':'';
+  h+='<tr><td>'+m.name+'</td><td style="white-space:nowrap">'+hx(m.addr)+' <small style="color:var(--mut)">bus '+m.bus+'</small></td><td>'+(m.answered?'<span style="color:#2fbf71">yes</span>':er||'&ndash;')+'</td><td>'+(id||(m.answered?er:''))+'</td><td>'+dt+'</td><td style="white-space:nowrap">'+b({do:'ident',addr:m.addr,bus:m.bus},'ident')+b({do:'dtc',addr:m.addr,bus:m.bus},'faults')+'</td></tr>'});
+ return h+'</table></div><div style="color:var(--mut);margin-top:6px">A module that refuses (e.g. &ldquo;security access denied&rdquo;, &ldquo;not supported in this session&rdquo;) is left at that: nothing stronger is ever tried. Fault-code colours: red = failing now, orange = confirmed (stored), grey = pending/history.</div></section>'}
 function diagIds(raw){return Object.keys(raw).filter(function(k){var e=raw[k],id=+k;return /uds|request|response/i.test(e.name||'')||(id>=0x600&&id<=0x7ff)})}
 function diagTable(raw,ids){var KC={req:'#1a73e8',pos:'#2fbf71',neg:'#e5484d',ct:'#8b949e'};
- var h='<section class=wide><h2>Diagnostics on the bus (UDS / ISO-TP) <small>'+ids.length+' ids &middot; read-only: decodes requests &amp; responses already on the bus, nothing is sent</small></h2>'+
+ var h='<section class=wide><h2>Diagnostics on the bus (UDS / ISO-TP) <small>'+ids.length+' ids &middot; everything on the bus, including the requests sent above</small></h2>'+
   '<div style="color:var(--mut);margin:4px 0 8px">These appear only while a diagnostic tool (or the gateway) is talking to a module. Service and sub-function are decoded from the raw ISO-TP bytes; payloads are shown as hex, not interpreted.</div>'+
   '<div style="overflow-x:auto"><table class=mono><tr><td>addr</td><td>name (if in DBC)</td><td>bus</td><td>dir</td><td>service</td><td>detail</td><td>age s</td><td>raw</td></tr>';
  var rows=ids.map(function(k){return [raw[k],+k,udsDecode(raw[k].hex)]}).sort(function(a,b){return a[1]-b[1]});
@@ -1379,7 +1420,7 @@ function show(d){D=d;document.getElementById('v').textContent=Math.round((d.v||0
   h+=allcan(raw);
   h+='</section><section class=wide><h2>openpilot carState / controlsState fields</h2><table class=mono>';
   ['car','ctl'].forEach(function(g){var o=d[g]||{};Object.keys(o).forEach(function(k){h+='<tr><td>'+g+'.'+k+'</td><td>'+fv(o[k])+'</td></tr>'})});h+='</table></section>'}
- else if(TAB=='diag'){h+=diagTable(raw,dids)}
+ else if(TAB=='diag'){h+=udsSection()+diagTable(raw,dids)}
  else{
   if(TAB=='map'){var md=groups.map.filter(function(m){return m.name=='UI_driverAssistMapData'})[0];
    if(md){var s=md.sig,u=(s.UI_mapSpeedUnits?' mph':' km/h');h+='<section><h2>Speed limit from the map</h2><div class=big>'+(s.UI_mapSpeedLimit?s.UI_mapSpeedLimit*5+u:'-')+'</div><div style="color:var(--mut)">raw '+s.UI_mapSpeedLimit+' (x5 assumed), type '+s.UI_mapSpeedLimitType+', road class '+s.UI_roadClass+'</div></section>'}}
@@ -1904,6 +1945,31 @@ start();
 </script></body></html>"""
 
 
+def uds_parked():
+    return str(STATE.get('gear')) == 'park' and abs(STATE.get('v') or 0) < 0.1 and not STATE.get('op')
+
+
+def uds_status():
+    if UDSC is None: return {'available': False}
+    return {'available': True, 'enabled': os.path.exists('/data/uds_read'), 'parked': uds_parked(), 'busy': UDSC.busy(),
+            'queued': len(UDSC.queue) + (1 if UDSC.cur else 0), 'modules': radaruds.summarize(UDSC.results)}
+
+
+def uds_start(q):
+    if UDSC is None: return {'ok': False, 'msg': 'radaruds.py not found next to radarweb.py'}
+    if not os.path.exists('/data/uds_read'): return {'ok': False, 'msg': 'off: run  touch /data/uds_read  on the EON and restart openpilot'}
+    if not uds_parked(): return {'ok': False, 'msg': 'only in Park, standing still, openpilot off'}
+    if UDSC.busy(): return {'ok': False, 'msg': 'still reading, wait'}
+    do = q.get('do'); a = int(q.get('addr', 0)); b = int(q.get('bus', 0))
+    if do == 'scan': radaruds.plan_scan(UDSC)
+    elif do == 'ident': radaruds.plan_ident(UDSC, a, b)
+    elif do == 'dtc': radaruds.plan_dtcs(UDSC, a, b)
+    elif do == 'dtc_all':
+        for a_, n_, b_ in radaruds.target_list(): radaruds.plan_dtcs(UDSC, a_, b_)
+    else: return {'ok': False, 'msg': 'unknown request'}
+    return {'ok': True, 'queued': len(UDSC.queue)}
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _snap(self):
@@ -1917,9 +1983,13 @@ class H(BaseHTTPRequestHandler):
         if not ok:
             self.send_response(401); self.send_header('WWW-Authenticate', 'Basic realm="radarweb"'); self.send_header('Content-Length', '0'); self.end_headers()
         return ok
+    def _json(self, d, code=200):
+        b = json.dumps(d, default=str).encode(); self.send_response(code); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_GET(self):
         if not self._authed(): return
-        if self.path == '/api/state':
+        if self.path == '/api/uds':
+            self._json(uds_status())
+        elif self.path == '/api/state':
             b = self._snap().encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path == '/api/map':
             msgs, rawv = build_map(time.time()); d = {'msgs': msgs, 'raw': rawv, 'car': MAP['car'], 'ctl': MAP['ctl'], 'logfile': MAP.get('logfile'), 'v': STATE.get('v', 0), 'acc': STATE.get('acc', False), 'alc': STATE.get('alc', False)}
@@ -2050,6 +2120,13 @@ class H(BaseHTTPRequestHandler):
                     pass
             b = json.dumps({'ok': ok, 'text': txt, 'file': LABEL_FILE}).encode()
             self.send_response(200 if ok else 500); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        elif self.path.split('?')[0] == '/api/uds':
+            # /map Diagnostics tab: {"do": "scan" | "ident" | "dtc" | "dtc_all", "addr": 0x645, "bus": 0}. Read-only services only.
+            try:
+                n = int(self.headers.get('Content-Length', '0') or '0'); q = json.loads(self.rfile.read(min(n, 200)).decode() or '{}')
+                self._json(uds_start(q))
+            except Exception as e:
+                self._json({'ok': False, 'msg': str(e)}, 400)
         elif self.path.split('?')[0] == '/api/mark':
             # /dash "Mark" button: records the moment as an event (radarevents), body = optional short note
             try:

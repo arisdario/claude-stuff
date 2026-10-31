@@ -25,6 +25,8 @@ X_IDXS = [0., 0.1875, 0.75, 1.6875, 3., 4.6875, 6.75, 9.1875, 12., 15.1875, 18.7
 HALF_W = 0.98            # m, half the Model S body width (mirrors folded in: the radar can't see mirror height anyway)
 PRE_S, POST_S = 15.0, 5.0
 STEER_HOLD_S = 0.3
+STEER_TQ_NM = 1.8        # Nm twist on the wheel (EPAS torsion bar) = a correction. Not carState.steeringPressed: in this
+                         # fork that is EPAS_handsOnLevel > 0, i.e. simply hands resting on the wheel
 CLOSE_M, CLOSE_HOLD_S = 0.3, 0.5
 CLEAR_AHEAD_M = 12.0     # look this far ahead for edges / static objects beside the car's path
 OBJ_AHEAD_M = 20.0
@@ -84,9 +86,11 @@ def sample(st, now):
   drv = st.get('drv') or {}
   g = st.get('gps') or {}
   p, l, r, e = md.get('p'), md.get('l'), md.get('r'), md.get('e')
+  tq = drv.get('st')
   s = {'t': round(now, 2), 'v': round(st.get('v') or 0.0, 2), 'ang': st.get('ang'), 'op': bool(st.get('op')),
-       'acc': bool(st.get('acc')), 'tq': drv.get('st'), 'sp': bool(drv.get('sp')), 'br': bool(drv.get('br')),
-       'gas': bool(drv.get('gas')), 'c': clearances(st)}
+       'acc': bool(st.get('acc')), 'tq': tq, 'sp': bool(drv.get('sp')), 'br': bool(drv.get('br')),
+       'gas': bool(drv.get('gas')), 'hands': drv.get('hands'), 'c': clearances(st)}
+  s['steer'] = tq is not None and abs(tq) >= STEER_TQ_NM          # a real correction, not resting hands
   if p: s['path'] = [round(poly_y(p, x), 2) for x in (0, 10, 20, 40)]
   if l: s['lane_l'] = [round(poly_y(l, x), 2) for x in (0, 10, 20, 40)] + [md.get('pl')]
   if r: s['lane_r'] = [round(poly_y(r, x), 2) for x in (0, 10, 20, 40)] + [md.get('pr')]
@@ -217,7 +221,7 @@ class Recorder:
     while self.buf and now - self.buf[0]['t'] > PRE_S: self.buf.pop(0)
     op = s['op']
     # steering correction while engaged
-    if op and s['sp']:
+    if op and s['steer']:
       if self.steer_since is None: self.steer_since = now
       if not self.steer_fired and now - self.steer_since >= STEER_HOLD_S:
         self.steer_fired = True
@@ -228,7 +232,7 @@ class Recorder:
     if self.prev_op and not op:
       recent = [x for x in self.buf if now - x['t'] <= 0.6]
       cause = 'brake' if any(x['br'] for x in recent) else 'gas' if any(x['gas'] for x in recent) else \
-              'steer' if any(x['sp'] for x in recent) else 'cancel'
+              'steer' if any(x.get('steer') for x in recent) else 'cancel'
       if self.pending is not None and self.pending['type'] in ('steer', 'close') and now - self.pending['t0'] < POST_S:
         self.pending['disengaged'] = cause            # same moment: keep one event, note that it also disengaged
       else:
@@ -278,7 +282,7 @@ class Recorder:
     act = t0                     # when you actually started acting (brake / gas / steering), not when openpilot switched off
     if p['type'] in ('disengage', 'steer'):
       for x in reversed([x for x in samples if x['t'] <= t0 + 0.05]):
-        if x['br'] or x['gas'] or x['sp']: act = x['t']
+        if x['br'] or x['gas'] or x.get('steer'): act = x['t']
         elif x['t'] < t0 - 0.05: break
     ev['acted'] = round(act, 2)
     try: ev['analysis'] = analyze(samples, act, p['type'])
