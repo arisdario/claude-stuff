@@ -398,7 +398,10 @@ class CarController():
       apply_angle = CS.angle_steers
 
     # Send CAN commands.
-    can_sends = self.UDS.update(enabled, CS)
+    try:                                    # diagnostics relay must never break the control loop
+      can_sends = self.UDS.update(enabled, CS)
+    except Exception as e:
+      print('uds_relay:', e); can_sends = []
 
     #if using radar, we need to send the VIN
     if CS.useTeslaRadar and (frame % 100 == 0):

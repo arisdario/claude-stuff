@@ -159,6 +159,7 @@ MOVER_MS = 4.0       # unclassified object moving at least this fast over the gr
 CLS_MEM = {}
 LIMLAST = [0, None]
 PARKT = [0.0]
+EPAS_TQ = [None, 0.0]    # [EPAS_torsionBarTorque Nm, time] - real steering effort (carState.steeringTorque is dead in this fork)
 PARKV = {'f': None, 'r': None}
 # BATT: battery/BMS fields accumulated across several CAN IDs, pack-level only. No source checked
 # (leaked internal Tesla DB, WK057/Skie.net, Scan My Tesla's own app source, Jack Rickard/evtv.me)
@@ -404,6 +405,11 @@ def _worker(prof=None):
                 r[0] = m.src; r[1] += 1; r[2] = bytes(d); r[3] = now
                 if a == 0x155 and ld >= 4 and m.src == 0 and WHEELMON is not None:    # ESP_B wheel pulses (radarsens)
                     WHEELMON.feed(r[2])
+                if a == 0x370 and ld == 8 and m.src == 0:      # EPAS_sysStatus: real torsion-bar torque (19|12@0+ Motorola, 0.01, -20.5 Nm).
+                    try:                                       # carState.steeringTorque is hardcoded 0 in this fork (carstate.py:675), so read it here.
+                        _vb = int.from_bytes(r[2], 'little'); _raw = int(round(_dec(_vb, 8, 19, 12, False, 1, 0, 0)))
+                        EPAS_TQ[0] = None if _raw >= 4094 else round(_raw * 0.01 - 20.5, 2); EPAS_TQ[1] = now
+                    except Exception: pass
                 if a == 0x108 and ld == 8 and m.src != RADAR_SRC:      # DI_torque1: motor torque Nm (16|13, 0.25), rpm (32|16), pedal % (48|8, 0.4)
                     try:
                         _v = int.from_bytes(r[2], 'little'); _t = (_v >> 16) & 0x1FFF; _w = (_v >> 32) & 0xFFFF
@@ -493,7 +499,9 @@ def _worker(prof=None):
                         except Exception: pass
                         try:                    # driver inputs, for the intervention recorder (radarevents.py)
                             cs = ev.carState
-                            STATE['drv'] = {'sp': bool(cs.steeringPressed), 'st': round(float(cs.steeringTorque), 2),
+                            # steeringTorque is hardcoded 0 in this fork, so use the EPAS torsion-bar torque read from 0x370 (fresh within 0.5 s)
+                            _tq = EPAS_TQ[0] if (EPAS_TQ[1] and now - EPAS_TQ[1] < 0.5) else None
+                            STATE['drv'] = {'sp': bool(cs.steeringPressed), 'st': _tq,
                                             'br': bool(cs.brakePressed), 'gas': bool(cs.gasPressed)}
                         except Exception: pass
                         try: STATE['a'] = float(ev.carState.aEgo)
