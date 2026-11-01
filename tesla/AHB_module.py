@@ -4,6 +4,13 @@ import cereal.messaging as messaging
 import os
 import time
 
+# camera-luminance brightness estimate + decision state machine (new; see ahb_luminance.py / ahb_state.py).
+# Import works both inside openpilot (package path) and from the standalone test (which puts tesla/ on sys.path).
+try:
+  from selfdrive.car.tesla import ahb_luminance, ahb_state
+except Exception:
+  import ahb_luminance, ahb_state
+
 DEBUG = False
 
 # AHBAUTO: a pre-AP car with MCU2 never sends MCU_chassisControl.MCU_ahlbEnable (there is no Autopilot menu), so the
@@ -62,6 +69,10 @@ class AHBController():
     self.frameInfoGain = 0
     self.auto_allowed = False          # AHBAUTO speed hysteresis state
     self._flags = (False, False); self._flags_t = 0   # (auto, test) flag files, checked once a second
+    self.lum = ahb_luminance.LuminanceEstimator()     # road-scene brightness from camera exposure (relative estimate)
+    self.ahb_sm = ahb_state.AhbStateMachine()         # 4-state decision engine (runs for diagnostics; see note below)
+    self.diag = {}                                    # last cycle's diagnostics (luminance, state, reason)
+    self._diag_t = 0
 
   def auto_or_test(self):
     """AHBAUTO: carcontroller sends the high-beam decision when this is true even without has_tesla_ic_integration
@@ -86,6 +97,45 @@ class AHBController():
     self.ahbIsEnabled = self.ahbIsEnabled and bool(CS.ahbEnabled or self._flags[0] or self._flags[1])   # AHBTEST: test mode reports 'AHB enabled' like auto mode does
     return highLowBeamStatus,highLowBeamReason,self.ahbIsEnabled
 
+  def _scene_is_bright(self):
+    """True = too bright for high beam. Prefer the luminance estimator (needs real gain+integLines); fall back to the
+    original gain>=510 rule when it has no valid reading (tests, or a frame without integLines)."""
+    if self.lum.valid:
+      return not self.lum.is_dark()
+    return self.frameInfoGain < 510
+
+  def _run_diag(self, CS, tms_now):
+    """Run the 4-state decision engine for diagnostics/logging and record this cycle's state. It does NOT drive the
+    DAS output (the proven update() logic above remains the authority, so existing behaviour and tests are preserved);
+    it is the richer engine, ready to take over once the luminance thresholds are calibrated on a night drive.
+    Cheap: one dict per cycle. Optionally dumped to /data/ahb_diag.json at <=2 Hz when /data/ahb_debug exists."""
+    info = self.ahbInfoData
+    oncoming = bool(info and getattr(info, 'cameraCarDetected', False))
+    lead = bool(info and getattr(info, 'radarCarDetected', False))
+    inp = ahb_state.AhbInputs(
+      now=tms_now / 1000.0,
+      enabled=bool(CS.ahbEnabled or self._flags[0] or self._flags[1]),
+      dark=self.lum.is_dark() if self.lum.valid else (self.frameInfoGain >= 510),
+      bright=(self.lum.level == ahb_luminance.BRIGHT) if self.lum.valid else False,
+      lum_valid=self.lum.valid if self.lum.valid else (self.frameInfoGain > 0),
+      v_ego=CS.v_ego, stalk=CS.ahbHighBeamStalkPosition, headlights_on=bool(CS.ahbLoBeamOn),
+      oncoming=oncoming, lead=lead, vision_target=oncoming)
+    try:
+      sm = self.ahb_sm.update(inp)
+    except Exception:
+      sm = {'state': None, 'reason': None, 'high': None}
+    self.diag = dict(self.lum.diagnostics())
+    self.diag.update({'frame_gain': self.frameInfoGain, 'sm_state': sm['state'], 'sm_high': sm['high'],
+                      'sm_reason': sm['reason'], 'oncoming': oncoming, 'lead': lead, 'v_ego': round(CS.v_ego, 1)})
+    if tms_now - self._diag_t > 500 and os.path.exists('/data/ahb_debug'):
+      self._diag_t = tms_now
+      try:
+        import json
+        with open('/data/ahb_diag.json', 'w') as f:
+          json.dump(self.diag, f)
+      except Exception:
+        pass
+
   def update(self, CS, frame,ahbLead1):
     tms_now = _current_time_millis()
     ahbInfoMsg = self.ahbInfo.receive(non_blocking=True)
@@ -99,7 +149,12 @@ class AHBController():
       frameDuration = self.frameInfoData.androidCaptureResult.frameDuration
       if frameInfoGain != self.frameInfoGain:
         self.frameInfoGain = frameInfoGain
+      # feed the luminance estimator: globalGain + integLines -> relative brightness (see ahb_luminance.py).
+      integ_lines = getattr(self.frameInfoData, 'integLines', None)
+      self.lum.update_exposure(self.frameInfoGain, integ_lines, tms_now / 1000.0)
       _debug("AHB Camera has new data [ frame - " + str(self.frameInfoData.frameId) + "]  = " + str(frameInfoGain) + ", exposure = " + str(exposureTime) + ", frame duration = " + str(frameDuration))
+    self.lum.tick(tms_now / 1000.0)      # expire the estimate if the camera stalls
+    self._run_diag(CS, tms_now)
     auto, test = self._flag_files(tms_now)
     #AHBTEST: parked -> stalk high: dip / release every 2 s;  stalk normal: DAS high on / off every 2 s
     if test and CS.v_ego < 0.5 and CS.ahbHighBeamStalkPosition in (0, 1):
@@ -145,12 +200,14 @@ class AHBController():
       highLowBeamStatus = AHBDecision.DAS_HIGH_BEAM_UNDECIDED
       highLowBeamReason = AHBReason.HIGH_BEAM_OFF_REASON_SNA
       return self.set_and_return(CS,frame,highLowBeamStatus,highLowBeamReason)
-    # if gain less than max, we might see incoming car
-    if self.frameInfoGain < 510:
-      _debug("OP camera gain < 510")
+    # scene bright enough that high beam is not warranted (oncoming light, street lighting, dusk). Uses the camera
+    # luminance estimator when it has real exposure data (gain + integLines); else the original gain>=510 rule, so the
+    # existing tests and any frame without integLines behave exactly as before.
+    if self._scene_is_bright():
+      _debug("scene too bright for high beam")
       self.time_last_car_detected = tms_now
       highLowBeamStatus = AHBDecision.DAS_HIGH_BEAM_OFF
-      highLowBeamReason = AHBReason.HIGH_BEAM_OFF_REASON_MOVING_RADAR_TARGET
+      highLowBeamReason = AHBReason.HIGH_BEAM_OFF_REASON_AMBIENT_LIGHT
       return self.set_and_return(CS,frame,highLowBeamStatus,highLowBeamReason)
     #if lead car detected by radarD, i.e. OP has Lead, then reset timer and return OFF
     if False and ahbLead1 is not None:
