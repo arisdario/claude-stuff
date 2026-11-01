@@ -58,6 +58,30 @@ class TestCurves(unittest.TestCase):
   def test_vision_too_short(self):
     self.assertIsNone(P.vision_curve_limit(np, [0.] * 10, 20.))
 
+  def test_vision_ignores_points_past_the_prediction(self):
+    # PATHEND: what the 0.8.3 adapter publishes at 68 km/h on a 200 m curve: the arc up to where its 10 s plan ends,
+    # then held flat with NO_DATA_STD. The flat tail used to read as a sharp bend and brake below the speed we're at.
+    v, R = 68 / 3.6, 200.
+    reach = int(R * math.sin(v * 10. / R))                                  # forward distance after 10 s on the arc
+    arc = [R - math.sqrt(R * R - min(d, reach) ** 2) for d in range(192)]
+    pts = [arc[d] if d <= reach else arc[reach] for d in range(192)]
+    stds = [0.1 if d <= reach else 1e3 for d in range(192)]
+    self.assertLess(P.vision_curve_limit(np, pts, v), v)                     # the old read: phantom braking
+    self.assertGreaterEqual(P.vision_curve_limit(np, pts, v, stds), v)       # fixed: no braking...
+    safe = math.sqrt(P.vision_ay_max(v) * R)
+    self.assertLessEqual(P.vision_curve_limit(np, pts, v, stds), math.sqrt(safe ** 2 + 2 * P.A_CURVE_DECEL * 192) + 0.1)
+
+  def test_vision_real_bend_inside_the_prediction_still_slows(self):
+    v = 65 / 3.6
+    pts = path_straight_then_bend(30, 80.)
+    stds = [0.1] * 150 + [1e3] * 42                                           # plan ends at 150 m, bend starts at 30 m
+    self.assertLess(P.vision_curve_limit(np, pts, v, stds), v)
+
+  def test_vision_stds_optional(self):
+    pts = path_straight_then_bend(40, 60.)
+    self.assertEqual(P.vision_curve_limit(np, pts, 20.), P.vision_curve_limit(np, pts, 20., []))
+    self.assertIsNone(P.vision_curve_limit(np, pts, 20., [0.1] * 10 + [1e3] * 182))   # under 20 predicted points
+
   def test_lateral_accel(self):
     self.assertAlmostEqual(P.lateral_accel(20., 0., 11.5, 2.96), 0.)
     self.assertGreater(P.lateral_accel(20., 30., 11.5, 2.96), 5.)

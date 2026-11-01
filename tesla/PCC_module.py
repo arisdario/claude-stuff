@@ -136,6 +136,7 @@ class PCCController():
     self.model_sock = messaging.sub_sock('model', conflate=True)
     self._curve_poly = None
     self._curve_points = None
+    self._curve_stds = None
     self._curve_x = np.arange(192)
     # MAPCURVE FIX: liveMapData comes 4x/s but update_pdl runs 20x/s; recv_one_or_none only saw it 1 cycle in 5, so the
     # map limit flickered on and off. Keep the last one (curvature, distance, time) and use it until it is 2 s old.
@@ -665,12 +666,13 @@ class PCCController():
       if m is not None:
         pts = list(m.model.path.points)
         self._curve_points = np.array(pts, dtype=np.float64) if len(pts) >= 20 else None
+        self._curve_stds = list(m.model.path.stds)    # PATHEND: where the model's prediction ends
       pts = self._curve_points
       if pts is None:
         return 255.
       # CURVEPLAN: smoothed path, and each point's curve speed turned into an approach speed for its distance
       # (pcc_curves.vision_curve_limit) instead of the single tightest point anywhere ahead applied right away
-      v = pcc_curves.vision_curve_limit(np, pts, CS.v_ego)
+      v = pcc_curves.vision_curve_limit(np, pts, CS.v_ego, self._curve_stds)
       return 255. if v is None else v
     except Exception:
       return 255.

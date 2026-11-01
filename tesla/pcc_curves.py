@@ -32,6 +32,7 @@ VISION_FIT_HALF = 10       # curvature from a least-squares quadratic over +-10 
                            # model path would otherwise turn into curvature spikes and random slowdowns
 VISION_MIN_V = 20. * 0.44704  # never ask for less than 20 mph from vision alone (same floor as before)
 VISION_AY_SCALE = 1.0      # 1.0 = the old formula (2.975 - 0.0375 v) m/s2 lateral; lower = slower in curves
+VISION_NO_DATA_STD = 100.  # path std at or above this = "no prediction here" (models mark it 1e3; real stds are < 10)
 
 # --- acceleration profile (no lead car) -------------------------------------------------------------------------
 ACCEL_BP = [0., 15., 30.]  # m/s
@@ -84,12 +85,27 @@ def _sg_derivs(np, y, half):
           np.concatenate([np.full(half, d2[0]), d2, np.full(half, d2[-1])]))
 
 
-def vision_curve_limit(np, points, v_ego):
+def vision_valid_len(stds, n):
+  """number of path points the model actually predicted: up to the first 'no data' std (the 0.8.3 adapter marks
+  points past the end of its plan with NO_DATA_STD = 1e3, and the stock 0.7.5 model with 1e3 past valid_len).
+  No stds (stock model without DEBUG) = all n points."""
+  if stds is None or len(stds) == 0: return n
+  for i in range(min(n, len(stds))):
+    if stds[i] >= VISION_NO_DATA_STD: return i
+  return n
+
+
+def vision_curve_limit(np, points, v_ego, stds=None):
   """speed limit (m/s) from the camera model path (y offset per metre ahead), or None.
   Curvature from a local least-squares fit (noise-robust), then each point's curve speed is turned into an approach
-  speed for its distance - a bend 100 m ahead no longer slows you as hard as one 20 m ahead."""
-  if points is None or len(points) < 20: return None
-  y = np.asarray(points, dtype=np.float64)[:int(VISION_RANGE_M)]
+  speed for its distance - a bend 100 m ahead no longer slows you as hard as one 20 m ahead.
+  PATHEND: only the points the model predicted are used (stds). Past the end of the 0.8.3 plan (~10 s ahead, so short
+  of 192 m below ~69 km/h) the adapter holds the path flat; in a curve that kink read as a sharp bend and capped or
+  even braked the speed for no reason."""
+  if points is None: return None
+  n = vision_valid_len(stds, len(points))
+  if n < 20: return None
+  y = np.asarray(points, dtype=np.float64)[:min(n, int(VISION_RANGE_M))]
   yp, ypp = _sg_derivs(np, y, VISION_FIT_HALF)
   if yp is None: return None
   k = np.abs(ypp / (1. + yp ** 2) ** 1.5)
