@@ -121,6 +121,23 @@ slightly diagonally. Stops where the sensors saw something close but the radar n
 that is the radar's short-range blind spot on your car. Kept in `/data/radar_offset.json`; nothing is changed in
 openpilot - it tells you whether its radar distance settings match your car.
 
+## Instrument cluster (`/dash`)
+
+A cluster-style page for a phone or tablet on the dash: speed, set speed, speed-limit sign, the road with lanes, the
+car openpilot follows, other vehicles, parking sensors, a power gauge, battery, gear, and a map of where you drove.
+
+- **openpilot state:** `OPENPILOT` (blue) / `CRUISE` chip under the speed; a blue band along the planned path while
+  engaged; `CURVE 59` when PCC's camera curve limit is holding the speed (the same `tesla/pcc_curves.py` function on
+  the same model data, so it shows what PCC will do).
+- **Following:** the lead car is underlined, with distance and time gap (`24 m · 1.1 s`): blue normally, amber under
+  1.5 s, red under 0.8 s or on a collision warning.
+- **Banners**, most important first: collision warning, "Sharp curve – brake" (PCC's own threshold: 4 m/s over the
+  curve speed, beyond what regen can shed), crossing pedestrian/cyclist, openpilot's alert, "openpilot disengaged".
+- **Power:** live kW in the gauge (orange = drawing, green = regen); on a phone, next to the battery.
+- **Day / night:** automatic from the car's sun elevation (`UI_solarData`), else the clock; force it with
+  **theme** in the menu. Day uses CARTO's light map tiles.
+- Road edges (curbs, walls) appear once the 0.8.3 model is installed.
+
 ## Module diagnostics, read-only (`/map` → Diagnostics)
 
 Reads identification (VIN, part number, software version) and stored fault codes from the car's modules over UDS,

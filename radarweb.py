@@ -38,6 +38,18 @@ try:
 except Exception as _e_ud:
     radaruds = None; UDSC = None; print('radaruds not available - no module diagnostics:', _e_ud)
 try:
+    # PCC's camera curve limit (tesla/pcc_curves.py), so /dash shows the curve speed PCC will hold. Prefer the copy that
+    # ships with radarweb (tesla/ next to it), else the one installed in openpilot. Loaded by path: no sys.path changes.
+    import importlib.util as _ilu
+    _pcp = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tesla', 'pcc_curves.py')
+    if os.path.exists(_pcp):
+        _spc = _ilu.spec_from_file_location('pcc_curves', _pcp); pcc_curves = _ilu.module_from_spec(_spc); _spc.loader.exec_module(pcc_curves)
+    else:
+        from selfdrive.car.tesla import pcc_curves
+except Exception as _e_pc:
+    pcc_curves = None; print('pcc_curves not available - no curve speed on /dash:', _e_pc)
+CURVET = [0.0]
+try:
     import radarpark            # radar distance vs parking sensors at stops (radarpark.py next to radarweb.py)
     PARKCAL = radarpark.OffsetMeter(os.environ.get('RADARWEB_PARKCAL', radarpark.SAVE_FILE))
 except Exception as _e_pk:
@@ -529,6 +541,16 @@ def _worker(prof=None):
                             return [float(x) for x in np.polyfit(range(len(pts)), pts, 3)] if len(pts) > 10 else None
                         STATE['model'] = {'p': poly(mm.path), 'l': poly(mm.leftLane), 'r': poly(mm.rightLane),
                                           'pl': round(mm.leftLane.prob, 2), 'pr': round(mm.rightLane.prob, 2)}
+                        if pcc_curves is not None and now >= CURVET[0]:     # /dash: the camera curve speed PCC applies (m/s)
+                            CURVET[0] = now + 0.2
+                            try:
+                                import numpy as np
+                                _pts = list(mm.path.points); _sd = list(mm.path.stds); _vc = None
+                                if len(_pts) >= 20:
+                                    try: _vc = pcc_curves.vision_curve_limit(np, _pts, STATE['v'], _sd)
+                                    except TypeError: _vc = pcc_curves.vision_curve_limit(np, _pts, STATE['v'])   # older pcc_curves
+                                STATE['curve'] = round(_vc, 1) if _vc is not None and _vc < 40. else None
+                            except Exception: STATE['curve'] = None
                         try:                    # road edges from the 0.8.3 model adapter (tesla/model083), in freePath
                             fp = list(mm.freePath)
                             if len(fp) == 69 and fp[0] == 1.0:      # [format, left y x33, right y x33, stdL, stdR], left +
@@ -626,6 +648,8 @@ def _worker(prof=None):
                         _la, _ln = _num(_lo.get('MCU_latitude')), _num(_lo.get('MCU_longitude'))
                         if _la is not None and _ln is not None and 0.1 < abs(_la) <= 90 and abs(_ln) <= 180:
                             STATE['gps'] = {'lat': round(_la, 6), 'lon': round(_ln, 6), 'hdg': _num(_gp.get('UI_gpsVehicleHeading')), 'acc': _num(_lo.get('MCU_gpsAccuracy'))}
+                        _el = _num(_ms.get('UI_solarData', {}).get('UI_solarElevationAngle'))    # /dash day/night colours
+                        if _el is not None: STATE['sun'] = {'el': _el}
                     except Exception: pass
                     if logf is None:
                         os.makedirs(LOGDIR, exist_ok=True); MAP['logfile'] = LOGDIR + '/map_%s.jsonl' % time.strftime('%Y%m%d_%H%M%S'); logf = open(MAP['logfile'], 'a')
@@ -1731,10 +1755,13 @@ html,body{margin:0;height:100%;background:#0a0b0d;overflow:hidden;font-family:sy
 #nav{position:fixed;right:10px;top:10px;z-index:50}#nav summary{list-style:none;cursor:pointer;width:34px;height:34px;display:flex;align-items:center;justify-content:center;background:rgba(28,33,40,.6);border:1px solid #2a2f36;border-radius:8px;font-size:17px;color:#aab1b8}#nav summary::-webkit-details-marker{display:none}#nav>div{position:absolute;right:0;top:42px;background:#14171b;border:1px solid #2a2f36;border-radius:8px;padding:6px 0;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.5)}#nav a{display:block;padding:9px 14px;color:#cfd6dd;text-decoration:none;font-size:13px;white-space:nowrap}#nav a:hover{background:#20252b}
 #markb{position:fixed;left:12px;top:12px;z-index:40;background:rgba(28,33,40,.75);color:#e8edf2;border:1px solid #3a414a;border-radius:10px;padding:10px 14px;font:600 14px system-ui,sans-serif}
 #markb:active{background:#2fbf71;color:#000}
+html.day,html.day body{background:#e6e9ed;color:#14171b}html.day #map{background:#e6e9ed}html.day #map .leaflet-tile{filter:none}
+html.day #markb{background:rgba(255,255,255,.85);color:#14171b;border-color:#b9c0c8}html.day #nav summary{background:rgba(255,255,255,.75);border-color:#b9c0c8;color:#3a414a}
+@media (max-aspect-ratio:11/10){#markb{top:auto;bottom:48px;padding:8px 12px}}
 #evtoast{position:fixed;left:50%;transform:translateX(-50%);bottom:14%;z-index:40;background:rgba(0,0,0,.75);border:1px solid #f5a524;color:#f5a524;border-radius:10px;padding:8px 14px;font:600 14px system-ui,sans-serif;display:none}
 </style></head><body><div id=map></div><canvas id=c></canvas>
 <button id=markb onclick="return markNow()" title="record this moment (too close, odd behaviour)">&#9873; Mark</button><div id=evtoast></div>
-<details id=nav><summary>&#9776;</summary><div><span id=conn style="display:block;padding:9px 14px;color:#8a9098;font-size:13px">connecting&hellip;</span><a href="#" id=unit onclick="return unitTog()">units: km/h</a><a href="#" id=locsw onclick="return geoStart(true)">map: use this phone's location</a><a href="#" onclick="document.getElementById('egof').click();return false">upload images (.webp)</a><a href="/events">interventions</a><a href="/">road view</a><a href="/map">CAN data</a><a href="/top">top-down</a><a href="/video">video</a><a href="?demo=1">demo</a></div></details>
+<details id=nav><summary>&#9776;</summary><div><span id=conn style="display:block;padding:9px 14px;color:#8a9098;font-size:13px">connecting&hellip;</span><a href="#" id=unit onclick="return unitTog()">units: km/h</a><a href="#" id=themesw onclick="return themeCycle()">theme: auto</a><a href="#" id=locsw onclick="return geoStart(true)">map: use this phone's location</a><a href="#" onclick="document.getElementById('egof').click();return false">upload images (.webp)</a><a href="/events">interventions</a><a href="/">road view</a><a href="/map">CAN data</a><a href="/top">top-down</a><a href="/video">video</a><a href="?demo=1">demo</a></div></details>
 <input type=file id=egof accept="image/webp" multiple style="display:none" onchange="egoUp(this)">
 <script>
 var cv=document.getElementById('c'),g=cv.getContext('2d'),S=null,demo=/demo/.test(location.search);
@@ -1751,6 +1778,18 @@ var EGO={get complete(){return ok('ego')},get naturalWidth(){return ok('ego')?SP
 /* white-on-transparent icons tinted to a colour (cached per colour) */
 var TINT={};function tinted(n,col){var k=n+col;if(TINT[k])return TINT[k];var i=SPR[n],c=document.createElement('canvas');c.width=i.naturalWidth;c.height=i.naturalHeight;var x=c.getContext('2d');x.drawImage(i,0,0);x.globalCompositeOperation='source-in';x.fillStyle=col;x.fillRect(0,0,c.width,c.height);TINT[k]=c;return c}
 var AP_BLUE='#2a7fff',LANE_ON='#3d8bff',LANE_OFF='#8b949e',AMBER='#f5a524';
+/* day / night colours: auto follows the sun (UI_solarData from the car), else the clock; the menu can force one */
+var PALS={night:{tx:'#ffffff',sub:'#9aa0a6',dim:'#4a515a',road0:'rgba(38,46,60,.15)',road1:'rgba(52,60,72,.7)',laneOff:'#8b949e',edge:'rgba(200,206,214,.45)',obj:'rgba(150,160,170,.45)',pill:'rgba(0,0,0,.62)',ring:'rgba(140,148,158,.35)',tick:'#c9ced4',regen:'#3f9d6b',warn:'#f5a524'},
+ day:{tx:'#14171b',sub:'#5b6470',dim:'#b3bac2',road0:'rgba(150,158,170,.12)',road1:'rgba(150,158,170,.48)',laneOff:'#7d8691',edge:'rgba(60,66,74,.45)',obj:'rgba(80,88,98,.45)',pill:'rgba(255,255,255,.88)',ring:'rgba(70,78,90,.3)',tick:'#3a414a',regen:'#23804f',warn:'#b86e00'}};
+var THEME='auto';try{THEME=localStorage.getItem('dashtheme')||'auto'}catch(e){}
+var DAY=false,PAL=PALS.night,TILES=null,MAPL=null;
+function isDay(){if(THEME!='auto')return THEME=='day';var el=S&&S.sun&&typeof S.sun.el=='number'?S.sun.el:null;
+ if(el!=null)return DAY?el>-1:el>3;   /* hysteresis: day above 3 deg, back to night below -1 deg */
+ var h=new Date().getHours();return h>=7&&h<19}
+function tileUrl(){return 'https://{s}.basemaps.cartocdn.com/'+(DAY?'light_all':'dark_all')+'/{z}/{x}/{y}{r}.png'}
+function themeUI(){var a=document.getElementById('themesw');if(a)a.textContent='theme: '+THEME+(THEME=='auto'?' ('+(DAY?'day':'night')+')':'')}
+function themeApply(force){var d=isDay();if(d===DAY&&!force)return;DAY=d;PAL=PALS[d?'day':'night'];document.documentElement.classList.toggle('day',d);if(MAPL&&TILES)TILES.setUrl(tileUrl());themeUI()}
+function themeCycle(){THEME=THEME=='auto'?'day':THEME=='day'?'night':'auto';try{localStorage.setItem('dashtheme',THEME)}catch(e){}themeApply(true);return false}
 var MPH=false;try{MPH=localStorage.getItem('dashmph')=='1'}catch(e){}
 function unitTog(){MPH=!MPH;try{localStorage.setItem('dashmph',MPH?'1':'0')}catch(e){}unitUI();draw();return false}
 function unitUI(){var a=document.getElementById('unit');if(a)a.textContent='units: '+(MPH?'mph':'km/h')}
@@ -1763,7 +1802,7 @@ var DREF=20;
 function geom(){var W=innerWidth,H=innerHeight;return {W:W,H:H,hy:H*0.30,yB:H*0.86,cx:W/2,pxB:Math.min(W*0.5,H*0.78)/9}}
 function Y(G,d){return G.yB-(G.yB-G.hy)*(d/(d+DREF))}
 function PPM(G,d){return G.pxB*(DREF/(d+DREF))}
-function X(G,d,y,off){return G.cx+(y-off)*PPM(G,d)}
+function X(G,d,y,off){return G.cx-(y-off)*PPM(G,d)}   /* y is openpilot's left-positive: +y draws left of centre */
 function rr(x,y,w,h,r){g.beginPath();g.moveTo(x+r,y);g.arcTo(x+w,y,x+w,y+h,r);g.arcTo(x+w,y+h,x,y+h,r);g.arcTo(x,y+h,x,y,r);g.arcTo(x,y,x+w,y,r);g.closePath()}
 /* rear-view car silhouette from /icons; falls back to a rounded box */
 var SED=new Image();SED.src='/icons/sedan.webp';
@@ -1798,94 +1837,143 @@ function parkArcs(G,cx,fy,ry,hw){var P=S&&S.park;if(!P)return;
   g.save();g.translate(x,a[2]);g.scale(1,0.62);g.beginPath();g.arc(0,0,R,a[4],a[5]);g.lineWidth=T;g.strokeStyle=c;g.stroke();
   g.beginPath();g.arc(0,0,R+T/2,a[4],a[5]);g.lineWidth=1.5;g.strokeStyle='rgba(235,240,245,.55)';g.stroke();g.restore();
   var cm=s[a[1]];if(best==null||cm<best[0]){var mid=(a[4]+a[5])/2;best=[cm,x+Math.cos(mid)*(R+T*1.4),a[2]+Math.sin(mid)*(R+T*1.4)*0.62,c]}});
- if(best){g.font='700 '+Math.round(Math.max(12,hw*.32))+'px system-ui';g.textAlign='center';g.fillStyle='rgba(0,0,0,.65)';g.fillText(best[0]+' cm',best[1]+1,best[2]+1);g.fillStyle=best[3].replace(/[\d.]+\)$/,'1)');g.fillText(best[0]+' cm',best[1],best[2])}   /* closest corner, like the car shows */
- g.restore()}
-var PWH=[];/* rolling kW history for the energy sparkline */
-function draw(){var G=geom();g.clearRect(0,0,G.W,G.H);if(!S)return;
- var alc=!!S.alc,off0=S.model?pv(S.model.p,0):0;
- var L=S.model&&S.model.pl>0.25?S.model.l:null,R=S.model&&S.model.pr>0.25?S.model.r:null,P=S.model?S.model.p:null;
- function clp(v){return Math.max(off0-7,Math.min(off0+7,v))}   /* a cubic path explodes far out; a real lane stays within a few m */
- function laneX(side,d){return clp(side<0?(L?pv(L,d):pv(P,d)-1.85):(R?pv(R,d):pv(P,d)+1.85))}
+ g.restore();return best}   /* closest corner, like the car shows */
+/* displayed state: the 10 Hz stream smoothed and drawn at up to 30 fps (speed, lead, lanes/path, power) */
+var V=null,LASTF=0,WASENG=false,DISENG=0;
+function lerp(a,b,k){return a+(b-a)*k}
+function smooth(dt){if(!S)return;var k=1-Math.exp(-dt/0.12);
+ if(!V)V={v:S.v||0,lead:null,model:null,kw:null};
+ V.v=lerp(V.v,S.v||0,k);
+ var sl=S.lead&&S.lead.d>0?S.lead:null;
+ if(!sl)V.lead=null;else if(!V.lead||Math.abs(V.lead.d-sl.d)>8)V.lead={d:sl.d,y:sl.y||0};else{V.lead.d=lerp(V.lead.d,sl.d,k);V.lead.y=lerp(V.lead.y,sl.y||0,k)}
+ var m=S.model;if(!m)V.model=null;else{if(!V.model)V.model={};['p','l','r'].forEach(function(n){var t=m[n];if(!t||t.length!=4){V.model[n]=null;return}var c=V.model[n];V.model[n]=c?c.map(function(x,i){return lerp(x,t[i],k)}):t.slice()})}
+ var kw=S.pw&&typeof S.pw.kw=='number'?S.pw.kw:null;V.kw=kw==null?null:V.kw==null?kw:lerp(V.kw,kw,k)}
+function frame(ts){requestAnimationFrame(frame);if(LASTF&&ts-LASTF<32)return;var dt=LASTF?Math.min(.25,(ts-LASTF)/1000):.033;LASTF=ts;smooth(dt);draw()}
+function pill(x,y,w,h,fill,stroke){rr(x,y,w,h,h/2);if(fill){g.fillStyle=fill;g.fill()}if(stroke){g.lineWidth=1.5;g.strokeStyle=stroke;g.stroke()}}
+function parkLabel(G,best){if(!best)return;var fs=Math.round(Math.max(12,G.H*.024)),t=best[0]+' cm';g.font='700 '+fs+'px system-ui';var w=g.measureText(t).width+fs*.9,h=fs*1.45;
+ var x=Math.max(8+w/2,Math.min(G.W-8-w/2,best[1])),y=Math.max(h,Math.min(G.H-34-h/2,best[2]));   /* on screen, above the bottom row */
+ var c=best[3].replace(/[\d.]+\)$/,'1)');if(DAY&&best[0]>=120)c='#5b6470';pill(x-w/2,y-h/2,w,h,PAL.pill);g.fillStyle=c;g.textAlign='center';g.fillText(t,x,y+fs*.36)}
+function draw(){var G=geom(),pal=PAL;g.clearRect(0,0,G.W,G.H);if(!S||!V)return;
+ var eng=!!S.op,cru=!!S.acc,M=V.model||{},P=M.p||null,v=S.v||0;
+ var off0=P?pv(P,0):0;
+ var L=S.model&&S.model.pl>0.25?M.l:null,R=S.model&&S.model.pr>0.25?M.r:null;
+ function clp(y){return Math.max(off0-7,Math.min(off0+7,y))}   /* a cubic path explodes far out; a real lane stays within a few m */
+ function laneX(side,d){return clp(side<0?(L?pv(L,d):pv(P,d)+1.85):(R?pv(R,d):pv(P,d)-1.85))}   /* side -1 = left lane (+y) */
  function egoX(d){return clp(pv(P,d))}
- var DMAX=110,step=2.5;
+ var DMAX=110,step=2.5,laneCol=eng?LANE_ON:pal.laneOff;
+ if(P)for(var dl=20;dl<=110;dl+=step)if(Math.abs(pv(P,dl)-off0)>6){DMAX=dl-step;break}
  /* road ribbon */
- g.beginPath();var f=true;
- for(var d=0;d<=DMAX;d+=step){var x=X(G,d,laneX(-1,d),off0),y=Y(G,d);f?(g.moveTo(x,y),f=false):g.lineTo(x,y)}
+ g.beginPath();for(var d=0;d<=DMAX;d+=step)g.lineTo(X(G,d,laneX(-1,d),off0),Y(G,d));
  for(var d2=DMAX;d2>=0;d2-=step)g.lineTo(X(G,d2,laneX(1,d2),off0),Y(G,d2));
- g.closePath();var grd=g.createLinearGradient(0,G.hy,0,G.yB);grd.addColorStop(0,'rgba(38,46,60,.15)');grd.addColorStop(1,'rgba(52,60,72,.7)');g.fillStyle=grd;g.fill();
- /* headlight glow pools in front of the ego car */
- var gy=Y(G,8),gp=PPM(G,8);var rg=g.createRadialGradient(G.cx-gp*1.1,gy,2,G.cx-gp*1.1,gy,gp*2.4);rg.addColorStop(0,'rgba(220,230,255,.5)');rg.addColorStop(1,'rgba(220,230,255,0)');g.fillStyle=rg;g.fillRect(G.cx-gp*4,gy-gp*2,gp*8,gp*4);
- var rg2=g.createRadialGradient(G.cx+gp*1.1,gy,2,G.cx+gp*1.1,gy,gp*2.4);rg2.addColorStop(0,'rgba(220,230,255,.5)');rg2.addColorStop(1,'rgba(220,230,255,0)');g.fillStyle=rg2;g.fillRect(G.cx-gp*4,gy-gp*2,gp*8,gp*4);
- /* lane edges */
- [-1,1].forEach(function(side){g.beginPath();for(var d=0;d<=DMAX;d+=step){var x=X(G,d,laneX(side,d),off0),y=Y(G,d);d==0?g.moveTo(x,y):g.lineTo(x,y)}g.lineWidth=4;g.strokeStyle=alc?LANE_ON:LANE_OFF;g.globalAlpha=alc?.95:.7;g.stroke();g.globalAlpha=1});
+ g.closePath();var grd=g.createLinearGradient(0,G.hy,0,G.yB);grd.addColorStop(0,pal.road0);grd.addColorStop(1,pal.road1);g.fillStyle=grd;g.fill();
+ /* headlight glow pools, at night */
+ if(!DAY){var gy=Y(G,8),gp=PPM(G,8);[-1,1].forEach(function(sd){var hx=G.cx+sd*gp*1.1,rg=g.createRadialGradient(hx,gy,2,hx,gy,gp*2.4);rg.addColorStop(0,'rgba(220,230,255,.45)');rg.addColorStop(1,'rgba(220,230,255,0)');g.fillStyle=rg;g.fillRect(G.cx-gp*4,gy-gp*2,gp*8,gp*4)})}
+ /* where openpilot steers: a soft band along the planned path while engaged */
+ if(eng&&P){g.beginPath();for(var d3=0;d3<=DMAX;d3+=step)g.lineTo(X(G,d3,egoX(d3)+.95,off0),Y(G,d3));for(var d4=DMAX;d4>=0;d4-=step)g.lineTo(X(G,d4,egoX(d4)-.95,off0),Y(G,d4));
+  g.closePath();var pg=g.createLinearGradient(0,G.hy,0,G.yB);pg.addColorStop(0,'rgba(42,127,255,0)');pg.addColorStop(1,'rgba(42,127,255,.30)');g.fillStyle=pg;g.fill()}
+ /* road edges - curbs, walls, end of the tarmac (0.8.3 model only), at its 33 distances 192*(i/32)^2 m */
+ var E=S.model&&S.model.e;if(E&&E.l&&E.r){g.lineWidth=2;g.strokeStyle=pal.edge;[E.l,E.r].forEach(function(ys){g.beginPath();for(var i=0;i<ys.length;i++){var de=192*i*i/1024;if(de>DMAX)break;g.lineTo(X(G,de,Math.max(off0-12,Math.min(off0+12,ys[i])),off0),Y(G,de))}g.stroke()})}
+ /* lane lines: thinner with distance; a soft glow while engaged */
+ g.lineCap='round';
+ [-1,1].forEach(function(side){var pts=[];for(var d=0;d<=DMAX;d+=step)pts.push([X(G,d,laneX(side,d),off0),Y(G,d),Math.max(1.2,.13*PPM(G,d))]);
+  if(eng){g.strokeStyle='rgba(61,139,255,.16)';for(var j=1;j<pts.length;j++){g.beginPath();g.moveTo(pts[j-1][0],pts[j-1][1]);g.lineTo(pts[j][0],pts[j][1]);g.lineWidth=pts[j][2]*3.2;g.stroke()}}
+  g.strokeStyle=laneCol;g.globalAlpha=eng?.95:.75;for(var i=1;i<pts.length;i++){g.beginPath();g.moveTo(pts[i-1][0],pts[i-1][1]);g.lineTo(pts[i][0],pts[i][1]);g.lineWidth=pts[i][2];g.stroke()}g.globalAlpha=1});
+ g.lineCap='butt';
  /* detected vehicles / crossing VRUs (far first) */
- var warn=null,objs=(S.o||[]).slice().filter(function(o){return o.d>0&&o.d<=DMAX}).sort(function(a,b){return b.d-a.d});
+ var warn=null,objs=(S.o||[]).filter(function(o){return o.d>0&&o.d<=DMAX}).sort(function(a,b){return b.d-a.d});
  var leadS=S.lead&&S.lead.d>0?S.lead:null;
- objs.forEach(function(o){var d=o.d,y=o.y||0,by=Y(G,d),ppm=PPM(G,d);
+ objs.forEach(function(o){var d=o.d,y=o.y||0,by=Y(G,d),ppm=PPM(G,d),x=X(G,d,y,off0);
   if(leadS&&Math.abs(d-leadS.d)<2.2&&Math.abs(y-(leadS.y||0))<1.3)return;
   var cl=o.ml&&o.ml.c?o.ml.c:o.c;
-  if(o.cross){var col=cl=='pedestrian'?AP_BLUE:AMBER,h=Math.max(16,1.7*ppm);cl=='two_wheel'?bikeIcon(X(G,d,y,off0),by,h,col):pedIcon(X(G,d,y,off0),by,h,col);warn={t:cl=='two_wheel'?'Cyclist crossing':'Pedestrian crossing',c:col};return}
+  if(o.cross){var col=cl=='pedestrian'?AP_BLUE:AMBER,h=Math.max(16,1.7*ppm);cl=='two_wheel'?bikeIcon(x,by,h,col):pedIcon(x,by,h,col);warn={t:cl=='two_wheel'?'Cyclist crossing':'Pedestrian crossing',c:col};return}
   var side=Math.abs(y-(P?egoX(d):off0))>1.9;
-  if(cl=='two_wheel'&&motoSprite(X(G,d,y,off0),by,ppm))return;
-  if(cl=='four_wheel'||(!o.stationary&&o.len>=2.5)){var cw=Math.max(12,1.9*ppm);if(!carSprite(X(G,d,y,off0),by,cw,false,side))carIcon(X(G,d,y,off0),by,cw,false)}
-  else if(Math.abs(y)>1.0){g.fillStyle='rgba(150,160,170,.45)';g.beginPath();g.arc(X(G,d,y,off0),by,Math.max(3,.4*ppm),0,6.3);g.fill()}
+  if(cl=='two_wheel'&&motoSprite(x,by,ppm))return;
+  if(cl=='four_wheel'||(!o.stationary&&o.len>=2.5)){var cw=Math.max(12,1.9*ppm);if(!carSprite(x,by,cw,false,side))carIcon(x,by,cw,false)}
+  else if(Math.abs(y)>1.0){g.fillStyle=pal.obj;g.beginPath();g.arc(x,by,Math.max(3,.4*ppm),0,6.3);g.fill()}
  });
- /* lead car + distance */
- if(leadS){var d=leadS.d,y=leadS.y||0,by=Y(G,d),w=Math.max(22,1.95*PPM(G,d));if(!carSprite(X(G,d,y,off0),by,w,leadS.vr<-1.5,false))carIcon(X(G,d,y,off0),by,w,leadS.vr<-1.5);
-  g.fillStyle=alc?'rgba(80,150,255,.95)':'rgba(160,170,180,.8)';g.font='600 '+Math.round(G.H*.028)+'px system-ui';g.textAlign='center';g.fillText(d.toFixed(0)+' m',X(G,d,y,off0),by+G.H*.042)}
- /* EGO car at the bottom (our own Model S, red) */
- var ew=Math.max(60,G.pxB*1.9),eby=G.yB+(G.H-G.yB)*0.02;
+ /* lead car: underline = the car openpilot follows; distance and time gap, coloured by the gap */
+ var fcw=!!((leadS&&leadS.fcw)||(S.plan&&S.plan.fcw)),LD=V.lead;
+ if(leadS&&LD){var d=LD.d,y=LD.y,by=Y(G,d),x=X(G,d,y,off0),w=Math.max(22,1.95*PPM(G,d)),gap=v>2?d/v:null;
+  var gc=fcw||(gap!=null&&gap<0.8)?'#e5484d':gap!=null&&gap<1.5?pal.warn:(eng||cru?'#5aa2ff':pal.sub);
+  if(eng||cru){var mw=w*1.05,mh=Math.max(3,w*.08);pill(x-mw/2,by+mh*.4,mw,mh,gc)}
+  if(!carSprite(x,by,w,leadS.vr<-1.5,false))carIcon(x,by,w,leadS.vr<-1.5,fcw?'rgba(229,72,77,.6)':null);
+  var fs=Math.round(G.H*.026),lbl=d.toFixed(0)+' m'+(gap!=null&&gap<9.95?'  ·  '+gap.toFixed(1)+' s':'');g.font='600 '+fs+'px system-ui';g.textAlign='center';
+  var tw=g.measureText(lbl).width+fs,ty=by+G.H*.022;pill(x-tw/2,ty,tw,fs*1.5,pal.pill);g.fillStyle=gc;g.fillText(lbl,x,ty+fs*1.07)}
+ /* EGO car at the bottom (our own Model S) + parking sensors */
+ var ew=Math.max(60,G.pxB*1.9),eby=G.yB+(G.H-G.yB)*0.02,pb=null;
  if(EGO.complete&&EGO.naturalWidth){var iw=ew*1.55,ih=iw*EGO.naturalHeight/EGO.naturalWidth,arcB=(iw*0.36*1.36)*0.62-ih*0.06;eby=Math.min(eby,G.H-8-arcB);var ex0=G.cx-iw/2,ey0=eby-ih*0.97;
-  parkArcs(G,G.cx,ey0+ih*0.30,eby-ih*0.06,iw*0.36);g.drawImage(SPR.ego,ex0,ey0,iw,ih)}
- else{parkArcs(G,G.cx,eby-ew*0.62,eby,ew*0.5);carIcon(G.cx,eby,ew,false,'rgba(210,60,40,.55)')}
- /* speed-limit sign, left of the road */
- var limv=S.lim&&typeof S.lim=='object'?S.lim.v:S.lim,limk=S.lim&&typeof S.lim=='object'?S.lim.kmh!==false:true;
- if(limv>0){var lkmh=limk?limv:limv*1.609344,sv=Math.round(MPH?(limk?limv*0.621371:limv):lkmh),sr=G.H*.042,wx=G.cx+G.H*.2,sx=wx+G.H*.11,sy=G.H*.11;if(sx+sr>G.W-8){sx=wx;sy=G.H*.11+G.H*.1}   /* next to the steering wheel; below it when the screen is too narrow */g.beginPath();g.arc(sx,sy,sr,0,6.2832);g.fillStyle='#fff';g.fill();g.lineWidth=sr*.3;g.strokeStyle='#d8232a';g.stroke();g.fillStyle='#111';g.textAlign='center';g.font='700 '+Math.round(sr*(sv>=100?.72:.95))+'px system-ui';g.fillText(sv,sx,sy+sr*.33)}
- /* ===== top overlays ===== */
- var spd=Math.round((S.v||0)*(MPH?2.236936:3.6));
- g.textAlign='center';g.fillStyle='#fff';g.font='300 '+Math.round(G.H*.16)+'px system-ui';g.fillText(spd,G.cx,G.H*.17);
- g.fillStyle='#9aa0a6';g.font='500 '+Math.round(G.H*.03)+'px system-ui';g.fillText(MPH?'mph':'km/h',G.cx,G.H*.215);
- /* set-speed dial, left of the speed */
- var setv=Math.round((S.cruise||0)*(MPH&&S.cruise?1:1)),on=!!S.acc&&setv>0,dx=G.cx-G.H*.2,dy=G.H*.11,dr=G.H*.035;
- setdial(dx,dy,dr,on?AP_BLUE:'#5b6672');g.fillStyle=on?'#cfe0ff':'#8b949e';g.textAlign='center';g.font='700 '+Math.round(G.H*.04)+'px system-ui';g.fillText(on?setv:'--',dx,dy+dr*2.4);
- /* steering wheel, right of the speed */
- if(S.op||S.acc)wheel(G.cx+G.H*.2,G.H*.11,G.H*.04,S.alc?AP_BLUE:'#8b949e');
- /* power meter, right side: 0 at the bottom; power drawn climbs the left half (10/20/40/80/160 kW), regen the right half (30/60) */
- var kw=S.pw&&typeof S.pw.kw=='number'?S.pw.kw:null;
+  pb=parkArcs(G,G.cx,ey0+ih*0.30,eby-ih*0.06,iw*0.36);g.drawImage(SPR.ego,ex0,ey0,iw,ih)}
+ else{pb=parkArcs(G,G.cx,eby-ew*0.62,eby,ew*0.5);carIcon(G.cx,eby,ew,false,'rgba(210,60,40,.55)')}
+ parkLabel(G,pb);
+ /* speed-limit sign, next to the steering wheel */
+ var signL=null,limv=S.lim&&typeof S.lim=='object'?S.lim.v:S.lim,limk=S.lim&&typeof S.lim=='object'?S.lim.kmh!==false:true;
+ if(limv>0){var lkmh=limk?limv:limv*1.609344,sv=Math.round(MPH?(limk?limv*0.621371:limv):lkmh),sr=G.H*.042,wx=G.cx+G.H*.2,sx=wx+G.H*.11,sy=G.H*.11;if(sx+sr>G.W-8){sx=wx;sy=G.H*.11+G.H*.1;signL=sx-sr}g.beginPath();g.arc(sx,sy,sr,0,6.2832);g.fillStyle='#fff';g.fill();g.lineWidth=sr*.3;g.strokeStyle='#d8232a';g.stroke();g.fillStyle='#111';g.textAlign='center';g.font='700 '+Math.round(sr*(sv>=100?.72:.95))+'px system-ui';g.fillText(sv,sx,sy+sr*.33)}
+ /* ===== top: speed, state chips ===== */
+ var spd=Math.round(V.v*(MPH?2.236936:3.6));
+ g.textAlign='center';g.fillStyle=pal.tx;g.font='300 '+Math.round(G.H*.16)+'px system-ui';g.fillText(spd,G.cx,G.H*.17);
+ g.fillStyle=pal.sub;g.font='500 '+Math.round(G.H*.03)+'px system-ui';g.fillText(MPH?'mph':'km/h',G.cx,G.H*.215);
+ var cv=typeof S.curve=='number'?S.curve:null,chips=[];   /* curve = the camera curve speed PCC holds (m/s) */
+ if(eng)chips.push(['openpilot',AP_BLUE,'#fff',null]);else if(cru)chips.push(['cruise',null,pal.tx,pal.sub]);
+ if(cv!=null&&(eng||cru)&&cv*3.6<(S.cruise||999)-3)chips.push(['curve '+Math.round(cv*(MPH?2.236936:3.6)),null,pal.warn,pal.warn]);
+ if(chips.length){var cf=Math.round(G.H*.024),ch,cyy=G.H*.232,tot,ws,cx0;
+  function meas(){g.font='700 '+cf+'px system-ui';tot=-8;ws=chips.map(function(c){var w=g.measureText(c[0].toUpperCase()).width+cf*1.4;tot+=w+8;return w})}
+  meas();if(signL!=null&&G.cx+tot/2>signL-6){cf=Math.max(Math.round(G.H*.016),Math.floor(cf*2*(signL-6-G.cx)/tot));meas()}   /* fit between the edges, clear of the sign */
+  ch=cf*1.5;cx0=G.cx-tot/2;
+  chips.forEach(function(c,i){pill(cx0,cyy,ws[i],ch,c[1],c[3]);g.fillStyle=c[2];g.textAlign='center';g.fillText(c[0].toUpperCase(),cx0+ws[i]/2,cyy+ch*.7);cx0+=ws[i]+8})}
+ /* set-speed dial, left of the speed (vCruise is km/h) */
+ var setk=S.cruise||0,setv=Math.round(MPH?setk*0.621371:setk),on=cru&&setk>0&&setk<250,dx=G.cx-G.H*.2,dy=G.H*.11,dr=G.H*.035;
+ setdial(dx,dy,dr,on?AP_BLUE:'#5b6672');g.fillStyle=on?(DAY?AP_BLUE:'#cfe0ff'):pal.sub;g.textAlign='center';g.font='700 '+Math.round(G.H*.04)+'px system-ui';g.fillText(on?setv:'--',dx,dy+dr*2.4);
+ /* steering wheel, right of the speed: blue = openpilot steering */
+ if(eng||cru)wheel(G.cx+G.H*.2,G.H*.11,G.H*.04,eng?AP_BLUE:pal.sub);
+ /* power: landscape = gauge (power climbs the left half 10..160 kW, regen the right half 30/60) with the live number */
+ var kw=V.kw,kc=kw==null?pal.sub:kw>0.5?'#f59a1b':kw<-0.5?'#2fbf71':pal.sub,kn=kw==null?'':(kw<-0.5?'−':'')+Math.round(Math.abs(kw));
  if(kw!=null&&G.W/G.H>1.1){var gr=Math.min(G.H*.27,G.W*.11),gx=G.W-gr-G.W*.05,gyc=G.H*.52,A0=Math.PI/2;
-  g.strokeStyle='rgba(140,148,158,.35)';g.lineWidth=1.5;g.beginPath();g.arc(gx,gyc,gr,0,6.2832);g.stroke();
-  function fp(p){p=Math.max(0,p);return Math.min(5,p<=10?p/10:1+Math.log(p/10)/Math.LN2)}function fr(p){p=Math.max(0,p);return Math.min(2.4,p/30)}
-  g.textAlign='center';g.font='500 '+Math.round(gr*.13)+'px Helvetica,Arial,sans-serif';
-  [[0,'0'],[1,'10'],[2,'20'],[3,'40'],[4,'80'],[5,'160']].forEach(function(t){var an=A0+t[0]/5*Math.PI;g.fillStyle=t[0]?'#c9ced4':'#e8edf2';g.fillText(t[1],gx+Math.cos(an)*gr*.8,gyc+Math.sin(an)*gr*.8+gr*.045)});
-  [[1,'30'],[2,'60']].forEach(function(t){var an=A0-t[0]/2.4*Math.PI*.55;g.fillStyle='#6b7480';g.fillText(t[1],gx+Math.cos(an)*gr*.8,gyc+Math.sin(an)*gr*.8+gr*.045)});
-  g.fillStyle='#8b949e';g.font='400 '+Math.round(gr*.15)+'px Helvetica,Arial,sans-serif';g.fillText('kW',gx,gyc+gr*.05);
-  g.lineCap='butt';g.lineWidth=gr*.14;var R=gr*1.02;
-  if(kw>0.5){var e=A0+fp(kw)/5*Math.PI,og=g.createLinearGradient(gx,gyc+gr,gx,gyc-gr);og.addColorStop(0,'rgba(170,95,20,.75)');og.addColorStop(1,'#f59a1b');g.strokeStyle=og;g.beginPath();g.arc(gx,gyc,R,A0,e);g.stroke()}
-  else if(kw<-0.5){var e2=A0-fr(-kw)/2.4*Math.PI*.55;g.strokeStyle='#2fbf71';g.beginPath();g.arc(gx,gyc,R,e2,A0);g.stroke()}
-  g.fillStyle='#e8edf2';g.fillRect(gx-1.5,gyc+gr*.92,3,gr*.16)}
+  g.strokeStyle=pal.ring;g.lineWidth=1.5;g.beginPath();g.arc(gx,gyc,gr,0,6.2832);g.stroke();
+  function fp(q){q=Math.max(0,q);return Math.min(5,q<=10?q/10:1+Math.log(q/10)/Math.LN2)}function fr(q){q=Math.max(0,q);return Math.min(2.4,q/30)}
+  g.textAlign='center';g.font='500 '+Math.round(gr*.13)+'px Helvetica,Arial,sans-serif';g.lineWidth=2;
+  function tick(an,col,lab){g.strokeStyle=col;g.beginPath();g.moveTo(gx+Math.cos(an)*gr*.93,gyc+Math.sin(an)*gr*.93);g.lineTo(gx+Math.cos(an)*gr,gyc+Math.sin(an)*gr);g.stroke();g.fillStyle=col;g.fillText(lab,gx+Math.cos(an)*gr*.78,gyc+Math.sin(an)*gr*.78+gr*.045)}
+  [[0,'0'],[1,'10'],[2,'20'],[3,'40'],[4,'80'],[5,'160']].forEach(function(t){tick(A0+t[0]/5*Math.PI,t[0]?pal.tick:pal.tx,t[1])});
+  [[1,'30'],[2,'60']].forEach(function(t){tick(A0-t[0]/2.4*Math.PI*.55,pal.regen,t[1])});
+  g.lineCap='butt';g.lineWidth=gr*.14;var Rg=gr*1.02;
+  if(kw>0.5){var e=A0+fp(kw)/5*Math.PI,og=g.createLinearGradient(gx,gyc+gr,gx,gyc-gr);og.addColorStop(0,'rgba(170,95,20,.75)');og.addColorStop(1,'#f59a1b');g.strokeStyle=og;g.beginPath();g.arc(gx,gyc,Rg,A0,e);g.stroke()}
+  else if(kw<-0.5){var e2=A0-fr(-kw)/2.4*Math.PI*.55;g.strokeStyle='#2fbf71';g.beginPath();g.arc(gx,gyc,Rg,e2,A0);g.stroke()}
+  g.fillStyle=pal.tx;g.fillRect(gx-1.5,gyc+gr*.92,3,gr*.16);
+  g.fillStyle=kc;g.font='300 '+Math.round(gr*.4)+'px system-ui';g.fillText(kn,gx,gyc+gr*.12);
+  g.fillStyle=pal.sub;g.font='600 '+Math.round(gr*.11)+'px system-ui';g.fillText(kw<-0.5?'kW  REGEN':'kW',gx,gyc+gr*.3)}
  /* gear + clock, bottom-right */
- var gears=['P','R','N','D'],cur=(S.gear||'').toLowerCase(),map={park:'P',reverse:'R',neutral:'N',drive:'D'};
- var gx=G.W-20,gy2=G.H-18;g.textAlign='right';g.font='700 '+Math.round(G.H*.038)+'px system-ui';
- for(var i=gears.length-1;i>=0;i--){var hit=map[cur]==gears[i];g.fillStyle=hit?'#fff':'#4a515a';g.fillText(gears[i],gx,gy2);gx-=g.measureText(gears[i]).width+G.W*.012}
- var dt=new Date();g.fillStyle='#8b949e';g.font='500 '+Math.round(G.H*.03)+'px system-ui';g.textAlign='right';g.fillText(dt.toTimeString().slice(0,5),gx-G.W*.01,gy2)
- /* battery, bottom-left (if soc known) */
- if(S.soc!=null){var bx=20,by2=G.H-28,bw=G.W*.05,bh=G.H*.03;g.strokeStyle='#8b949e';g.lineWidth=2;g.strokeRect(bx,by2,bw,bh);g.fillRect(bx+bw,by2+bh*.3,3,bh*.4);var fc=S.soc<15?'#e5484d':'#2fbf71';g.fillStyle=fc;g.fillRect(bx+2,by2+2,(bw-4)*S.soc/100,bh-4);g.fillStyle='#e8edf2';g.textAlign='left';g.font='600 '+Math.round(G.H*.032)+'px system-ui';g.fillText(Math.round(S.soc)+'%',bx+bw+12,by2+bh*.85)}
- /* warning / alert banner, top */
- var banner=warn?warn:(S.alert?{t:S.alert,c:AMBER}:null);
- if(banner){var bw3=Math.min(G.W*.7,560),bh3=G.H*.075,bx3=G.cx-bw3/2,by3=G.H*.255;g.fillStyle='rgba(0,0,0,.6)';rr(bx3,by3,bw3,bh3,bh3*.3);g.fill();g.lineWidth=2;g.strokeStyle=banner.c;g.stroke();g.fillStyle=banner.c;g.textAlign='center';g.font='700 '+Math.round(bh3*.42)+'px system-ui';g.fillText(banner.t,G.cx,by3+bh3*.62)}
+ var gears=['P','R','N','D'],cur=(S.gear||'').toLowerCase(),gm={park:'P',reverse:'R',neutral:'N',drive:'D'};
+ var gx2=G.W-20,gy2=G.H-18;g.textAlign='right';g.font='700 '+Math.round(G.H*.038)+'px system-ui';
+ for(var gi=gears.length-1;gi>=0;gi--){var hit=gm[cur]==gears[gi];g.fillStyle=hit?pal.tx:pal.dim;g.fillText(gears[gi],gx2,gy2);gx2-=g.measureText(gears[gi]).width+G.W*.012}
+ var dt=new Date(),clk=dt.toTimeString().slice(0,5);g.font='500 '+Math.round(G.H*.03)+'px system-ui';var clkL=gx2-G.W*.01-g.measureText(clk).width;
+ /* battery, bottom-left (if soc known); portrait also gets the power number here */
+ var bx=20,by2=G.H-28,bw=Math.max(34,G.W*.05),bh=G.H*.03,tx2=bx;
+ if(S.soc!=null){g.strokeStyle=pal.sub;g.lineWidth=2;g.strokeRect(bx,by2,bw,bh);g.fillStyle=pal.sub;g.fillRect(bx+bw,by2+bh*.3,3,bh*.4);g.fillStyle=S.soc<15?'#e5484d':'#2fbf71';g.fillRect(bx+2,by2+2,(bw-4)*S.soc/100,bh-4);
+  g.fillStyle=pal.tx;g.textAlign='left';g.font='600 '+Math.round(G.H*.032)+'px system-ui';var st=Math.round(S.soc)+'%';g.fillText(st,bx+bw+12,by2+bh*.85);tx2=bx+bw+12+g.measureText(st).width+14}
+ var kwR=tx2;if(kw!=null&&G.W/G.H<=1.1){g.fillStyle=kc;g.textAlign='left';g.font='600 '+Math.round(G.H*.026)+'px system-ui';g.fillText(kn+' kW',tx2,by2+bh*.85);kwR=tx2+g.measureText(kn+' kW').width}
+ if(kwR+12<clkL){g.fillStyle=pal.sub;g.font='500 '+Math.round(G.H*.03)+'px system-ui';g.textAlign='right';g.fillText(clk,gx2-G.W*.01,gy2)}
+ /* banner: collision > sharp curve (PCC's own 4 m/s threshold) > crossing > openpilot alert > just disengaged */
+ var banner=null;
+ if(fcw)banner={t:'Collision warning – brake!',c:'#e5484d'};
+ else if(cv!=null&&(eng||cru)&&v>cv+4)banner={t:'Sharp curve – brake',c:pal.warn};
+ else if(warn)banner=warn;
+ else if(S.alert)banner={t:S.alert,c:pal.warn};
+ else if(Date.now()-DISENG<2500)banner={t:'openpilot disengaged',c:pal.warn};
+ if(banner){var bw3=Math.min(G.W*.7,560),bh3=G.H*.075,bx3=G.cx-bw3/2,by3=G.H*.275;pill(bx3,by3,bw3,bh3,pal.pill,banner.c);g.fillStyle=banner.c;g.textAlign='center';g.font='700 '+Math.round(bh3*.42)+'px system-ui';g.fillText(banner.t,G.cx,by3+bh3*.64)}
 }
 /* left map: CARTO dark tiles (OpenStreetMap data), follows the car (1 Hz fix from MCU_locationStatus), red arrow + blue trail of where you drove */
-var MAPL=null,MK=null,TL=null,TRK=[],LASTLL=null;
+var MK=null,TL=null,TRK=[],LASTLL=null;
+/* portrait: the map is behind the speed and the road; put the car marker in the free space on the left, not the middle */
+function mapCenter(ll,z){ll=L.latLng(ll);if(innerWidth/innerHeight>1.1)return ll;var off=L.point(innerWidth*.16,innerHeight*.37).subtract(MAPL.getSize().divideBy(2));return MAPL.unproject(MAPL.project(ll,z).subtract(off),z)}
 function mapUpd(gp){if(!gp||typeof L=='undefined')return;var md=document.getElementById('map');
  if(!MAPL){MAPL=L.map('map',{zoomControl:false,dragging:false,scrollWheelZoom:false,doubleClickZoom:false,boxZoom:false,keyboard:false,touchZoom:false,tap:false});
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:19,subdomains:'abcd',attribution:'&copy; OpenStreetMap &copy; CARTO'}).addTo(MAPL);
+  TILES=L.tileLayer(tileUrl(),{maxZoom:19,subdomains:'abcd',attribution:'&copy; OpenStreetMap &copy; CARTO'}).addTo(MAPL);
   TL=L.polyline([],{color:'#1f7bff',weight:7,opacity:.9,lineCap:'round'}).addTo(MAPL);
   MK=L.marker([gp.lat,gp.lon],{icon:L.divIcon({className:'',html:'<div id=arrow></div>',iconSize:[20,26],iconAnchor:[10,15]}),interactive:false}).addTo(MAPL);
-  MAPL.setView([gp.lat,gp.lon],16,{animate:false});md.classList.add('on')}
+  MAPL.setView(mapCenter([gp.lat,gp.lon],16),16,{animate:false});md.classList.add('on')}
  var ll=[gp.lat,gp.lon];if(LASTLL&&LASTLL[0]==ll[0]&&LASTLL[1]==ll[1])return;LASTLL=ll;
  TRK.push(ll);if(TRK.length>900)TRK.shift();TL.setLatLngs(TRK);MK.setLatLng(ll);
  var a=document.getElementById('arrow');if(a&&gp.hdg!=null)a.style.transform='rotate('+gp.hdg+'deg)';
- var z=(S&&S.v>25)?15:16;if(MAPL.getZoom()!=z)MAPL.setView(ll,z,{animate:true});else MAPL.panTo(ll,{animate:true,duration:.9})}
+ var z=(S&&S.v>25)?15:16;if(MAPL.getZoom()!=z)MAPL.setView(mapCenter(ll,z),z,{animate:true});else MAPL.panTo(mapCenter(ll,z),{animate:true,duration:.9})}
 /* the phone's own location (asks for permission once; needs https or localhost). Used while fresh (<5 s), else the car's GPS */
 var PHONE=null,GEOID=null,PREV=null;
 function geoMsg(t){var a=document.getElementById('locsw');if(a)a.textContent=t}
@@ -1905,17 +1993,17 @@ var LASTEV=null,EVT=null,EVNAME={steer:'your steering correction',disengage:'dis
 function evToast(t){var e=document.getElementById('evtoast');e.textContent=t;e.style.display='block';clearTimeout(EVT);EVT=setTimeout(function(){e.style.display='none'},3500)}
 function markNow(){fetch('/api/mark',{method:'POST',body:'marked on /dash'}).then(function(r){evToast(r.ok?'Marked - saved in 5 s':'Mark failed (recorder not available)')}).catch(function(){evToast('Mark failed')});return false}
 function evSeen(d){var e=d&&d.lastev;if(!e)return;if(LASTEV===null){LASTEV=e.t;return}if(e.t!==LASTEV){LASTEV=e.t;evToast('Recorded: '+(EVNAME[e.type]||e.type)+(e.side?' ('+e.side+')':''))}}
-function upd(d){S=d;draw();try{mapUpd(gpsNow(d))}catch(e){}try{evSeen(d)}catch(e){}}
+function upd(d){var was=WASENG;S=d;WASENG=!!d.op;if(was&&!WASENG)DISENG=Date.now();themeApply(false);try{mapUpd(gpsNow(d))}catch(e){}try{evSeen(d)}catch(e){}}
 function demoLoop(){var t=Date.now()/1000,bend=Math.sin(t*0.22)*0.00002;
  function poly(o){return [bend,0,0.03*Math.sin(t*0.3),o]}
  var lead={d:40+12*Math.sin(t*0.35),y:0.2*Math.sin(t*0.3),vr:-2.5*Math.sin(t*0.5)};
- var o=[{d:lead.d,y:lead.y,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4},{d:26,y:-5.5,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4},{d:33,y:4.2,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4},{d:18,y:-4.0,c:'two_wheel',ml:{c:'two_wheel'},stationary:false,len:2}];
- if(Math.sin(t*0.3)>0.5)o.push({d:15,y:-4+8*((t*0.25)%1),c:'unknown',ml:{c:'pedestrian'},cross:true,vy:1.0});
- upd({v:21+5*Math.sin(t*0.2),cruise:90,acc:true,op:true,alc:Math.sin(t*0.15)>-0.2,model:{p:poly(0),l:poly(-1.85),r:poly(1.85),pl:0.9,pr:0.9},lead:lead,o:o,lim:{v:50,kmh:true},park:{f:{l:255,r:150,ss:1},r:{l:180,r:Math.round(45+40*Math.sin(t*0.7)),ss:1}},soc:63,gear:'drive',pw:{kw:-8+48*Math.max(0,Math.sin(t*0.4))},gps:(function(){var th=t*0.05;return {lat:59.9139+0.003*Math.sin(th),lon:10.7522+0.006*Math.cos(th),hdg:(Math.atan2(-0.006*Math.sin(th)*0.5,0.003*Math.cos(th))*57.3+360)%360}})(),alert:''});
+ var o=[{d:lead.d,y:lead.y,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4},{d:26,y:5.5,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4},{d:33,y:-4.2,c:'four_wheel',ml:{c:'four_wheel'},stationary:false,len:4},{d:18,y:4.0,c:'two_wheel',ml:{c:'two_wheel'},stationary:false,len:2}];
+ if(Math.sin(t*0.3)>0.5)o.push({d:15,y:4-8*((t*0.25)%1),c:'unknown',ml:{c:'pedestrian'},cross:true,vy:1.0});
+ upd({v:21+5*Math.sin(t*0.2),cruise:90,acc:true,op:Math.sin(t*0.15)>-0.2,alc:Math.sin(t*0.15)>-0.2,curve:Math.sin(t*0.12)>0.3?17:null,model:{p:poly(0),l:poly(1.85),r:poly(-1.85),pl:0.9,pr:0.9},lead:lead,o:o,lim:{v:50,kmh:true},park:{f:{l:255,r:150,ss:1},r:{l:180,r:Math.round(45+40*Math.sin(t*0.7)),ss:1}},soc:63,gear:'drive',pw:{kw:-8+48*Math.max(0,Math.sin(t*0.4))},gps:(function(){var th=t*0.05;return {lat:59.9139+0.003*Math.sin(th),lon:10.7522+0.006*Math.cos(th),hdg:(Math.atan2(-0.006*Math.sin(th)*0.5,0.003*Math.cos(th))*57.3+360)%360}})(),alert:''});
  requestAnimationFrame(demoLoop)}
-unitUI();if(!demo)geoStart(false);
+unitUI();themeApply(true);requestAnimationFrame(frame);if(!demo)geoStart(false);
 if(demo){document.getElementById('conn').textContent='demo data';demoLoop()}
-else{var es=new EventSource('/api/stream');es.onmessage=function(e){document.getElementById('conn').textContent='live';upd(JSON.parse(e.data))};es.onerror=function(){document.getElementById('conn').textContent='disconnected, retrying…'};setInterval(draw,200)}
+else{var es=new EventSource('/api/stream');es.onmessage=function(e){document.getElementById('conn').textContent='live';upd(JSON.parse(e.data))};es.onerror=function(){document.getElementById('conn').textContent='disconnected, retrying…'}}
 </script></body></html>
 """
 
