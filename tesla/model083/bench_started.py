@@ -13,11 +13,14 @@ Steps (README "Bench test with the camera on screen"):
   tmux kill-session -t comma; sleep 2; pkill -f boardd; pkill -f pandad
   cd /data/openpilot && tmux new -d -s bench 'NOBOARD=1 ./launch_openpilot.sh'
   PYTHONPATH=/data/openpilot python3 /data/claude-stuff/tesla/model083/bench_started.py
-  ... Ctrl+C when done, then reboot to go back to normal.
+  ... Ctrl+C when done (puts your car calibration back; it is also restored at the next start if a run was cut off), then reboot to go back to normal.
 Nothing reaches a car: without boardd there is no CAN at all.
 """
+import argparse
 import glob
+import json
 import os
+import signal
 import sys
 import time
 
@@ -69,7 +72,37 @@ def health_msg(ignition):
   return m
 
 
+CALIB_KEY = 'CalibrationParams'
+CALIB_BACKUP = '/data/bench_calibration_backup.json'      # your car's calibration while the bench test runs
+NEUTRAL = json.dumps({'vanishing_point': [582.0, 437.0], 'valid_blocks': 50})   # straight ahead (image centre)
+
+
+def calib_restore(params):
+  """put the car's calibration back (also run at start, in case a previous bench run did not finish)"""
+  if not os.path.exists(CALIB_BACKUP):
+    return
+  saved = open(CALIB_BACKUP).read()
+  if saved == 'NONE':
+    params.delete(CALIB_KEY)
+  else:
+    params.put(CALIB_KEY, saved.encode('utf8'))
+  os.remove(CALIB_BACKUP)
+  print('restored your car calibration: %s' % (saved if saved != 'NONE' else '(none)'))
+
+
+def calib_neutral(params):
+  cur = params.get(CALIB_KEY)
+  with open(CALIB_BACKUP, 'w') as f:
+    f.write(cur.decode('utf8') if cur else 'NONE')
+  params.put(CALIB_KEY, NEUTRAL.encode('utf8'))
+  print('bench calibration: straight ahead (your car calibration saved in %s, restored on Ctrl+C)' % CALIB_BACKUP)
+
+
 def main():
+  ap = argparse.ArgumentParser()
+  ap.add_argument('--car-calib', action='store_true',
+                  help="keep the car's calibration (default: straight ahead, right for a video recorded by an EON)")
+  args = ap.parse_args()
   if panda_on_usb():
     sys.exit('STOP: a panda is connected over USB. This is for the bench only - unplug it.')
   procs = panda_processes()
@@ -78,6 +111,15 @@ def main():
       print('  running: pid %d  %s' % (pid, cmd))
     sys.exit('STOP: boardd/pandad is running and publishes `health` too. Stop it (kill %s) and start openpilot with '
              'NOBOARD=1 (see the top of this file).' % ' '.join(str(p) for p, _ in procs))
+  from common.params import Params
+  params = Params()
+  calib_restore(params)                    # left over from an interrupted run
+  if not args.car_calib:
+    calib_neutral(params)                  # before ignition: calibrationd reads it when it starts
+  def _stop(*_):
+    raise KeyboardInterrupt
+  signal.signal(signal.SIGTERM, _stop)     # SSH dropped / killed: still switch ignition off and restore calibration
+  signal.signal(signal.SIGHUP, _stop)
   pm = messaging.PubMaster(['health'])
   print('publishing ignition ON (bench). The EON should switch to the camera view within ~10 s. Ctrl+C to stop.')
   try:
@@ -90,6 +132,7 @@ def main():
   for _ in range(10):
     pm.send('health', health_msg(False))
     time.sleep(0.5)
+  calib_restore(params)
   print('done. Reboot to go back to normal (openpilot with boardd).')
 
 

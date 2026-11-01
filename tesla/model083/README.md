@@ -120,9 +120,23 @@ Ctrl+C in the bench script switches ignition off again; then `reboot` to go back
 run if a panda is connected or boardd is running. Nothing reaches a car: without boardd there is no CAN at all.
 On the bench `controlsd` waits for CAN that never comes and the UI may show "unavailable"-type alerts: expected.
 
-Framing for a useful test: video full screen and filling the camera image, horizon about mid-frame, phone level and
-square to the screen, room dim. Lane probabilities above 0.5 with clear lines in the video mean the model sees the
-road; under 0.1 means it doesn't (framing, glare, moiré).
+**Calibration on the bench:** by default `bench_started.py` switches calibration to *straight ahead* for the test
+(right for a video recorded by an EON camera) and puts your car's calibration back on Ctrl+C. Your calibration is kept
+in `/data/bench_calibration_backup.json` meanwhile; if a run is cut off, the next start restores it first. Use
+`--car-calib` to keep the car's calibration instead.
+
+**Getting the model to see the screen as a road** (it was trained on the EON camera looking at real roads):
+
+1. Play a drive **recorded by an EON camera** (the demo video `bench_demo_drive.mp4`: comma's public daytime sample,
+   lanes 1.00/0.98 and lead p1.00 when fed straight to the model) — not a phone or fisheye dashcam video.
+2. Full screen. **Lens-to-screen distance = 1.04 × the height of the picture on the screen** (the video then covers
+   the EON camera's ~65° view exactly). A 4:3 video full-height on a 16:9 monitor: 24" → ~31 cm, 27" → ~35 cm,
+   32" → ~41 cm, 15.6" laptop → ~20 cm.
+3. The video opens with 5 s of an alignment frame: put the white border on the edges of the camera view and the
+   cross in the centre; lens at the picture's centre, phone parallel to the screen.
+4. Dim room, screen brightness up, no reflections on the screen.
+
+Working: lane probabilities above 0.8, lane width about 3.5 m, a lead box (`lead p` > 0.5) behind the car ahead.
 
 ---
 
