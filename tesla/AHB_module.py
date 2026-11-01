@@ -83,7 +83,7 @@ class AHBController():
     self.prev_highLowBeamReason = highLowBeamReason
     self.prev_high_beam_on = CS.ahbHiBeamOn
     self.prev_lights_on = CS.ahbLoBeamOn
-    self.ahbIsEnabled = self.ahbIsEnabled and (CS.ahbEnabled or self._flags[0])
+    self.ahbIsEnabled = self.ahbIsEnabled and bool(CS.ahbEnabled or self._flags[0] or self._flags[1])   # AHBTEST: test mode reports 'AHB enabled' like auto mode does
     return highLowBeamStatus,highLowBeamReason,self.ahbIsEnabled
 
   def update(self, CS, frame,ahbLead1):

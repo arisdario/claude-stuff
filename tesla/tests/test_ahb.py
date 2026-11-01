@@ -124,6 +124,10 @@ class TestAHB(unittest.TestCase):
     seen = set(self.step(CS(kmh=0, stalk=0), ms=2000)[0] for _ in range(4))
     self.assertEqual(seen, {A.AHBDecision.DAS_HIGH_BEAM_ON, OFF})      # stalk normal: DAS on / off
 
+  def test_parked_test_mode_reports_enabled(self):
+    self.flag(A.AHB_TEST_FILE)
+    self.assertTrue(all(self.step(CS(kmh=0, stalk=st), ms=2000)[2] for st in (0, 1, 0, 1)))   # the 'AHB enabled' bit the car sees
+
   def test_auto_or_test_tells_carcontroller_to_send(self):
     self.assertFalse(self.c.auto_or_test())
     self.flag(A.AHB_AUTO_FILE); self.assertTrue(self.c.auto_or_test())
