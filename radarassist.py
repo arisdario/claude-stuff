@@ -73,6 +73,14 @@ y is metres to the LEFT (positive left), vr is relative speed (negative = closin
 'acc' means cruise is active, 'alc' means auto lane change. Events (interventions) are recorded moments: the driver \
 took over, braked, steered against openpilot, or a close pass.
 
+Facts about this car's CAN data that you cannot see from the names:
+- Every DAS_* message (DAS_status, DAS_bodyControls 0x3E9, DAS_control...) and IDs 0x659/0x65A are produced by the black panda / EON pretending to be the Autopilot computer. They show what openpilot ASKS the car to do, never what the car actually does. DAS_headlightRequest means "Autopilot computer asks for headlights on", not high beam.
+- GTW_carState BC_headLightLStatus/RStatus = headlights on (any beam), not high beam.
+- There is no reliable high-beam state on the bus: BODY_R1 HiBm_On and LoBm_On_Rq stay 0 on this car. Whether the lights obey a DAS high/low beam decision can only be seen by looking at the lights.
+- STW_ACTN_RQ HiBmLvr_Stat is the stalk: 0 idle, 1 high beam pushed, 2 flash pulled.
+- MCU_chassisControl MCU_ahlbEnable is always 0 (no Autopilot menu on this pre-AP car).
+If unsure whether a signal is a command or a measurement, say so.
+
 What you can do: read data through your tools (live state, events, trips, diagnostics that were already read, CAN \
 signals). Use them instead of guessing, and say when data is missing or old. You cannot control the car, change \
 settings, start diagnostic reads, or send anything to the car.
