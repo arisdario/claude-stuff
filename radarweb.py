@@ -38,6 +38,10 @@ try:
 except Exception as _e_ud:
     radaruds = None; UDSC = None; print('radaruds not available - no module diagnostics:', _e_ud)
 try:
+    import radarassist          # AI assistant (/assist): read-only tools over radarweb's data, off until an API key file exists
+except Exception as _e_as:
+    radarassist = None; print('radarassist not available - no AI assistant:', _e_as)
+try:
     # PCC's camera curve limit (tesla/pcc_curves.py), so /dash shows the curve speed PCC will hold. Prefer the copy that
     # ships with radarweb (tesla/ next to it), else the one installed in openpilot. Loaded by path: no sys.path changes.
     import importlib.util as _ilu
@@ -2066,6 +2070,83 @@ def uds_start(q):
     return {'ok': True, 'queued': len(UDSC.queue)}
 
 
+def _assist_tools():
+    def state():
+        with LOCK: return json.loads(json.dumps(STATE, default=str))
+    return radarassist.DataTools(
+        state=state,
+        events=(lambda: radarevents.list_events(EVREC.out_dir)) if EVREC else None,
+        event=(lambda f: radarevents.load_event(f, EVREC.out_dir)) if EVREC else None,
+        trips=trips_list, trip=trip_get, diagnostics=uds_status,
+        can=lambda: build_map(time.time())[0])
+
+
+ASSIST = r"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI assistant</title><style>
+:root{--bg:#0d1117;--pn:#161b22;--bd:#30363d;--tx:#cfd6dd;--mu:#8a9098;--ac:#1a73e8;--me:#1f3a5f;--er:#f85149}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px system-ui,-apple-system,sans-serif;display:flex;flex-direction:column;height:100vh;height:100dvh}
+header{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--bd);background:var(--pn)}
+header h1{font-size:16px;margin:0 8px 0 0}.seg{display:flex;border:1px solid var(--bd);border-radius:8px;overflow:hidden}
+.seg button{background:none;border:0;color:var(--tx);padding:7px 12px;font:inherit;cursor:pointer}.seg button.on{background:var(--ac);color:#fff}
+select{background:var(--bg);color:var(--tx);border:1px solid var(--bd);border-radius:8px;padding:6px;font:inherit}
+#st{color:var(--mu);font-size:12px;flex-basis:100%}
+#log{flex:1;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:10px}
+.m{max-width:46em;padding:10px 12px;border-radius:10px;white-space:pre-wrap;line-height:1.4;overflow-wrap:anywhere}
+.u{align-self:flex-end;background:var(--me)}.a{align-self:flex-start;background:var(--pn);border:1px solid var(--bd)}
+.e{align-self:flex-start;color:var(--er);border:1px solid var(--er)}.meta{display:block;margin-top:6px;color:var(--mu);font-size:11px}
+form{display:flex;gap:8px;padding:10px 16px 56px;border-top:1px solid var(--bd);background:var(--pn)}
+textarea{flex:1;min-width:0;resize:none;height:46px;background:var(--bg);color:var(--tx);border:1px solid var(--bd);border-radius:8px;padding:10px;font:inherit}
+form button{border:0;border-radius:8px;padding:0 16px;font:inherit;font-weight:600;cursor:pointer;background:var(--ac);color:#fff}
+#mic{background:#2d333b}#mic.rec{background:var(--er)}button:disabled{opacity:.5}
+.big #log{font-size:20px}.big .m{max-width:none}.big #mic{flex:1;height:72px;font-size:20px}.big textarea{display:none}
+.off{padding:16px;line-height:1.5}.off code{background:var(--pn);padding:1px 5px;border-radius:4px}
+</style></head><body>
+<header><h1>AI assistant</h1>
+<div class="seg" id="mode"><button data-m="explain" class="on">Explain</button><button data-m="drive">Driving</button></div>
+<select id="prov" title="who answers"><option value="">Auto</option><option value="claude">Claude</option><option value="openai">ChatGPT</option></select>
+<button id="clr" style="background:none;border:1px solid var(--bd);color:var(--tx);border-radius:8px;padding:6px 10px">New chat</button>
+<div id="st">checking...</div></header>
+<div id="log"></div>
+<form id="f"><textarea id="q" placeholder="Ask about your car's data..."></textarea><button type="button" id="mic" title="speak">&#127908;</button><button id="go">Ask</button></form>
+<script>
+var H=[],MODE='explain',BUSY=false,S=null,$=function(i){return document.getElementById(i)};
+try{MODE=localStorage.getItem('assist_mode')||'explain';H=JSON.parse(sessionStorage.getItem('assist_h')||'[]')}catch(e){}
+function save(){try{sessionStorage.setItem('assist_h',JSON.stringify(H.slice(-20)));localStorage.setItem('assist_mode',MODE)}catch(e){}}
+function add(cls,txt,meta){var d=document.createElement('div');d.className='m '+cls;d.textContent=txt;if(meta){var s=document.createElement('span');s.className='meta';s.textContent=meta;d.appendChild(s)}$('log').appendChild(d);$('log').scrollTop=1e9;return d}
+function setMode(m){MODE=m;document.body.classList.toggle('big',m=='drive');[].forEach.call(document.querySelectorAll('#mode button'),function(b){b.classList.toggle('on',b.dataset.m==m)});
+ $('q').placeholder=m=='drive'?'':'Ask about your car\'s data...';save()}
+document.querySelectorAll('#mode button').forEach(function(b){b.onclick=function(){setMode(b.dataset.m)}});
+$('clr').onclick=function(){H=[];save();$('log').innerHTML='';if(window.speechSynthesis)speechSynthesis.cancel()};
+function speak(t){if(!window.speechSynthesis)return;speechSynthesis.cancel();var u=new SpeechSynthesisUtterance(t.replace(/[*#_`]/g,''));speechSynthesis.speak(u)}
+function ask(q){q=(q||'').trim();if(!q||BUSY)return;BUSY=true;$('go').disabled=true;H.push({role:'user',text:q});add('u',q);var w=add('a','...');
+ fetch('/api/assist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({history:H,mode:MODE,provider:$('prov').value||null})})
+ .then(function(r){return r.json()}).then(function(r){w.remove();
+  if(!r.ok){H.pop();add('e',r.error||'failed');return}
+  H.push({role:'assistant',text:r.text});
+  add('a',r.text,(r.provider=='openai'?'ChatGPT':'Claude')+' · '+(r.model||'')+' · '+r.seconds+' s'+(r.tools&&r.tools.length?' · looked at: '+r.tools.join(', '):'')+(r.note?' · '+r.note:''));
+  if(MODE=='drive')speak(r.text)})
+ .catch(function(e){w.remove();H.pop();add('e','no answer: '+e)})
+ .then(function(){BUSY=false;$('go').disabled=false;save()})}
+$('f').onsubmit=function(e){e.preventDefault();var q=$('q').value;$('q').value='';ask(q)};
+$('q').onkeydown=function(e){if(e.key=='Enter'&&!e.shiftKey){e.preventDefault();$('f').onsubmit(e)}};
+var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+$('mic').onclick=function(){
+ if(!SR||!window.isSecureContext){add('e','Voice input needs a secure page in this browser. Use the microphone key on your phone keyboard instead (tap the text box first), or in Chrome open chrome://flags, enable "Insecure origins treated as secure" and add '+location.origin+'.');setMode('explain');$('q').focus();return}
+ if(S){S.stop();return}
+ S=new SR();S.lang=navigator.language||'en-US';S.interimResults=false;S.maxAlternatives=1;$('mic').classList.add('rec');
+ S.onresult=function(e){ask(e.results[0][0].transcript)};S.onerror=function(e){add('e','voice: '+e.error)};S.onend=function(){S=null;$('mic').classList.remove('rec')};S.start()};
+fetch('/api/assist').then(function(r){return r.json()}).then(function(s){
+ if(!s.enabled){$('f').style.display='none';$('st').textContent='off';var d=document.createElement('div');d.className='off';
+  d.innerHTML='The assistant is off: no API key on the EON.<br>Create a key at <b>console.anthropic.com</b> (Claude) or <b>platform.openai.com</b> (ChatGPT), then on the EON:<br><code>echo YOUR_KEY &gt; '+(s.key_files?s.key_files.claude:'/data/anthropic_api_key')+'</code> or <code>echo YOUR_KEY &gt; '+(s.key_files?s.key_files.openai:'/data/openai_api_key')+'</code><br>then reload this page. API use is billed per question, separately from the Claude or ChatGPT app subscription.';$('log').appendChild(d);return}
+ var n={claude:'Claude ('+s.models.claude+')',openai:'ChatGPT ('+s.models.openai+')'};
+ $('st').textContent='Read-only: it sees radarweb data, never controls the car. '+s.providers.map(function(p){return n[p]}).join(', then ')+(s.include_gps?'. GPS included.':'. GPS removed.');
+ [].forEach.call($('prov').options,function(o){if(o.value&&s.providers.indexOf(o.value)<0)o.disabled=true});
+ H.forEach(function(m){add(m.role=='user'?'u':'a',m.text)})})
+ .catch(function(){$('st').textContent='radarweb not reachable'});
+setMode(MODE);
+</script></body></html>"""
+
+
 GNAV = r"""<style>
 .gnav{position:fixed;right:10px;bottom:8px;z-index:60;font:13px system-ui,-apple-system,sans-serif}
 .gnav summary{list-style:none;cursor:pointer;width:36px;height:36px;display:flex;align-items:center;justify-content:center;background:#1c2128;border:1px solid #30363d;border-radius:8px;font-size:18px;color:#cfd6dd}
@@ -2078,7 +2159,7 @@ GNAV = r"""<style>
 a.gnav-on{color:#fff!important;font-weight:600;box-shadow:inset 3px 0 0 #1a73e8}
 </style><script>(function(){
 // one menu on every page: the page's own actions stay, the list of pages is the same everywhere
-var P=[['/','Road view'],['/dash','Dash'],['/near','Near view'],['/top','Top-down view'],['/video','Video'],['/events','Interventions'],['/trips','Trips'],['/map','CAN data & diagnostics'],['/learn','Label objects'],['/ml','Model training'],['/calib','Calibrate radar']];
+var P=[['/','Road view'],['/dash','Dash'],['/near','Near view'],['/top','Top-down view'],['/video','Video'],['/events','Interventions'],['/trips','Trips'],['/map','CAN data & diagnostics'],['/learn','Label objects'],['/ml','Model training'],['/calib','Calibrate radar'],['/assist','AI assistant']];
 var here=location.pathname.replace(/\/+$/,'')||'/';if(here=='/index.html')here='/';
 function add(box){var h=document.createElement('div');h.className='gnav-h';h.textContent='Pages';box.appendChild(h);
  P.forEach(function(p){var a=document.createElement('a');a.href=p[0];a.textContent=p[1];if(p[0]==here)a.className='gnav-on';box.appendChild(a)})}
@@ -2118,6 +2199,10 @@ class H(BaseHTTPRequestHandler):
         if not self._authed(): return
         if self.path == '/api/uds':
             self._json(uds_status())
+        elif self.path == '/api/assist':
+            self._json(radarassist.status() if radarassist else {'enabled': False, 'providers': [], 'error': 'radarassist.py not found'})
+        elif self.path.split('?')[0] == '/assist':
+            b = _pg(ASSIST); self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path == '/api/state':
             b = self._snap().encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path == '/api/map':
@@ -2256,6 +2341,16 @@ class H(BaseHTTPRequestHandler):
                 self._json(uds_start(q))
             except Exception as e:
                 self._json({'ok': False, 'msg': str(e)}, 400)
+        elif self.path.split('?')[0] == '/api/assist':
+            # /assist: {"history": [{"role", "text"}...], "mode": "explain" | "drive", "provider": null | "claude" | "openai"}
+            if radarassist is None: self._json({'ok': False, 'error': 'radarassist.py not found next to radarweb.py'}, 503); return
+            try:
+                n = int(self.headers.get('Content-Length', '0') or '0')
+                if n > 200000: self._json({'ok': False, 'error': 'too long'}, 413); return
+                q = json.loads(self.rfile.read(n).decode('utf8', 'replace') or '{}')
+                self._json(radarassist.ask(q.get('history'), q.get('mode') or 'explain', _assist_tools(), q.get('provider')))
+            except Exception as e:
+                self._json({'ok': False, 'error': str(e)}, 400)
         elif self.path.split('?')[0] == '/api/mark':
             # /dash "Mark" button: records the moment as an event (radarevents), body = optional short note
             try:

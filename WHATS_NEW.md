@@ -84,3 +84,13 @@ READMEs, and the `tests/` + `tesla/tests/` suites.
 Genuinely new **and touches the car**: the PCC curve-slowing rework, the longitudinal PID re-tune, the lane-width
 clip, auto high beam, and (optional, deliberate) the 0.8.3 model. Everything else — the whole radarweb suite, the
 diagnostics, the obstacle warnings, the recorders — is observe/advise only.
+
+## AI assistant (radarweb /assist) - advisory only
+- `radarassist.py` + `/assist` page (menu: "AI assistant"). Answers questions about the car's data using read-only
+  tools: live state, interventions, trips (statistics only), diagnostics already read, CAN signal search.
+  It cannot send anything to the car, start a UDS read or change settings.
+- Two modes: **Explain** (full answers) and **Driving** (one or two spoken sentences, read aloud).
+- Off until a key file exists on the EON: `/data/anthropic_api_key` (Claude) and/or `/data/openai_api_key` (ChatGPT).
+  With both, the other one answers when the first is rate-limited or down. Keys never go in the repo.
+- GPS removed from everything sent unless `/data/ai_assist.json` has `"include_gps": true`.
+- API use is billed per question by Anthropic / OpenAI. A Claude or ChatGPT app subscription does not include it.
