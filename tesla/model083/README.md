@@ -99,6 +99,33 @@ trusting it in a curve.
 
 ---
 
+## Bench test with the camera on screen (no car, no panda)
+
+The EON's normal UI only shows the camera with the model's path and lanes when the car is on. On the bench,
+`bench_started.py` pretends the ignition is on, so openpilot goes onroad by itself: point the road camera at a screen
+playing a front-facing dashcam video and watch the path and lanes on the EON's screen.
+
+```bash
+# stop openpilot, and anything that talks to a panda
+tmux kill-session -t comma; sleep 2; pkill -f boardd; pkill -f pandad
+# start openpilot without boardd (so only the bench script publishes the panda's health)
+cd /data/openpilot && tmux new -d -s bench 'NOBOARD=1 ./launch_openpilot.sh'
+# pretend ignition on - the EON switches to the camera view within ~10 s
+PYTHONPATH=/data/openpilot python3 /data/claude-stuff/tesla/model083/bench_started.py
+# in a second SSH session, the numbers:
+cd /data/openpilot && PYTHONPATH=/data/openpilot python3 /data/claude-stuff/tesla/model083/check_model.py 30
+```
+
+Ctrl+C in the bench script switches ignition off again; then `reboot` to go back to normal. The script refuses to
+run if a panda is connected or boardd is running. Nothing reaches a car: without boardd there is no CAN at all.
+On the bench `controlsd` waits for CAN that never comes and the UI may show "unavailable"-type alerts: expected.
+
+Framing for a useful test: video full screen and filling the camera image, horizon about mid-frame, phone level and
+square to the screen, room dim. Lane probabilities above 0.5 with clear lines in the video mean the model sees the
+road; under 0.1 means it doesn't (framing, glare, moiré).
+
+---
+
 ## Step 7 — tuning notes after it's driving
 
 - Lateral tuning (steer ratio, PID, camera offset) was set for the **old** model. The 0.8.3 path is smoother and
