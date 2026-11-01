@@ -38,7 +38,12 @@ class Watch(object):
     seg = self.segments[-1]
     if t - seg['t0'] < SETTLE and len(self.segments) > 1:
       return
-    seg['frames'].setdefault((bus, addr), []).append((len(dat), int.from_bytes(dat, 'little')))
+    e = seg['frames'].get((bus, addr))
+    if e is None:
+      e = seg['frames'][(bus, addr)] = [0, {}]          # [longest frame, {value: count}] - values repeat a lot
+    if len(dat) > e[0]: e[0] = len(dat)
+    v = int.from_bytes(dat, 'little')
+    e[1][v] = e[1].get(v, 0) + 1
 
   def analyse(self):
     segs = [s for s in self.segments if s['frames']]
@@ -50,22 +55,30 @@ class Watch(object):
       keys &= set(s['frames'])      # only IDs seen in every phase
     bits, fields = [], []
     for key in sorted(keys):
-      n = max(l for s in segs for l, _ in s['frames'][key])
-      phase_bits = []
+      n = max(s['frames'][key][0] for s in segs)
+      all_or, all_and = 0, (1 << (8 * n)) - 1
       for s in segs:
-        vals = [v for _, v in s['frames'][key]]
-        phase_bits.append([sum((v >> b) & 1 for v in vals) / float(len(vals)) for b in range(n * 8)])
-      for b in range(n * 8):
-        on_v = [p[b] for p, s in zip(phase_bits, segs) if s['on']]
-        off_v = [p[b] for p, s in zip(phase_bits, segs) if not s['on']]
+        for v in s['frames'][key][1]:
+          all_or |= v; all_and &= v
+      moving = all_or & ~all_and     # only bits that changed at all are worth counting
+      if not moving:
+        continue
+      cand = [b for b in range(n * 8) if (moving >> b) & 1]
+      share = []                     # per segment: share of frames with each candidate bit = 1
+      for s in segs:
+        vals = s['frames'][key][1]; tot = float(sum(vals.values()))
+        share.append(dict((b, sum(c for v, c in vals.items() if (v >> b) & 1) / tot) for b in cand))
+      for b in cand:
+        on_v = [sh[b] for sh, s in zip(share, segs) if s['on']]
+        off_v = [sh[b] for sh, s in zip(share, segs) if not s['on']]
         if min(on_v) >= STEADY and max(off_v) <= 1 - STEADY:
           bits.append({'bus': key[0], 'id': '0x%X' % key[1], 'byte': b // 8, 'bit': b % 8, 'on': 1, 'off': 0})
         elif max(on_v) <= 1 - STEADY and min(off_v) >= STEADY:
           bits.append({'bus': key[0], 'id': '0x%X' % key[1], 'byte': b // 8, 'bit': b % 8, 'on': 0, 'off': 1})
-      for byte in range(n):            # whole bytes whose ON values and OFF values never overlap
+      for byte in sorted(set(b // 8 for b in cand)):    # whole bytes whose ON values and OFF values never overlap
         on_set = set(); off_set = set()
         for s in segs:
-          vs = set((v >> (8 * byte)) & 0xFF for _, v in s['frames'][key])
+          vs = set((v >> (8 * byte)) & 0xFF for v in s['frames'][key][1])
           (on_set if s['on'] else off_set).update(vs)
         if on_set and off_set and not (on_set & off_set) and len(on_set | off_set) <= 8:
           fields.append({'bus': key[0], 'id': '0x%X' % key[1], 'byte': byte,
@@ -123,11 +136,12 @@ def main():
   except KeyboardInterrupt:
     print('\nstopped')
   print('%d CAN frames received' % frames + ('  <- none: is boardd running (openpilot started, panda connected)?' if not frames else ''))
+  print('analysing ...'); sys.stdout.flush()
   try:
     with lock:
       r = w.analyse()
     report(r)
-  except Exception:
+  except (Exception, KeyboardInterrupt):
     traceback.print_exc()
     r = {'error': traceback.format_exc()}
   r['frames_received'] = frames
