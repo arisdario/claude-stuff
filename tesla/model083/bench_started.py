@@ -18,7 +18,6 @@ Nothing reaches a car: without boardd there is no CAN at all.
 """
 import glob
 import os
-import subprocess
 import sys
 import time
 
@@ -37,11 +36,24 @@ def panda_on_usb():
   return False
 
 
-def running(pattern):
-  try:
-    return subprocess.call(['pgrep', '-f', pattern], stdout=subprocess.DEVNULL) == 0
-  except Exception:
-    return False
+def panda_processes():
+  """real boardd / pandad processes as (pid, command line). Reads /proc directly: Android's pgrep -f can match its
+  own command line, which made the old check report boardd when it was not running."""
+  found, me = [], {os.getpid(), os.getppid()}
+  for d in glob.glob('/proc/[0-9]*'):
+    try:
+      pid = int(os.path.basename(d))
+      if pid in me:
+        continue
+      args = [a for a in open(d + '/cmdline', 'rb').read().split(b'\0') if a]
+      if not args:
+        continue
+      argv = [a.decode('utf8', 'replace') for a in args]
+      if os.path.basename(argv[0]) in ('boardd', '_boardd') or 'selfdrive.pandad' in argv:
+        found.append((pid, ' '.join(argv)))
+    except Exception:
+      pass
+  return found
 
 
 def health_msg(ignition):
@@ -60,8 +72,12 @@ def health_msg(ignition):
 def main():
   if panda_on_usb():
     sys.exit('STOP: a panda is connected over USB. This is for the bench only - unplug it.')
-  if running('boardd') or running('selfdrive.pandad'):
-    sys.exit('STOP: boardd/pandad is running and publishes `health` too. Start openpilot with NOBOARD=1 (see the top of this file).')
+  procs = panda_processes()
+  if procs:
+    for pid, cmd in procs:
+      print('  running: pid %d  %s' % (pid, cmd))
+    sys.exit('STOP: boardd/pandad is running and publishes `health` too. Stop it (kill %s) and start openpilot with '
+             'NOBOARD=1 (see the top of this file).' % ' '.join(str(p) for p, _ in procs))
   pm = messaging.PubMaster(['health'])
   print('publishing ignition ON (bench). The EON should switch to the camera view within ~10 s. Ctrl+C to stop.')
   try:
