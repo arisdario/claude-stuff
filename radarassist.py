@@ -6,28 +6,48 @@ read-only diagnostics, CAN signals) and answers short spoken questions while dri
 ADVISORY ONLY. The assistant can only READ what radarweb already shows. Its tools return data; none of them sends
 anything on CAN, starts a UDS read, changes a setting or touches openpilot. It cannot drive, brake or steer.
 
-Off until an API key file exists on the EON (never put a key in the repo):
-  /data/anthropic_api_key    Claude  (console.anthropic.com -> API keys)
-  /data/openai_api_key       ChatGPT (platform.openai.com -> API keys)
-Either one is enough; with both, the other one answers when the first is rate-limited, overloaded or unreachable.
-API use is billed per request by Anthropic / OpenAI, separately from a Claude or ChatGPT app subscription.
+Off until at least one API key file exists on the EON (never put a key in the repo):
+  /data/gemini_api_key       Gemini   (aistudio.google.com -> Get API key)     free tier
+  /data/groq_api_key         Groq     (console.groq.com -> API Keys)           free tier, very fast
+  /data/anthropic_api_key    Claude   (console.anthropic.com -> API keys)      paid per use
+  /data/openai_api_key       ChatGPT  (platform.openai.com -> API keys)        paid per use
+  /data/xai_api_key          Grok     (console.x.ai -> API keys)               paid per use
+Any one is enough. "Auto" asks them in the order below; when one is rate-limited, overloaded or unreachable the
+next one answers. App subscriptions (Claude Pro, ChatGPT Plus, SuperGrok...) do not include API use.
 Optional settings: /data/ai_assist.json, e.g.
-  {"prefer": "claude", "claude_model": "claude-opus-5-5", "openai_model": "gpt-5", "openai_reasoning_effort": "low"}
+  {"order": ["groq", "gemini", "claude"], "models": {"gemini": "gemini-2.5-flash"}, "reasoning_effort": {"gemini": "low"}}
+A model of "auto" (the default for Gemini, Groq and Grok) is picked from the provider's own model list once a day.
 GPS positions are removed from everything sent, unless "include_gps": true is set there.
 
 Plain urllib on purpose: the official SDKs need Python >= 3.10 and compiled packages that do not build on the EON.
 """
 import json
 import os
+import re
 import ssl
 import time
 import urllib.error
 import urllib.request
 
-KEY_FILES = {'claude': '/data/anthropic_api_key', 'openai': '/data/openai_api_key'}
+# provider -> how to reach it. 'oai' = OpenAI-style chat completions (OpenAI, and the compatible endpoints of the others)
+PROVIDERS = {
+    'gemini': {'label': 'Gemini', 'kind': 'oai', 'base': 'https://generativelanguage.googleapis.com/v1beta/openai',
+               'model': 'auto', 'fallback_model': 'gemini-2.5-flash', 'max_field': 'max_tokens'},
+    'groq':   {'label': 'Groq', 'kind': 'oai', 'base': 'https://api.groq.com/openai/v1',
+               'model': 'auto', 'fallback_model': 'llama-3.3-70b-versatile', 'max_field': 'max_tokens'},
+    'claude': {'label': 'Claude', 'kind': 'claude', 'model': 'claude-opus-5-5'},
+    'openai': {'label': 'ChatGPT', 'kind': 'oai', 'base': 'https://api.openai.com/v1',
+               'model': 'gpt-5', 'max_field': 'max_completion_tokens'},
+    'grok':   {'label': 'Grok', 'kind': 'oai', 'base': 'https://api.x.ai/v1',
+               'model': 'auto', 'fallback_model': 'grok-4', 'max_field': 'max_tokens'},
+}
+ORDER = ['gemini', 'groq', 'claude', 'openai', 'grok']      # free ones first
+KEY_FILES = {'gemini': '/data/gemini_api_key', 'groq': '/data/groq_api_key', 'claude': '/data/anthropic_api_key',
+             'openai': '/data/openai_api_key', 'grok': '/data/xai_api_key'}
 CONFIG_FILE = '/data/ai_assist.json'
-DEFAULTS = {'prefer': 'claude', 'claude_model': 'claude-opus-5-5', 'openai_model': 'gpt-5',
-            'openai_reasoning_effort': None, 'include_gps': False, 'timeout': 90}
+DEFAULTS = {'order': ORDER, 'models': {}, 'reasoning_effort': {}, 'include_gps': False, 'timeout': 90}
+MODEL_TTL = 24 * 3600
+_AUTO = {}                  # provider -> (time, model) picked from its model list
 
 CLAUDE_URL = 'https://api.anthropic.com/v1/messages'
 CLAUDE_VERSION = '2026-10-21'
@@ -120,7 +140,15 @@ def config():
             c.update(dict((k, v) for k, v in u.items() if k in DEFAULTS))
     except Exception:
         pass
+    if not isinstance(c['order'], list): c['order'] = ORDER
+    for k in ('models', 'reasoning_effort'):
+        if not isinstance(c[k], dict): c[k] = {}
+    c['order'] = [p for p in c['order'] if p in PROVIDERS] + [p for p in ORDER if p not in c['order']]
     return c
+
+
+def model_setting(p, cfg):
+    return cfg['models'].get(p) or PROVIDERS[p]['model']
 
 
 def read_key(provider):
@@ -135,16 +163,14 @@ def read_key(provider):
 def providers(cfg=None):
     """usable providers, preferred first"""
     cfg = cfg or config()
-    have = [p for p in ('claude', 'openai') if read_key(p)]
-    if cfg.get('prefer') in have:
-        have.remove(cfg['prefer']); have.insert(0, cfg['prefer'])
-    return have
+    return [p for p in cfg['order'] if read_key(p)]
 
 
 def status():
     cfg = config(); have = providers(cfg)
     return {'enabled': bool(have), 'providers': have,
-            'models': {'claude': cfg['claude_model'], 'openai': cfg['openai_model']},
+            'labels': dict((p, PROVIDERS[p]['label']) for p in PROVIDERS),
+            'models': dict((p, (_AUTO[p][1] if model_setting(p, cfg) == 'auto' and p in _AUTO else model_setting(p, cfg))) for p in PROVIDERS),
             'include_gps': bool(cfg['include_gps']), 'key_files': KEY_FILES}
 
 
@@ -334,12 +360,27 @@ def post_json(url, headers, body, provider, timeout=90, opener=None):
         raise ApiError(provider, None, str(e))
 
 
+def get_json(url, headers, provider, timeout=20, opener=None):
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        if opener is not None:
+            raw = opener(req, timeout)
+        else:
+            with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx()) as r:
+                raw = r.read()
+        return json.loads(raw.decode('utf8'))
+    except urllib.error.HTTPError as e:
+        raise ApiError(provider, e.code, e.reason)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise ApiError(provider, None, str(e))
+
+
 # ---------------------------------------------------------------- Claude (Messages API)
 
 def claude_body(cfg, mode, history):
     drive = mode == 'drive'
     return {
-        'model': cfg['claude_model'],
+        'model': model_setting('claude', cfg),
         'max_tokens': 2000 if drive else 8000,
         'output_config': {'effort': 'low' if drive else 'medium'},   # thinking is always on; effort sets its depth
         'fallbacks': 'default',
@@ -352,7 +393,7 @@ def claude_body(cfg, mode, history):
     }
 
 
-def ask_claude(key, cfg, mode, history, tools, opener=None):
+def ask_claude(p, key, cfg, mode, history, tools, opener=None):
     headers = {'x-api-key': key, 'anthropic-version': CLAUDE_VERSION, 'anthropic-beta': CLAUDE_BETA}
     body = claude_body(cfg, mode, history); used = []
     for _ in range(MAX_TOOL_ROUNDS + 1):
@@ -377,49 +418,115 @@ def ask_claude(key, cfg, mode, history, tools, opener=None):
     return {'text': 'Stopped: too many data lookups for one question.', 'stop': 'tool_rounds', 'tools': used}
 
 
-# ---------------------------------------------------------------- OpenAI (Chat Completions API)
+# ---------------------------------------------------------------- OpenAI-style chat completions (ChatGPT, Gemini, Groq, Grok)
+
+def _ver(name):
+    return tuple(int(x) for x in re.findall(r'\d+', name)[:3])
+
+
+def pick_model(p, ids):
+    """a sensible chat model with tool use from a provider's model list (None if nothing fits)"""
+    ids = [i[7:] if i.startswith('models/') else i for i in ids if isinstance(i, str)]
+    bad = re.compile(r'image|imagine|vision|video|tts|audio|live|embed|whisper|guard|transcribe|search|aqa|robotics|computer|native')
+    ids = [i for i in ids if not bad.search(i)]
+    if p == 'gemini':
+        plain = [i for i in ids if re.match(r'^gemini-\d+(\.\d+)?-flash$', i)]                 # stable Flash: free tier, fast
+        if plain: return max(plain, key=_ver)
+        flash = [i for i in ids if i.startswith('gemini-') and 'flash' in i and 'lite' not in i]
+        return max(flash, key=lambda i: (_ver(i), 'preview' not in i and 'exp' not in i)) if flash else None
+    if p == 'groq':
+        for want in ('openai/gpt-oss-120b', 'llama-3.3-70b-versatile', 'openai/gpt-oss-20b'):
+            if want in ids: return want
+        big = [i for i in ids if 'gpt-oss' in i or '70b' in i]
+        return big[0] if big else None
+    if p == 'grok':
+        g = [i for i in ids if i.startswith('grok-') and 'code' not in i and 'mini' not in i]
+        if not g: return None
+        top = max(_ver(i)[:2] for i in g)                          # newest generation, then the fast variant
+        g = [i for i in g if _ver(i)[:2] == top]
+        return sorted(g, key=lambda i: ('fast' not in i, 'non-reasoning' not in i, len(i)))[0]
+    return None
+
+
+def resolve_model(p, key, cfg, opener=None):
+    m = model_setting(p, cfg)
+    if m != 'auto':
+        return m
+    hit = _AUTO.get(p)
+    if hit and time.time() - hit[0] < MODEL_TTL:
+        return hit[1]
+    try:
+        r = get_json(PROVIDERS[p]['base'] + '/models', {'authorization': 'Bearer ' + key}, p, 20, opener)
+        m = pick_model(p, [d.get('id') for d in (r.get('data') or []) if isinstance(d, dict)])
+    except ApiError as e:
+        if e.status in (401, 403):
+            raise
+        m = None
+    m = m or PROVIDERS[p]['fallback_model']
+    _AUTO[p] = (time.time(), m)
+    return m
+
 
 def openai_tools():
     return [{'type': 'function', 'function': {'name': t['name'], 'description': t['description'],
                                               'parameters': t['input_schema']}} for t in TOOLS]
 
 
-def openai_body(cfg, mode, history):
+def openai_body(p, model, cfg, mode, history):
     drive = mode == 'drive'
-    b = {'model': cfg['openai_model'],
-         'max_completion_tokens': 2000 if drive else 8000,
+    b = {'model': model,
+         PROVIDERS[p]['max_field']: 2000 if drive else 8000,
          'messages': [{'role': 'system', 'content': SYSTEM_BASE + '\n\n' + MODE_TEXT[mode]}] +
                      [{'role': m['role'], 'content': m['text']} for m in history],
          'tools': openai_tools(), 'tool_choice': 'auto'}
-    if cfg.get('openai_reasoning_effort'):      # only for reasoning models; others reject the field
-        b['reasoning_effort'] = cfg['openai_reasoning_effort']
+    eff = cfg['reasoning_effort'].get(p)
+    if eff:                                       # only for reasoning models; others reject the field
+        b['reasoning_effort'] = eff
     return b
 
 
-def ask_openai(key, cfg, mode, history, tools, opener=None):
+def _echo(msg):
+    """the assistant turn to send back: only the fields every compatible API accepts (Gemini's extra_content
+    carries its thought signatures and must come back)"""
+    m = {'role': 'assistant', 'content': msg.get('content')}
+    for k in ('tool_calls', 'extra_content'):
+        if msg.get(k): m[k] = msg[k]
+    return m
+
+
+def ask_oai(p, key, cfg, mode, history, tools, opener=None):
     headers = {'authorization': 'Bearer ' + key}
-    body = openai_body(cfg, mode, history); used = []
+    model = resolve_model(p, key, cfg, opener)
+    body = openai_body(p, model, cfg, mode, history); used = []
+    url = PROVIDERS[p]['base'] + '/chat/completions'
     for _ in range(MAX_TOOL_ROUNDS + 1):
-        r = post_json(OPENAI_URL, headers, body, 'openai', cfg['timeout'], opener)
+        try:
+            r = post_json(url, headers, body, p, cfg['timeout'], opener)
+        except ApiError as e:
+            if e.status == 404 and model_setting(p, cfg) == 'auto':
+                _AUTO.pop(p, None)                # picked model gone: pick again next time
+            raise
         ch = (r.get('choices') or [{}])[0]; msg = ch.get('message') or {}; fr = ch.get('finish_reason')
         calls = msg.get('tool_calls') or []
         if calls and len(used) < MAX_TOOL_ROUNDS * 4:
-            body['messages'].append(msg)
-            for c in calls:
+            body['messages'].append(_echo(msg))
+            for i, c in enumerate(calls):
                 fn = c.get('function') or {}; used.append(fn.get('name'))
                 try: args = json.loads(fn.get('arguments') or '{}')
                 except ValueError: args = None
                 out = tools.run(fn.get('name'), args, cfg['include_gps']) if isinstance(args, dict) else 'error: arguments were not valid JSON'
-                body['messages'].append({'role': 'tool', 'tool_call_id': c.get('id'), 'content': out})
+                body['messages'].append({'role': 'tool', 'tool_call_id': c.get('id') or 'call_%d' % i, 'content': out})
             continue
         text = (msg.get('content') or msg.get('refusal') or '').strip()
         if fr == 'length':
             text = (text + '\n(answer cut short)').strip()
-        return {'text': text or '(no answer)', 'stop': fr, 'tools': used, 'model': r.get('model')}
+        return {'text': text or '(no answer)', 'stop': fr, 'tools': used, 'model': r.get('model') or model}
     return {'text': 'Stopped: too many data lookups for one question.', 'stop': 'tool_rounds', 'tools': used}
 
 
-ASK = {'claude': ask_claude, 'openai': ask_openai}
+def ask_provider(p, key, cfg, mode, history, tools, opener=None):
+    f = ask_claude if PROVIDERS[p]['kind'] == 'claude' else ask_oai
+    return f(p, key, cfg, mode, history, tools, opener)
 
 
 def clean_history(history):
@@ -451,19 +558,19 @@ def ask(history, mode='explain', tools=None, provider=None, opener=None):
         return {'ok': False, 'error': 'nothing to answer'}
     cfg = config(); order = providers(cfg)
     if not order:
-        return {'ok': False, 'error': 'off: no API key. Put a key in %s or %s on the EON.' % (KEY_FILES['claude'], KEY_FILES['openai'])}
+        return {'ok': False, 'error': 'off: no API key. Put one in %s on the EON.' % ' or '.join(KEY_FILES[p] for p in ORDER)}
     if provider in order:
         order.remove(provider); order.insert(0, provider)
     tools = tools or DataTools(); errors = []; t0 = time.time()
     for i, p in enumerate(order):
         try:
-            r = ASK[p](read_key(p), cfg, mode, hist, tools, opener)
+            r = ask_provider(p, read_key(p), cfg, mode, hist, tools, opener)
             r.update({'ok': True, 'provider': p, 'seconds': round(time.time() - t0, 1)})
             if errors:
-                r['note'] = 'answered by %s because %s' % (p, errors[-1])
+                r['note'] = 'answered by %s because %s' % (PROVIDERS[p]['label'], errors[-1])
             return r
         except ApiError as e:
-            errors.append('%s was unavailable (%s)' % (p, e.status or 'network'))
+            errors.append('%s was unavailable (%s)' % (PROVIDERS[p]['label'], e.status or 'network'))
             if not e.retry_other or i == len(order) - 1:
                 return {'ok': False, 'error': str(e), 'provider': p}
     return {'ok': False, 'error': '; '.join(errors)}

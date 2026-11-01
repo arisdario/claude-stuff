@@ -15,7 +15,7 @@ class Fake(object):
         self.replies = list(replies); self.sent = []
 
     def __call__(self, req, timeout):
-        body = json.loads(req.data.decode())
+        body = json.loads(req.data.decode()) if req.data else None
         self.sent.append((req.full_url, dict(req.header_items()), body))
         part, status, reply = self.replies.pop(0)
         assert part in req.full_url, (part, req.full_url)
@@ -49,12 +49,14 @@ class Base(unittest.TestCase):
         self._kf, self._cf = dict(ra.KEY_FILES), ra.CONFIG_FILE
         ra.KEY_FILES['claude'] = os.path.join(self.d, 'ak'); ra.KEY_FILES['openai'] = os.path.join(self.d, 'ok')
         ra.CONFIG_FILE = os.path.join(self.d, 'cfg.json')
+        for p in ra.PROVIDERS: ra.KEY_FILES[p] = os.path.join(self.d, p + '_key')
+        ra._AUTO.clear()
 
     def tearDown(self):
         ra.KEY_FILES.update(self._kf); ra.CONFIG_FILE = self._cf
 
     def key(self, p, v='k-' + 'x' * 8):
-        open(ra.KEY_FILES[p], 'w').write(v + '\n')
+        with open(ra.KEY_FILES[p], 'w') as f: f.write(v + '\n')
 
 
 class TestOff(Base):
@@ -106,7 +108,7 @@ class TestFallover(Base):
                           'name': 'find_can_signals', 'arguments': '{"query": "bms"}'}}]}}]}),
                   ('openai', 200, {'model': 'gpt-5', 'choices': [{'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': 'BMS ok'}}]})])
         r = ra.ask([{'role': 'user', 'text': 'battery?'}], tools=tools(), opener=f)
-        self.assertTrue(r['ok']); self.assertEqual(r['provider'], 'openai'); self.assertIn('claude was unavailable', r['note'])
+        self.assertTrue(r['ok']); self.assertEqual(r['provider'], 'openai'); self.assertIn('Claude was unavailable', r['note'])
         hd = dict((k.lower(), v) for k, v in f.sent[1][1].items())
         self.assertTrue(hd['authorization'].startswith('Bearer '))
         b = f.sent[2][2]
@@ -122,6 +124,59 @@ class TestFallover(Base):
         self.key('claude'); self.key('openai')
         f = Fake([('openai', 200, {'choices': [{'finish_reason': 'stop', 'message': {'content': 'hi'}}]})])
         self.assertEqual(ra.ask([{'role': 'user', 'text': 'x'}], provider='openai', tools=tools(), opener=f)['provider'], 'openai')
+
+
+OAI_STOP = {'choices': [{'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': 'ok'}}]}
+
+
+class TestFreeProviders(Base):
+    def test_gemini_first_auto_model_and_echo(self):
+        self.key('gemini'); self.key('claude')
+        f = Fake([('generativelanguage.googleapis.com/v1beta/openai/models', 200, {'data': [
+                      {'id': 'models/gemini-2.5-flash'}, {'id': 'models/gemini-3.6-flash'}, {'id': 'models/gemini-3.6-flash-lite'},
+                      {'id': 'models/gemini-3.8-flash-image'}, {'id': 'models/gemini-2.5-pro'}]}),
+                  ('generativelanguage.googleapis.com/v1beta/openai/chat/completions', 200, {'choices': [{'finish_reason': 'tool_calls', 'message': {
+                      'role': 'assistant', 'content': None, 'reasoning': 'x', 'extra_content': {'google': {'thought_signature': 'sig'}},
+                      'tool_calls': [{'id': '', 'type': 'function', 'function': {'name': 'list_events', 'arguments': '{}'}}]}}]}),
+                  ('chat/completions', 200, OAI_STOP)])
+        r = ra.ask([{'role': 'user', 'text': 'events?'}], tools=tools(), opener=f)
+        self.assertEqual(r['provider'], 'gemini')
+        b = f.sent[1][2]
+        self.assertEqual(b['model'], 'gemini-3.6-flash'); self.assertIn('max_tokens', b)
+        echo = f.sent[2][2]['messages'][-2]
+        self.assertNotIn('reasoning', echo); self.assertEqual(echo['extra_content']['google']['thought_signature'], 'sig')
+        self.assertEqual(f.sent[2][2]['messages'][-1]['tool_call_id'], 'call_0')
+        # model list is cached: the next question asks no /models
+        f2 = Fake([('chat/completions', 200, OAI_STOP)])
+        ra.ask([{'role': 'user', 'text': 'x'}], tools=tools(), opener=f2)
+        self.assertEqual(len(f2.sent), 1)
+
+    def test_groq_rate_limited_goes_on(self):
+        self.key('groq'); self.key('grok')
+        f = Fake([('api.groq.com/openai/v1/models', 200, {'data': [{'id': 'whisper-large-v3'}, {'id': 'llama-3.3-70b-versatile'}, {'id': 'openai/gpt-oss-120b'}]}),
+                  ('api.groq.com/openai/v1/chat/completions', 429, None),
+                  ('api.x.ai/v1/models', 200, {'data': [{'id': 'grok-4-1-fast-reasoning'}, {'id': 'grok-4.7'}, {'id': 'grok-4.7-fast'}, {'id': 'grok-imagine-image'}]}),
+                  ('api.x.ai/v1/chat/completions', 200, OAI_STOP)])
+        r = ra.ask([{'role': 'user', 'text': 'x'}], tools=tools(), opener=f)
+        self.assertTrue(r['ok']); self.assertEqual(r['provider'], 'grok'); self.assertIn('Groq was unavailable', r['note'])
+        self.assertEqual(f.sent[1][2]['model'], 'openai/gpt-oss-120b'); self.assertEqual(f.sent[3][2]['model'], 'grok-4.7-fast')
+
+    def test_models_list_fails_uses_fallback(self):
+        self.key('groq')
+        f = Fake([('/models', 500, None), ('chat/completions', 200, OAI_STOP)])
+        ra.ask([{'role': 'user', 'text': 'x'}], tools=tools(), opener=f)
+        self.assertEqual(f.sent[1][2]['model'], ra.PROVIDERS['groq']['fallback_model'])
+
+    def test_config_order_and_model(self):
+        self.key('gemini'); self.key('groq')
+        with open(ra.CONFIG_FILE, 'w') as fh: json.dump({'order': ['groq'], 'models': {'groq': 'my-model'}, 'reasoning_effort': {'groq': 'low'}}, fh)
+        self.assertEqual(ra.providers(), ['groq', 'gemini'])
+        f = Fake([('api.groq.com/openai/v1/chat/completions', 200, OAI_STOP)])
+        ra.ask([{'role': 'user', 'text': 'x'}], tools=tools(), opener=f)
+        self.assertEqual(f.sent[0][2]['model'], 'my-model'); self.assertEqual(f.sent[0][2]['reasoning_effort'], 'low')
+
+    def test_pick_model_nothing(self):
+        self.assertIsNone(ra.pick_model('gemini', ['models/text-embedding-004']))
 
 
 class TestData(unittest.TestCase):

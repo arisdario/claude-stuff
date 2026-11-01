@@ -2103,13 +2103,13 @@ form button{border:0;border-radius:8px;padding:0 16px;font:inherit;font-weight:6
 </style></head><body>
 <header><h1>AI assistant</h1>
 <div class="seg" id="mode"><button data-m="explain" class="on">Explain</button><button data-m="drive">Driving</button></div>
-<select id="prov" title="who answers"><option value="">Auto</option><option value="claude">Claude</option><option value="openai">ChatGPT</option></select>
+<select id="prov" title="who answers"><option value="">Auto</option></select>
 <button id="clr" style="background:none;border:1px solid var(--bd);color:var(--tx);border-radius:8px;padding:6px 10px">New chat</button>
 <div id="st">checking...</div></header>
 <div id="log"></div>
 <form id="f"><textarea id="q" placeholder="Ask about your car's data..."></textarea><button type="button" id="mic" title="speak">&#127908;</button><button id="go">Ask</button></form>
 <script>
-var H=[],MODE='explain',BUSY=false,S=null,$=function(i){return document.getElementById(i)};
+var H=[],MODE='explain',BUSY=false,S=null,LB={},$=function(i){return document.getElementById(i)};
 try{MODE=localStorage.getItem('assist_mode')||'explain';H=JSON.parse(sessionStorage.getItem('assist_h')||'[]')}catch(e){}
 function save(){try{sessionStorage.setItem('assist_h',JSON.stringify(H.slice(-20)));localStorage.setItem('assist_mode',MODE)}catch(e){}}
 function add(cls,txt,meta){var d=document.createElement('div');d.className='m '+cls;d.textContent=txt;if(meta){var s=document.createElement('span');s.className='meta';s.textContent=meta;d.appendChild(s)}$('log').appendChild(d);$('log').scrollTop=1e9;return d}
@@ -2123,7 +2123,7 @@ function ask(q){q=(q||'').trim();if(!q||BUSY)return;BUSY=true;$('go').disabled=t
  .then(function(r){return r.json()}).then(function(r){w.remove();
   if(!r.ok){H.pop();add('e',r.error||'failed');return}
   H.push({role:'assistant',text:r.text});
-  add('a',r.text,(r.provider=='openai'?'ChatGPT':'Claude')+' · '+(r.model||'')+' · '+r.seconds+' s'+(r.tools&&r.tools.length?' · looked at: '+r.tools.join(', '):'')+(r.note?' · '+r.note:''));
+  add('a',r.text,(LB[r.provider]||r.provider)+' · '+(r.model||'')+' · '+r.seconds+' s'+(r.tools&&r.tools.length?' · looked at: '+r.tools.join(', '):'')+(r.note?' · '+r.note:''));
   if(MODE=='drive')speak(r.text)})
  .catch(function(e){w.remove();H.pop();add('e','no answer: '+e)})
  .then(function(){BUSY=false;$('go').disabled=false;save()})}
@@ -2137,10 +2137,14 @@ $('mic').onclick=function(){
  S.onresult=function(e){ask(e.results[0][0].transcript)};S.onerror=function(e){add('e','voice: '+e.error)};S.onend=function(){S=null;$('mic').classList.remove('rec')};S.start()};
 fetch('/api/assist').then(function(r){return r.json()}).then(function(s){
  if(!s.enabled){$('f').style.display='none';$('st').textContent='off';var d=document.createElement('div');d.className='off';
-  d.innerHTML='The assistant is off: no API key on the EON.<br>Create a key at <b>console.anthropic.com</b> (Claude) or <b>platform.openai.com</b> (ChatGPT), then on the EON:<br><code>echo YOUR_KEY &gt; '+(s.key_files?s.key_files.claude:'/data/anthropic_api_key')+'</code> or <code>echo YOUR_KEY &gt; '+(s.key_files?s.key_files.openai:'/data/openai_api_key')+'</code><br>then reload this page. API use is billed per question, separately from the Claude or ChatGPT app subscription.';$('log').appendChild(d);return}
- var n={claude:'Claude ('+s.models.claude+')',openai:'ChatGPT ('+s.models.openai+')'};
- $('st').textContent='Read-only: it sees radarweb data, never controls the car. '+s.providers.map(function(p){return n[p]}).join(', then ')+(s.include_gps?'. GPS included.':'. GPS removed.');
- [].forEach.call($('prov').options,function(o){if(o.value&&s.providers.indexOf(o.value)<0)o.disabled=true});
+  var k=s.key_files||{};
+  d.innerHTML='The assistant is off: no API key on the EON. Get one key (or more), then on the EON put it in its file and reload this page:'+
+   '<br><br><b>Free:</b><br>Gemini: <b>aistudio.google.com</b> &rarr; Get API key<br><code>echo YOUR_KEY &gt; '+k.gemini+'</code>'+
+   '<br>Groq (very fast): <b>console.groq.com</b> &rarr; API Keys<br><code>echo YOUR_KEY &gt; '+k.groq+'</code>'+
+   '<br><br><b>Paid per question</b> (app subscriptions do not include this):<br>Claude: <b>console.anthropic.com</b> &rarr; <code>'+k.claude+'</code><br>ChatGPT: <b>platform.openai.com</b> &rarr; <code>'+k.openai+'</code><br>Grok: <b>console.x.ai</b> &rarr; <code>'+k.grok+'</code>';$('log').appendChild(d);return}
+ LB=s.labels||{};
+ $('st').textContent='Read-only: it sees radarweb data, never controls the car. Auto order: '+s.providers.map(function(p){return LB[p]+(s.models[p]&&s.models[p]!='auto'?' ('+s.models[p]+')':'')}).join(', then ')+(s.include_gps?'. GPS included.':'. GPS removed.');
+ s.providers.forEach(function(p){var o=document.createElement('option');o.value=p;o.textContent=LB[p];$('prov').appendChild(o)});
  H.forEach(function(m){add(m.role=='user'?'u':'a',m.text)})})
  .catch(function(){$('st').textContent='radarweb not reachable'});
 setMode(MODE);

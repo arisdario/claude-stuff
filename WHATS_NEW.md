@@ -90,7 +90,10 @@ diagnostics, the obstacle warnings, the recorders — is observe/advise only.
   tools: live state, interventions, trips (statistics only), diagnostics already read, CAN signal search.
   It cannot send anything to the car, start a UDS read or change settings.
 - Two modes: **Explain** (full answers) and **Driving** (one or two spoken sentences, read aloud).
-- Off until a key file exists on the EON: `/data/anthropic_api_key` (Claude) and/or `/data/openai_api_key` (ChatGPT).
-  With both, the other one answers when the first is rate-limited or down. Keys never go in the repo.
+- Five services: **Gemini** and **Groq** (free tiers), **Claude**, **ChatGPT**, **Grok** (paid per use). Off until a key
+  file exists on the EON: `/data/gemini_api_key`, `/data/groq_api_key`, `/data/anthropic_api_key`,
+  `/data/openai_api_key`, `/data/xai_api_key`. "Auto" tries them free-first; when one is rate-limited or down the next
+  answers. Gemini/Groq/Grok pick their model from the service's own model list (or set one in `/data/ai_assist.json`).
+  Keys never go in the repo.
 - GPS removed from everything sent unless `/data/ai_assist.json` has `"include_gps": true`.
-- API use is billed per question by Anthropic / OpenAI. A Claude or ChatGPT app subscription does not include it.
+- Paid APIs bill per question; app subscriptions (Claude Pro, ChatGPT Plus, SuperGrok) do not include API use.
