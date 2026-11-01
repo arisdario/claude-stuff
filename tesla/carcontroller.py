@@ -1,4 +1,5 @@
 import datetime
+import os
 from cereal import log,tesla
 from common.params import Params
 from collections import namedtuple
@@ -27,6 +28,14 @@ ANGLE_MAX_V = [410., 92., 36.]
 ANGLE_DELTA_BP = [0., 5., 15.]
 ANGLE_DELTA_V = [5., .8, .25]     # windup limit
 ANGLE_DELTA_VU = [5., 3.5, 0.8]   # unwind limit
+# LANEWIGGLE: the 0.8.3 model's path jitters much more when it cannot see lane lines (measured on a night drive: path
+# y@30m jitter 0.24 with a visible lane vs 1.52 without - 6x). That jitter reaches the wheel as a wiggle. We slew-rate
+# limit the steering command by lane confidence (max of lProb/rProb): no extra limit when a lane is visible, tightening
+# to openpilot's own windup/unwind rate when the model is blind. Kill switch: touch /data/steerdamp_off
+LANE_CONF_BP = [0.2, 0.5]          # lane confidence (max of lProb/rProb)
+LANE_DAMP_MULT = 8.0               # at 0.2 the limit is the normal windup/unwind rate; at 0.5 it is 8x (barely a limit);
+                                   # above 0.5 no limit is applied at all (current behaviour unchanged when lanes seen)
+STEERDAMP_OFF_FILE = '/data/steerdamp_off'
 #LDW WARNING LEVELS
 LDW_WARNING_1 = 0.9
 LDW_WARNING_2 = 0.5
@@ -89,6 +98,8 @@ class CarController():
     self.packer = CANPacker(dbc_name)
     self.epas_disabled = True
     self.last_angle = 0.
+    self.lane_prob = 1.0               # LANEWIGGLE: max(lProb, rProb) from pathPlan; 1.0 = confident -> no damping
+    self._steerdamp_off = False
     self.last_accel = 0.
     self.blinker = Blinker()
     self.ALCA = ALCAController(self,True,True)  # Enabled and SteerByAngle both True
@@ -390,6 +401,11 @@ class CarController():
 
     #BB disable limits to test 0.5.8
     # apply_angle = clip(apply_angle , self.last_angle - angle_rate_lim, self.last_angle + angle_rate_lim) 
+    # LANEWIGGLE: slew-rate limit the command by lane confidence. rl = angle_rate_lim (tight) when blind, LANE_DAMP_RL
+    # (no effect) when a lane is visible. Only while actually steering; disabled by /data/steerdamp_off.
+    if enable_steer_control and not self._steerdamp_off and self.lane_prob < LANE_CONF_BP[1]:
+      rl = interp(self.lane_prob, LANE_CONF_BP, [angle_rate_lim, angle_rate_lim * LANE_DAMP_MULT])
+      apply_angle = clip(apply_angle, self.last_angle - rl, self.last_angle + rl)
     # If human control, send the steering angle as read at steering wheel.
     if human_control:
       apply_angle = CS.angle_steers
@@ -430,6 +446,10 @@ class CarController():
         radarStateMsg = messaging.recv_one_or_none(self.radarState)
         alcaStateMsg = self.alcaState.receive(non_blocking=True)
         pathPlanMsg = messaging.recv_one_or_none(self.pathPlan)
+        if pathPlanMsg is not None:
+          try: self.lane_prob = max(pathPlanMsg.pathPlan.lProb, pathPlanMsg.pathPlan.rProb)   # LANEWIGGLE
+          except Exception: pass
+        self._steerdamp_off = os.path.exists(STEERDAMP_OFF_FILE)
         icCarLRMsg = self.icCarLR.receive(non_blocking=True)
         trafficeventsMsgs = None
         if self.trafficevents is not None:
