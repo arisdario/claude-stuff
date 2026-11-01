@@ -16,6 +16,7 @@
 #include <time.h>
 #include <pthread.h>
 #include "libuvc/libuvc.h"
+#include <libusb.h>
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static int frames = 0, short_frames = 0;
@@ -41,6 +42,44 @@ static void on_frame(uvc_frame_t *f, void *user) {
     if (keep && uvc_duplicate_frame(f, keep) != UVC_SUCCESS) { uvc_free_frame(keep); keep = NULL; }
   }
   pthread_mutex_unlock(&lock);
+}
+
+static void hexdump(const unsigned char *b, int n) {
+  printf("      ");
+  for (int i = 0; i < n; i++) printf("%02x%s", b[i], (i % 16 == 15 && i + 1 < n) ? "\n      " : " ");
+  printf("\n");
+}
+
+// Raw USB requests, each with libusb's exact error name: tells a cabling/power problem (everything fails) from a
+// claiming problem (only interface requests fail) from a camera that rejects UVC requests (only those fail).
+static void usb_diag(uvc_device_handle_t *devh) {
+  libusb_device_handle *h = uvc_get_libusb_handle(devh);
+  const struct libusb_version *v = libusb_get_version();
+  unsigned char b[64];
+  int r;
+  printf("\n=== raw USB requests (diagnosis), libusb %d.%d.%d ===\n", v->major, v->minor, v->micro);
+  r = libusb_control_transfer(h, 0x80, 0x06, 0x0100, 0, b, 18, 1000);          // GET_DESCRIPTOR(device), live
+  printf("standard GET_DESCRIPTOR(device)  : %s\n", r >= 0 ? "OK" : libusb_error_name(r));
+  r = libusb_control_transfer(h, 0x80, 0x00, 0, 0, b, 2, 1000);                // GET_STATUS(device)
+  printf("standard GET_STATUS(device)      : %s\n", r >= 0 ? "OK" : libusb_error_name(r));
+  for (int i = 0; i < 2; i++) {
+    int k = libusb_kernel_driver_active(h, i);
+    printf("interface %d kernel driver        : %s\n", i, k == 1 ? "YES (attached)" : k == 0 ? "none" : libusb_error_name(k));
+  }
+  r = libusb_claim_interface(h, 1);
+  printf("claim video-streaming interface 1: %s\n", r == 0 ? "OK" : libusb_error_name(r));
+  memset(b, 0, sizeof(b));
+  r = libusb_control_transfer(h, 0xA1, 0x81, 0x01 << 8, 1, b, 26, 1000);         // UVC GET_CUR, VS_PROBE_CONTROL
+  printf("UVC GET_CUR  probe (interface 1) : %s\n", r >= 0 ? "OK" : libusb_error_name(r));
+  if (r > 0) hexdump(b, r);
+  memset(b, 0, sizeof(b));
+  r = libusb_control_transfer(h, 0xA1, 0x87, 0x01 << 8, 1, b, 26, 1000);         // UVC GET_DEF, VS_PROBE_CONTROL
+  printf("UVC GET_DEF  probe (interface 1) : %s\n", r >= 0 ? "OK" : libusb_error_name(r));
+  if (r > 0) hexdump(b, r);
+  r = libusb_control_transfer(h, 0xA1, 0x81, 0x02 << 8, 0, b, 1, 1000);          // UVC GET_CUR, VC_REQUEST_ERROR_CODE
+  printf("UVC GET_CUR  error code (if 0)   : %s", r >= 0 ? "OK" : libusb_error_name(r));
+  if (r > 0) printf("  (last request error code %d)", b[0]);
+  printf("\n");
 }
 
 static void save_frame(uvc_frame_t *f) {
@@ -83,6 +122,7 @@ int main(int argc, char **argv) {
 
   printf("=== camera and its modes ===\n");
   uvc_print_diag(devh, stdout);
+  usb_diag(devh);
 
   // the two controls a road camera needs: steady frame rate at night, and no focus hunting
   printf("\n=== road-camera controls ===\n");
@@ -94,6 +134,7 @@ int main(int argc, char **argv) {
   enum uvc_frame_format fmts[] = {UVC_FRAME_FORMAT_MJPEG, UVC_FRAME_FORMAT_YUYV};
   const char *names[] = {"MJPEG", "YUYV"};
   int k;
+  memset(&ctrl, 0, sizeof(ctrl));
   for (k = 0; k < 2; k++)
     if (uvc_get_stream_ctrl_format_size(devh, &ctrl, fmts[k], w, h, fps) == UVC_SUCCESS) break;
   if (k == 2) {
