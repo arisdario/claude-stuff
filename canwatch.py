@@ -5,8 +5,9 @@ canwatch.py - find which CAN bits follow something you switch by hand (e.g. high
   cd /data/openpilot && PYTHONPATH=/data/openpilot python3 /data/claude-stuff/canwatch.py
   (radarweb or openpilot can keep running: this only subscribes to the 'can' messages boardd already publishes)
 
-Start with the thing OFF. Each time you press Enter you switch it (OFF -> ON -> OFF ...): press Enter, then switch it
-within a second. Do at least 3 ON and 3 OFF phases of 3-5 s each. Type q + Enter to finish.
+Default: the high-beam stalk (0x45 HiBmLvr_Stat) sets the phases by itself - push it to high beam, hold ~5 s, back to
+normal ~5 s, three times, then q + Enter. With --manual you press Enter each time you switch something else by hand
+(OFF -> ON -> OFF ...), at least 3 ON and 3 OFF phases of 3-5 s each.
 Prints every bit (per bus and ID) that was steady in each phase and different between ON and OFF phases - the signals
 that follow your switch - plus multi-bit fields whose values never overlap. Saves the result to /data/canwatch_*.json.
 Frames sent by the panda itself (bus >= 128) are ignored.
@@ -20,12 +21,14 @@ SETTLE = 1.0          # s ignored after each Enter (time to move the stalk, ligh
 MIN_PHASES = 2        # each of ON and OFF at least this many times
 STEADY = 0.97         # share of frames a bit must keep its value within a phase
 LOOSE = 0.75          # 'weaker matches': mostly follows (e.g. the switch was late in a phase)
+STALK_FIELD = (0, 0x45, 18, 2, 1)   # default phase switch: STW_ACTN_RQ HiBmLvr_Stat == 1 (high beam pushed)
 STALK = (0, 0x45, 18) # STW_ACTN_RQ HiBmLvr_Stat low bit: shown per phase as a check that the phases match the stalk
 
 
 class Watch(object):
-  def __init__(self):
-    self.segments = []            # [{'on': bool, 't0': start, 'frames': {(bus, addr): [values...]}}]
+  def __init__(self, follow=None):
+    self.segments = []            # [{'on': bool, 't0': start, 'frames': {(bus, addr): [longest, {value: count}]}}]
+    self.follow = follow          # (bus, addr, start bit, length, on value): phases switch when this field changes
     self.new_segment(False, 0.0)
 
   def new_segment(self, on, t):
@@ -37,6 +40,12 @@ class Watch(object):
   def add(self, bus, addr, dat, t):
     if bus >= 128:
       return
+    f = self.follow
+    if f and bus == f[0] and addr == f[1]:
+      on = ((int.from_bytes(dat, 'little') >> f[2]) & ((1 << f[3]) - 1)) == f[4]
+      if on != self.segments[-1]['on']:
+        self.toggle(t)
+        print('  -> stalk %s (phase %d)' % ('HIGH BEAM' if on else 'normal', len(self.segments))); sys.stdout.flush()
     seg = self.segments[-1]
     if t - seg['t0'] < SETTLE and len(self.segments) > 1:
       return
@@ -130,18 +139,25 @@ def save(r, t_start):
 def main():
   import traceback
   import cereal.messaging as messaging
-  w = Watch(); lock = threading.Lock(); done = [False]
+  manual = '--manual' in sys.argv
+  w = Watch(None if manual else STALK_FIELD); lock = threading.Lock(); done = [False]
   sock = messaging.sub_sock('can')
   def keys():
     while True:
       line = sys.stdin.readline()
       if not line or line.strip().lower() == 'q':
         done[0] = True; return
-      with lock:
-        w.toggle(time.time())
-        print('  -> phase %d: now switch it %s' % (len(w.segments), 'ON' if w.segments[-1]['on'] else 'OFF')); sys.stdout.flush()
+      if manual:
+        with lock:
+          w.toggle(time.time())
+          print('  -> phase %d: now switch it %s' % (len(w.segments), 'ON' if w.segments[-1]['on'] else 'OFF')); sys.stdout.flush()
   threading.Thread(target=keys, daemon=True).start()
-  print('recording, thing is OFF. Enter = switch, q + Enter (or Ctrl+C) = finish'); sys.stdout.flush()
+  if manual:
+    print('recording, thing is OFF. Enter = switch, q + Enter (or Ctrl+C) = finish')
+  else:
+    print('recording. The high-beam stalk sets the phases: push it to high beam, hold ~5 s, back to normal, ~5 s - '
+          'three times. Then q + Enter (or Ctrl+C)')
+  sys.stdout.flush()
   t_start = time.time(); frames = 0
   try:
     while not done[0]:

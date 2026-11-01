@@ -33,6 +33,19 @@ class T(unittest.TestCase):
     self.assertFalse(any(b['id'] == '0x2A0' and b['byte'] == 0 for b in r['bits']))     # counter bits
     self.assertIn({'bus': 0, 'id': '0x400', 'byte': 0, 'on_values': ['a0'], 'off_values': ['05']}, r['bytes'])
 
+  def test_stalk_sets_phases(self):
+    w = cw.Watch(cw.STALK_FIELD); t = 0.0
+    for p in range(7):
+      for i in range(50):
+        t += 0.1; up = p % 2 == 1
+        w.add(0, 0x45, bytes([0x40, 0xff, 0x04 if up else 0x00, 0, 0, 0, (i << 4) & 0xF0, i]), t)
+        lamp = up if i >= 3 else not up if p else False                  # lamp follows 0.3 s later
+        w.add(0, 0x2B0, bytes([0x20 if lamp else 0x00, i & 0xFF]), t)
+    r = w.analyse()
+    self.assertEqual(r['phases'], {'on': 3, 'off': 4})
+    found = set((b['id'], b['byte'], b['bit']) for b in r['bits'])
+    self.assertIn(('0x45', 2, 2), found); self.assertIn(('0x2B0', 0, 5), found)
+
   def test_needs_enough_phases(self):
     self.assertIn('error', run(phases=3))
 
