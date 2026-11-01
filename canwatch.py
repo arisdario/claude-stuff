@@ -86,7 +86,18 @@ def report(r):
     print('  bus %d  %-6s byte %d   ON values %s   OFF values %s' % (f['bus'], f['id'], f['byte'], ' '.join(f['on_values']), ' '.join(f['off_values'])))
 
 
+def save(r, t_start):
+  fn = '/data/canwatch_%s.json' % time.strftime('%Y%m%d_%H%M%S')
+  try:
+    with open(fn, 'w') as f:
+      json.dump(r, f, indent=1)
+    print('saved %s (%.0f s recorded)' % (fn, time.time() - t_start))
+  except Exception as e:
+    print('NOT saved to %s: %s' % (fn, e))
+
+
 def main():
+  import traceback
   import cereal.messaging as messaging
   w = Watch(); lock = threading.Lock(); done = [False]
   sock = messaging.sub_sock('can')
@@ -97,27 +108,30 @@ def main():
         done[0] = True; return
       with lock:
         w.toggle(time.time())
-        print('  -> now switch it %s' % ('ON' if w.segments[-1]['on'] else 'OFF')); sys.stdout.flush()
+        print('  -> phase %d: now switch it %s' % (len(w.segments), 'ON' if w.segments[-1]['on'] else 'OFF')); sys.stdout.flush()
   threading.Thread(target=keys, daemon=True).start()
-  print('recording, thing is OFF. Enter = switch, q + Enter = finish')
-  t_start = time.time()
-  while not done[0]:
-    for msg in messaging.drain_sock(sock):
-      t = time.time()
-      with lock:
-        for c in msg.can:
-          w.add(c.src, c.address, bytes(c.dat), t)
-    time.sleep(0.01)
-  with lock:
-    r = w.analyse()
-  report(r)
-  fn = '/data/canwatch_%s.json' % time.strftime('%Y%m%d_%H%M%S')
+  print('recording, thing is OFF. Enter = switch, q + Enter (or Ctrl+C) = finish'); sys.stdout.flush()
+  t_start = time.time(); frames = 0
   try:
-    with open(fn, 'w') as f:
-      json.dump(r, f, indent=1)
-    print('saved %s (%.0f s recorded)' % (fn, time.time() - t_start))
-  except Exception as e:
-    print('not saved:', e)
+    while not done[0]:
+      for msg in messaging.drain_sock(sock):
+        t = time.time()
+        with lock:
+          for c in msg.can:
+            w.add(c.src, c.address, bytes(c.dat), t); frames += 1
+      time.sleep(0.01)
+  except KeyboardInterrupt:
+    print('\nstopped')
+  print('%d CAN frames received' % frames + ('  <- none: is boardd running (openpilot started, panda connected)?' if not frames else ''))
+  try:
+    with lock:
+      r = w.analyse()
+    report(r)
+  except Exception:
+    traceback.print_exc()
+    r = {'error': traceback.format_exc()}
+  r['frames_received'] = frames
+  save(r, t_start)
 
 
 if __name__ == '__main__':
