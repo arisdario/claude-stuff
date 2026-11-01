@@ -19,6 +19,8 @@ import time
 SETTLE = 1.0          # s ignored after each Enter (time to move the stalk, light controller reaction)
 MIN_PHASES = 2        # each of ON and OFF at least this many times
 STEADY = 0.97         # share of frames a bit must keep its value within a phase
+LOOSE = 0.75          # 'weaker matches': mostly follows (e.g. the switch was late in a phase)
+STALK = (0, 0x45, 18) # STW_ACTN_RQ HiBmLvr_Stat low bit: shown per phase as a check that the phases match the stalk
 
 
 class Watch(object):
@@ -53,7 +55,7 @@ class Watch(object):
     keys = set(segs[0]['frames'])
     for s in segs[1:]:
       keys &= set(s['frames'])      # only IDs seen in every phase
-    bits, fields = [], []
+    bits, fields, loose = [], [], []
     for key in sorted(keys):
       n = max(s['frames'][key][0] for s in segs)
       all_or, all_and = 0, (1 << (8 * n)) - 1
@@ -75,6 +77,9 @@ class Watch(object):
           bits.append({'bus': key[0], 'id': '0x%X' % key[1], 'byte': b // 8, 'bit': b % 8, 'on': 1, 'off': 0})
         elif max(on_v) <= 1 - STEADY and min(off_v) >= STEADY:
           bits.append({'bus': key[0], 'id': '0x%X' % key[1], 'byte': b // 8, 'bit': b % 8, 'on': 0, 'off': 1})
+        elif (min(on_v) >= LOOSE and max(off_v) <= 1 - LOOSE) or (max(on_v) <= 1 - LOOSE and min(off_v) >= LOOSE):
+          loose.append({'bus': key[0], 'id': '0x%X' % key[1], 'byte': b // 8, 'bit': b % 8,
+                        'on_share': [round(x, 2) for x in on_v], 'off_share': [round(x, 2) for x in off_v]})
       for byte in sorted(set(b // 8 for b in cand)):    # whole bytes whose ON values and OFF values never overlap
         on_set = set(); off_set = set()
         for s in segs:
@@ -83,7 +88,14 @@ class Watch(object):
         if on_set and off_set and not (on_set & off_set) and len(on_set | off_set) <= 8:
           fields.append({'bus': key[0], 'id': '0x%X' % key[1], 'byte': byte,
                          'on_values': sorted('%02x' % v for v in on_set), 'off_values': sorted('%02x' % v for v in off_set)})
-    return {'phases': {'on': len(ons), 'off': len(offs)}, 'ids_compared': len(keys), 'bits': bits, 'bytes': fields}
+    stalk = []
+    for s in segs:
+      e = s['frames'].get(STALK[:2])
+      if e:
+        tot = float(sum(e[1].values()))
+        stalk.append(('ON ' if s['on'] else 'OFF') + ' %.0f%%' % (100 * sum(c for v, c in e[1].items() if (v >> STALK[2]) & 1) / tot))
+    return {'phases': {'on': len(ons), 'off': len(offs)}, 'ids_compared': len(keys), 'bits': bits, 'bytes': fields,
+            'loose': loose, 'stalk_high_share_per_phase': stalk}
 
 
 def report(r):
@@ -97,6 +109,12 @@ def report(r):
         b['bus'], b['id'], b['byte'], b['bit'], b['on'], b['off'], b['byte'] * 8 + b['bit']))
   for f in r['bytes']:
     print('  bus %d  %-6s byte %d   ON values %s   OFF values %s' % (f['bus'], f['id'], f['byte'], ' '.join(f['on_values']), ' '.join(f['off_values'])))
+  if r.get('loose'):
+    print('weaker matches (share of frames with the bit = 1, per phase):')
+    for b in r['loose'][:40]:
+      print('  bus %d  %-6s byte %d bit %d   ON %s   OFF %s' % (b['bus'], b['id'], b['byte'], b['bit'], b['on_share'], b['off_share']))
+  if r.get('stalk_high_share_per_phase'):
+    print('check - stalk in high-beam position (0x45 HiBmLvr_Stat), share of each phase: ' + ', '.join(r['stalk_high_share_per_phase']))
 
 
 def save(r, t_start):
