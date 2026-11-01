@@ -52,8 +52,11 @@ def trip(path):
         if lat is None or lon is None or abs(lat) < 0.1 or abs(lat) > 90 or abs(lon) > 180: continue   # no fix yet
         if t_first is None: t_first = t
         kmh = round(v * 3.6, 1)
+        hb = None                                   # high beam: 0x30A byte 0 bit 3 (light status, not in the DBC)
+        try: hb = (int((r.get('raw') or {}).get('0x30a', '').split()[0], 16) >> 3) & 1
+        except (IndexError, ValueError, AttributeError): pass
         pts.append([round(t, 1), round(lat, 6), round(lon, 6), kmh, lim if lim else None, 1 if r.get('acc') else 0,
-                    1 if r.get('alc') else 0, round(acc, 1) if acc is not None else None])
+                    1 if r.get('alc') else 0, round(acc, 1) if acc is not None else None, hb])
         # stops
         if v < 0.5:
             if stop0 is None: stop0 = (t, lat, lon)
@@ -94,7 +97,7 @@ def trip(path):
                          o.get('rc'), (o['ml'] or {}).get('c') if isinstance(o.get('ml'), dict) else o.get('ml')])
     if stop0 and pts and pts[-1][0] - stop0[0] >= 5: stops.append([round(stop0[0], 1), stop0[1], stop0[2], round(pts[-1][0] - stop0[0])])
     return {'file': os.path.basename(path), 'rows': n, 'points': pts, 'objects': objs, 'stops': stops,
-            'cols': {'points': ['t', 'lat', 'lon', 'kmh', 'limit', 'acc', 'op', 'gps_acc'],
+            'cols': {'points': ['t', 'lat', 'lon', 'kmh', 'limit', 'acc', 'op', 'gps_acc', 'high_beam'],
                      'objects': ['t', 'lat', 'lon', 'kind', 'd', 'y', 'ground_kmh', 'side_kmh', 'radar_class', 'model'],
                      'stops': ['t', 'lat', 'lon', 'seconds']}}
 

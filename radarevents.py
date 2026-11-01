@@ -91,6 +91,8 @@ def sample(st, now):
        'acc': bool(st.get('acc')), 'tq': tq, 'sp': bool(drv.get('sp')), 'br': bool(drv.get('br')),
        'gas': bool(drv.get('gas')), 'hands': drv.get('hands'), 'c': clearances(st)}
   s['steer'] = tq is not None and abs(tq) >= STEER_TQ_NM          # a real correction, not resting hands
+  b = st.get('beam')
+  if b and now - (b.get('t') or 0) < 2: s['hb'] = b.get('hi')        # high beam on (0x30A light status)
   if p: s['path'] = [round(poly_y(p, x), 2) for x in (0, 10, 20, 40)]
   if l: s['lane_l'] = [round(poly_y(l, x), 2) for x in (0, 10, 20, 40)] + [md.get('pl')]
   if r: s['lane_r'] = [round(poly_y(r, x), 2) for x in (0, 10, 20, 40)] + [md.get('pr')]

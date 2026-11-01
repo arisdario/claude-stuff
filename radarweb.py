@@ -148,7 +148,10 @@ OBJFULL = {}; SNAP = [None, 0.0]; TICK = [0]
 # on every frame - radar objects/status, the IDs decoded in the loop, multiplexed messages. All others just get counted,
 # and their latest bytes (for /map and the log) refreshed twice a second.
 HOT = set([0x108, 0x2F8, 0x32E, 0x33E, 0x102, 0x302, 0x382, 0x212, 0x232, 0x3D2, 0x754, 0x51E, 0x6F2, 0x300, 0x301, 0x501,
-           0x155, 0x370])   # 0x155 ESP_B: 8-bit wheel pulse counters wrap several times a second - every frame counts; 0x370 EPAS | set(range(0x310, 0x36F)) | set(MUXINFO)
+           0x155, 0x370, 0x30A]) | set(range(0x310, 0x36F)) | set(MUXINFO)
+# 0x155 ESP_B: 8-bit wheel pulse counters wrap several times a second - every frame counts; 0x370 EPAS torque;
+# 0x30A light status (high beam). 0x310-0x36E: radar objects. (Keep comments off this line: a comment once swallowed the
+# radar range and radar objects were handled only twice a second.)
 RAWDUE = [0.0]; SUBDUE = [0.0]
 # radar_decode: radarml.decode_pair decodes each object frame pair once (radarlog's decode_a/decode_b + decode_ab did it
 # twice, bit by bit). It is only trusted after it gave exactly radarlog's values for the first DEC_CHECK object frames
@@ -426,6 +429,8 @@ def _worker(prof=None):
                         _vb = int.from_bytes(r[2], 'little'); _raw = int(round(_dec(_vb, 8, 19, 12, False, 1, 0, 0)))
                         EPAS_TQ[0] = None if _raw >= 4094 else round(_raw * 0.01 - 20.5, 2); EPAS_TQ[1] = now
                     except Exception: pass
+                if a == 0x30A and ld >= 1 and m.src == 0:      # light status (not in any DBC, found with canwatch.py): byte 0 bit 3 = high beam on, bit 2 = flash
+                    STATE['beam'] = {'hi': (r[2][0] >> 3) & 1, 'fl': (r[2][0] >> 2) & 1, 't': round(now, 2)}
                 if a == 0x108 and ld == 8 and m.src != RADAR_SRC:      # DI_torque1: motor torque Nm (16|13, 0.25), rpm (32|16), pedal % (48|8, 0.4)
                     try:
                         _v = int.from_bytes(r[2], 'little'); _t = (_v >> 16) & 0x1FFF; _w = (_v >> 32) & 0xFFFF
@@ -1919,6 +1924,8 @@ function draw(){var G=geom(),pal=PAL;g.clearRect(0,0,G.W,G.H);if(!S||!V)return;
  var cv=typeof S.curve=='number'?S.curve:null,chips=[];   /* curve = the camera curve speed PCC holds (m/s) */
  if(eng)chips.push(['openpilot',AP_BLUE,'#fff',null]);else if(cru)chips.push(['cruise',null,pal.tx,pal.sub]);
  if(cv!=null&&(eng||cru)&&cv*3.6<(S.cruise||999)-3)chips.push(['curve '+Math.round(cv*(MPH?2.236936:3.6)),null,pal.warn,pal.warn]);
+ var bm=S.beam&&S.t-S.beam.t<2?S.beam:null;   /* high beam / flash from the car's light status (0x30A) */
+ if(bm&&(bm.hi||bm.fl))chips.push([bm.hi?'high beam':'flash','#1f6feb','#fff',null]);
  if(chips.length){var cf=Math.round(G.H*.024),ch,cyy=G.H*.232,tot,ws,cx0;
   function meas(){g.font='700 '+cf+'px system-ui';tot=-8;ws=chips.map(function(c){var w=g.measureText(c[0].toUpperCase()).width+cf*1.4;tot+=w+8;return w})}
   meas();if(signL!=null&&G.cx+tot/2>signL-6){cf=Math.max(Math.round(G.H*.016),Math.floor(cf*2*(signL-6-G.cx)/tot));meas()}   /* fit between the edges, clear of the sign */
