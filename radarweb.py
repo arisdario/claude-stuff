@@ -1676,7 +1676,7 @@ def recal_start():
 EVENTS = r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>Interventions</title>
 <link rel=stylesheet href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script><script src="/tiles.js"></script>
 <style>
 :root{--bg:#0d0f12;--card:#161a1f;--line:#2a2f36;--fg:#e8edf2;--mut:#8b949e;--blue:#3d8bff;--org:#f5a524;--red:#e5484d;--grn:#2fbf71}
 html,body{margin:0;background:var(--bg);color:var(--fg);font:14px system-ui,Segoe UI,Roboto,sans-serif}
@@ -1713,7 +1713,7 @@ function table(){var h='<tr><th>when</th><th>what</th><th>cause</th><th>side</th
  if(!ROWS.length)h+='<tr><td colspan=12 class=empty>Nothing yet. Events appear here when you correct the steering, disengage, pass close to a curb/wall, or press Mark on /dash.</td></tr>';
  ROWS.forEach(function(e,i){var m=e.min_clear||{};h+='<tr class="ev'+(SEL==i?' sel':'')+'" onclick="pick('+i+')"><td>'+e.time+'</td><td><span class=tag style="background:'+(COL[e.type]||'#888')+'">'+(NAME[e.type]||e.type)+'</span></td><td>'+(e.cause||'')+(e.disengaged?' + off ('+e.disengaged+')':'')+'</td><td>'+(e.side||'-')+'</td><td>'+e.kmh+'</td><td>'+f2(minside(m,'l'))+'</td><td>'+f2(minside(m,'r'))+'</td>'+(function(a){return a&&a.hazard?'<td>'+sb(a.radar_saw)+'</td><td>'+sb(a.op_lead)+'</td><td'+(a.late?' style="color:#e5484d;font-weight:600"':'')+'>'+sb(a.op_slowed)+'</td><td>'+sb(a.warned)+'</td>':'<td colspan=4 class=mut>no object in path</td>'})(e.analysis)+'<td class=mut>'+((e.video||[]).join(', ')||'-')+'</td></tr>'});
  document.getElementById('tb').innerHTML=h}
-function pins(){if(typeof L=='undefined')return;if(!map){map=L.map('map');L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:19,subdomains:'abcd',attribution:'&copy; OpenStreetMap &copy; CARTO'}).addTo(map);LAY=L.layerGroup().addTo(map)}
+function pins(){if(typeof L=='undefined')return;if(!map){map=L.map('map');L.tileLayer(RWT.url(false),{maxZoom:19,subdomains:'abcd',attribution:RWT.attr}).addTo(map);LAY=L.layerGroup().addTo(map)}
  LAY.clearLayers();var b=[];ROWS.forEach(function(e,i){if(!e.gps)return;var ll=[e.gps[0],e.gps[1]];b.push(ll);L.circleMarker(ll,{radius:7,color:COL[e.type]||'#888',fillOpacity:.8}).on('click',function(){pick(i)}).bindTooltip(e.time+' '+(NAME[e.type]||e.type)).addTo(LAY)});
  if(b.length)map.fitBounds(b,{padding:[30,30],maxZoom:16});else map.setView([0,0],2)}
 function pick(i){SEL=i;table();summary();var e=ROWS[i];fetch('/api/event?f='+encodeURIComponent(e.file)).then(function(r){return r.json()}).then(function(ev){chart(ev)});if(map&&e.gps)map.setView([e.gps[0],e.gps[1]],17)}
@@ -1745,7 +1745,7 @@ load();setInterval(load,15000);addEventListener('resize',function(){if(SEL!=null
 DASH = r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,user-scalable=no">
 <title>Instrument view</title>
 <link rel=stylesheet href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script><style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script><script src="/tiles.js"></script><style>
 html,body{margin:0;height:100%;background:#0a0b0d;overflow:hidden;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;color:#e8edf2;-webkit-user-select:none;user-select:none}
 #c{display:block;position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:1;pointer-events:none}
 #map{position:fixed;left:0;top:0;width:50vw;height:100vh;z-index:0;background:#0a0b0d;opacity:0;transition:opacity 1.2s;
@@ -1790,7 +1790,7 @@ var DAY=false,PAL=PALS.night,TILES=null,MAPL=null;
 function isDay(){if(THEME!='auto')return THEME=='day';var el=S&&S.sun&&typeof S.sun.el=='number'?S.sun.el:null;
  if(el!=null)return DAY?el>-1:el>3;   /* hysteresis: day above 3 deg, back to night below -1 deg */
  var h=new Date().getHours();return h>=7&&h<19}
-function tileUrl(){return 'https://{s}.basemaps.cartocdn.com/'+(DAY?'light_all':'dark_all')+'/{z}/{x}/{y}{r}.png'}
+function tileUrl(){return RWT.url(DAY)}
 function themeUI(){var a=document.getElementById('themesw');if(a)a.textContent='theme: '+THEME+(THEME=='auto'?' ('+(DAY?'day':'night')+')':'')}
 function themeApply(force){var d=isDay();if(d===DAY&&!force)return;DAY=d;PAL=PALS[d?'day':'night'];document.documentElement.classList.toggle('day',d);if(MAPL&&TILES)TILES.setUrl(tileUrl());themeUI()}
 function themeCycle(){THEME=THEME=='auto'?'day':THEME=='day'?'night':'auto';try{localStorage.setItem('dashtheme',THEME)}catch(e){}themeApply(true);return false}
@@ -1964,13 +1964,13 @@ function draw(){var G=geom(),pal=PAL;g.clearRect(0,0,G.W,G.H);if(!S||!V)return;
  else if(Date.now()-DISENG<2500)banner={t:'openpilot disengaged',c:pal.warn};
  if(banner){var bw3=Math.min(G.W*.7,560),bh3=G.H*.075,bx3=G.cx-bw3/2,by3=G.H*.275;pill(bx3,by3,bw3,bh3,pal.pill,banner.c);g.fillStyle=banner.c;g.textAlign='center';g.font='700 '+Math.round(bh3*.42)+'px system-ui';g.fillText(banner.t,G.cx,by3+bh3*.64)}
 }
-/* left map: CARTO dark tiles (OpenStreetMap data), follows the car (1 Hz fix from MCU_locationStatus), red arrow + blue trail of where you drove */
+/* left map: CARTO tiles with a key in /data/carto_api_key, else OpenStreetMap darkened at night (/tiles.js), follows the car (1 Hz fix from MCU_locationStatus), red arrow + blue trail of where you drove */
 var MK=null,TL=null,TRK=[],LASTLL=null;
 /* portrait: the map is behind the speed and the road; put the car marker in the free space on the left, not the middle */
 function mapCenter(ll,z){ll=L.latLng(ll);if(innerWidth/innerHeight>1.1)return ll;var off=L.point(innerWidth*.16,innerHeight*.37).subtract(MAPL.getSize().divideBy(2));return MAPL.unproject(MAPL.project(ll,z).subtract(off),z)}
 function mapUpd(gp){if(!gp||typeof L=='undefined')return;var md=document.getElementById('map');
  if(!MAPL){MAPL=L.map('map',{zoomControl:false,dragging:false,scrollWheelZoom:false,doubleClickZoom:false,boxZoom:false,keyboard:false,touchZoom:false,tap:false});
-  TILES=L.tileLayer(tileUrl(),{maxZoom:19,subdomains:'abcd',attribution:'&copy; OpenStreetMap &copy; CARTO'}).addTo(MAPL);
+  TILES=L.tileLayer(tileUrl(),{maxZoom:19,subdomains:'abcd',attribution:RWT.attr}).addTo(MAPL);
   TL=L.polyline([],{color:'#1f7bff',weight:7,opacity:.9,lineCap:'round'}).addTo(MAPL);
   MK=L.marker([gp.lat,gp.lon],{icon:L.divIcon({className:'',html:'<div id=arrow></div>',iconSize:[20,26],iconAnchor:[10,15]}),interactive:false}).addTo(MAPL);
   MAPL.setView(mapCenter([gp.lat,gp.lon],16),16,{animate:false});md.classList.add('on')}
@@ -2068,6 +2068,22 @@ def uds_start(q):
         for a_, n_, b_ in radaruds.target_list(): radaruds.plan_dtcs(UDSC, a_, b_)
     else: return {'ok': False, 'msg': 'unknown request'}
     return {'ok': True, 'queued': len(UDSC.queue)}
+
+
+CARTO_KEY_FILE = '/data/carto_api_key'
+
+
+def tiles_js():
+    """/tiles.js: map tile source for /dash and /events. CARTO's dark/light maps need a (free) key since 2026; without
+    /data/carto_api_key the pages use the standard OpenStreetMap tiles, colour-inverted at night."""
+    try: key = open(CARTO_KEY_FILE).read().strip()
+    except Exception: key = ''
+    return ('window.RWT=(function(k){return{osm:!k,attr:k?"&copy; OpenStreetMap &copy; CARTO":"&copy; OpenStreetMap contributors",'
+            'url:function(day){return k?"https://{s}.basemaps.cartocdn.com/"+(day?"light_all":"dark_all")+"/{z}/{x}/{y}{r}.png?key="+encodeURIComponent(k)'
+            ':"https://tile.openstreetmap.org/{z}/{x}/{y}.png"}}})(%s);\n'
+            'if(RWT.osm){document.documentElement.classList.add("osmt");var st=document.createElement("style");'
+            'st.textContent="html.osmt:not(.day) #map .leaflet-tile{filter:invert(1) hue-rotate(180deg) brightness(.85) contrast(.9) saturate(.6)!important}'
+            'html.osmt.day #map .leaflet-tile{filter:none!important}";document.head.appendChild(st)}\n') % json.dumps(key)
 
 
 def _assist_tools():
@@ -2203,6 +2219,8 @@ class H(BaseHTTPRequestHandler):
         if not self._authed(): return
         if self.path == '/api/uds':
             self._json(uds_status())
+        elif self.path == '/tiles.js':
+            b = tiles_js().encode(); self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.send_header('Cache-Control', 'no-cache'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path == '/api/assist':
             self._json(radarassist.status() if radarassist else {'enabled': False, 'providers': [], 'error': 'radarassist.py not found'})
         elif self.path.split('?')[0] == '/assist':
