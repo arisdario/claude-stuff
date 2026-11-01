@@ -115,10 +115,13 @@ class TestFallover(Base):
         self.assertEqual(b['messages'][0]['role'], 'system'); self.assertEqual(b['messages'][-1]['role'], 'tool')
         self.assertIn('BMS_state', b['messages'][-1]['content'])
 
-    def test_auth_error_does_not_fall_over(self):
+    def test_refused_key_falls_over_and_last_error_shown(self):
         self.key('claude'); self.key('openai')
-        r = ra.ask([{'role': 'user', 'text': 'x'}], tools=tools(), opener=Fake([('anthropic', 401, None)]))
-        self.assertFalse(r['ok']); self.assertEqual(r['provider'], 'claude')
+        f = Fake([('anthropic', 401, None), ('openai', 403, None)])
+        r = ra.ask([{'role': 'user', 'text': 'x'}], tools=tools(), opener=f)
+        self.assertFalse(r['ok']); self.assertIn('Claude: 401', r['error']); self.assertIn('ChatGPT: 403', r['error'])
+        hd = dict((k.lower(), v) for k, v in f.sent[0][1].items())
+        self.assertEqual(hd['user-agent'], ra.USER_AGENT)
 
     def test_chosen_provider_first(self):
         self.key('claude'); self.key('openai')

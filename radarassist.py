@@ -58,6 +58,7 @@ MAX_TOOL_ROUNDS = 6
 MAX_TOOL_CHARS = 24000
 MAX_HISTORY = 20            # text turns kept from the page
 RETRY_STATUS = (408, 409, 429, 500, 502, 503, 504, 529)
+USER_AGENT = 'radarweb-assistant/1.0'   # Python's default "Python-urllib/x" is blocked (403) by some API front ends (Cloudflare)
 
 GPS_KEYS = {'gps', 'lat', 'lon', 'lng', 'latitude', 'longitude', 'hdg', 'heading', 'MCU_latitude', 'MCU_longitude',
             'MCU_gpsAccuracy', 'MCU_elevation', 'gps_acc'}
@@ -326,8 +327,23 @@ class ApiError(Exception):
         self.provider, self.status, self.msg = provider, status, msg
 
     @property
-    def retry_other(self):        # rate limit / overload / server or network trouble: worth trying the other provider
-        return self.status is None or self.status in RETRY_STATUS
+    def retry_other(self):        # any failure of one service (busy, down, bad key, blocked region): try the next one
+        return True
+
+
+def _http_error(provider, e):
+    try:
+        raw = e.read().decode('utf8', 'replace')
+    except Exception:
+        raw = ''
+    try:
+        d = json.loads(raw); err = d.get('error')
+        m = (err.get('message') if isinstance(err, dict) else err) or str(d)
+    except Exception:
+        import re as _re
+        t = _re.sub(r'<[^>]+>', ' ', raw); t = ' '.join(t.split())[:200]       # e.g. a Cloudflare block page
+        m = '%s%s' % (e.reason, (' - ' + t) if t else '')
+    return ApiError(provider, e.code, m)
 
 
 def _ssl_ctx():
@@ -340,7 +356,7 @@ def _ssl_ctx():
 
 def post_json(url, headers, body, provider, timeout=90, opener=None):
     req = urllib.request.Request(url, data=json.dumps(body).encode('utf8'), method='POST',
-                                 headers=dict(headers, **{'content-type': 'application/json'}))
+                                 headers=dict(headers, **{'content-type': 'application/json', 'user-agent': USER_AGENT}))
     try:
         if opener is not None:
             raw = opener(req, timeout)
@@ -349,11 +365,7 @@ def post_json(url, headers, body, provider, timeout=90, opener=None):
                 raw = r.read()
         return json.loads(raw.decode('utf8'))
     except urllib.error.HTTPError as e:
-        try:
-            d = json.loads(e.read().decode('utf8', 'replace')); m = (d.get('error') or {}).get('message') or str(d)
-        except Exception:
-            m = e.reason
-        raise ApiError(provider, e.code, m)
+        raise _http_error(provider, e)
     except urllib.error.URLError as e:
         raise ApiError(provider, None, 'cannot reach the API (%s) - is the EON online?' % e.reason)
     except (OSError, ValueError) as e:
@@ -361,7 +373,7 @@ def post_json(url, headers, body, provider, timeout=90, opener=None):
 
 
 def get_json(url, headers, provider, timeout=20, opener=None):
-    req = urllib.request.Request(url, headers=headers)
+    req = urllib.request.Request(url, headers=dict(headers, **{'user-agent': USER_AGENT}))
     try:
         if opener is not None:
             raw = opener(req, timeout)
@@ -370,7 +382,7 @@ def get_json(url, headers, provider, timeout=20, opener=None):
                 raw = r.read()
         return json.loads(raw.decode('utf8'))
     except urllib.error.HTTPError as e:
-        raise ApiError(provider, e.code, e.reason)
+        raise _http_error(provider, e)
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise ApiError(provider, None, str(e))
 
@@ -561,7 +573,7 @@ def ask(history, mode='explain', tools=None, provider=None, opener=None):
         return {'ok': False, 'error': 'off: no API key. Put one in %s on the EON.' % ' or '.join(KEY_FILES[p] for p in ORDER)}
     if provider in order:
         order.remove(provider); order.insert(0, provider)
-    tools = tools or DataTools(); errors = []; t0 = time.time()
+    tools = tools or DataTools(); errors = []; fails = []; t0 = time.time()
     for i, p in enumerate(order):
         try:
             r = ask_provider(p, read_key(p), cfg, mode, hist, tools, opener)
@@ -571,6 +583,7 @@ def ask(history, mode='explain', tools=None, provider=None, opener=None):
             return r
         except ApiError as e:
             errors.append('%s was unavailable (%s)' % (PROVIDERS[p]['label'], e.status or 'network'))
+            fails.append('%s: %s %s' % (PROVIDERS[p]['label'], e.status or '', e.msg))
             if not e.retry_other or i == len(order) - 1:
-                return {'ok': False, 'error': str(e), 'provider': p}
-    return {'ok': False, 'error': '; '.join(errors)}
+                return {'ok': False, 'error': ' | '.join(fails), 'provider': p}
+    return {'ok': False, 'error': ' | '.join(fails)}

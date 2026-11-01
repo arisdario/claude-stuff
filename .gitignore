@@ -6,3 +6,4 @@ openai_api_key
 *api_key*
 ai_assist.json
 carto_api_key
+*.pem

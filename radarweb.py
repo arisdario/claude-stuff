@@ -2446,11 +2446,48 @@ class S(ThreadingMixIn, HTTPServer):
         if isinstance(exc, (BrokenPipeError, ConnectionResetError)): return
         super().handle_error(request, client_address)
 
+# HTTPS (for browsers that need a secure page, e.g. voice input): served on TLS_PORT next to the normal http port when
+# both files exist. radartls.py makes a self-signed pair; a real certificate (e.g. Let's Encrypt) works the same way.
+TLS_DIR = os.environ.get('RADARWEB_TLS_DIR', '/data/radarweb_tls')
+TLS_PORT = int(os.environ.get('RADARWEB_TLS_PORT', '8443'))
+
+
+class TS(S):
+    """HTTPS server: the TLS handshake runs in the request's own thread (do_handshake_on_connect=False), so a slow or
+    refusing browser never blocks accept() for the others"""
+    def __init__(self, addr, handler, ctx):
+        self.ctx = ctx; S.__init__(self, addr, handler)
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        sock.settimeout(30)
+        return self.ctx.wrap_socket(sock, server_side=True, do_handshake_on_connect=False), addr
+    def handle_error(self, request, client_address):
+        import sys, ssl
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ssl.SSLError, socket.timeout, BrokenPipeError, ConnectionResetError)): return   # e.g. the browser refused a self-signed certificate
+        S.handle_error(self, request, client_address)
+
+
+def start_tls():
+    cert, key = os.path.join(TLS_DIR, 'cert.pem'), os.path.join(TLS_DIR, 'key.pem')
+    if not (os.path.exists(cert) and os.path.exists(key)): return None
+    try:
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain(cert, key)
+        srv = TS((BIND, TLS_PORT), H, ctx)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return TLS_PORT
+    except Exception as e:
+        print('https not started:', e); return None
+
+
 if __name__ == '__main__':
     threading.Thread(target=worker, daemon=True).start()
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('10.255.255.255', 1)); ip = s.getsockname()[0]
     except Exception: ip = '<EON-IP>'
-    try: open('/data/radarweb.log', 'a').write('%s open http://%s:%d/\n' % (time.strftime('%H:%M:%S'), ip, PORT))
-    except Exception: print('open http://%s:%d/' % (ip, PORT))
+    tp = start_tls()
+    msg = 'open http://%s:%d/' % (ip, PORT) + ('  or  https://%s:%d/' % (ip, tp) if tp else '')
+    try: open('/data/radarweb.log', 'a').write('%s %s\n' % (time.strftime('%H:%M:%S'), msg))
+    except Exception: print(msg)
     S((BIND, PORT), H).serve_forever()
