@@ -143,4 +143,10 @@ bus 0 with `DAS_highLowBeamDecision` toggling ON/OFF and OFF/UNDECIDED, the stal
 configured without Autopilot the light controller does not take beam decisions from DAS; changing that would need a
 gateway configuration change, which this project does not do. **AHB stays off**: no `/data/ahb_test`, no
 `/data/ahb_auto` - without those files the code sends nothing new (`auto_or_test()` false).
-Also learned: `BODY_R1` `HiBm_On` / `LoBm_On_Rq` stay 0 on this car, so there is no high-beam state on the bus.
+Also learned: `BODY_R1` `HiBm_On` / `LoBm_On_Rq` stay 0 on this car.
+
+**Where the high-beam state is (found with `canwatch.py`, 2026-11-01):** `0x30A` on bus 0, not in any DBC, byte 0:
+bit 3 (`0x08`) = high beam on, bit 2 (`0x04`) = flash active, bit 7 always 1 (values seen `80` / `84` / `88`). It
+follows the stalk (`0x45` `HiBmLvr_Stat`) about 0.1 s later and the flash bit stays ~0.1 s after the stalk is released,
+so it is the light state reported after the stalk is processed, not a copy of the stalk frame. Not yet checked: what
+it shows with the headlights switched off. Read-only use (display, logs); sending it would not switch any lamp.
