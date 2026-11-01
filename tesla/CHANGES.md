@@ -135,3 +135,12 @@ cluster did). `touch /data/ahb_test`, restart openpilot (or reboot), headlights 
 
 Nothing in either: the light controller ignores DAS on this car; tell me. `rm /data/ahb_test` when done. Tests:
 `python3 tesla/tests/test_ahb.py` (16).
+
+**Result on this car (2026-11-01): the light controller ignores the fake Autopilot computer.** Parked, headlights on,
+`/data/ahb_test`: openpilot sent the decisions (0x65A, AHB enabled = 1), the panda put `DAS_bodyControls` (0x3E9) on
+bus 0 with `DAS_highLowBeamDecision` toggling ON/OFF and OFF/UNDECIDED, the stalk was read correctly
+(`HiBmLvr_Stat` 1 = pushed), but the beam never changed (checked on a wall, stalk normal and stalk high). On a car
+configured without Autopilot the light controller does not take beam decisions from DAS; changing that would need a
+gateway configuration change, which this project does not do. **AHB stays off**: no `/data/ahb_test`, no
+`/data/ahb_auto` - without those files the code sends nothing new (`auto_or_test()` false).
+Also learned: `BODY_R1` `HiBm_On` / `LoBm_On_Rq` stay 0 on this car, so there is no high-beam state on the bus.
