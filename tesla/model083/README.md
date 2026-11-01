@@ -52,73 +52,27 @@ feeds `PCC_module`'s camera curve limit.
 
 ---
 
-## Step by step (on the EON)
-
-Everything below is run over SSH on the EON. Copy one block at a time and read the comment before running it.
-
-### 1. Get the latest adapter files
+## Install (on the EON, parked)
 
 ```bash
 cd /data/claude-stuff && git pull
-```
-
-### 2. Back up everything you're about to replace
-
-So rollback is just a copy-back. **Do not skip this.**
-
-```bash
-cd /data/openpilot
-cp models/supercombo.dlc                 models/supercombo.dlc.075
-cp selfdrive/modeld/models/driving.h     selfdrive/modeld/models/driving.h.075
-cp selfdrive/modeld/models/driving.cc    selfdrive/modeld/models/driving.cc.075
-```
-
-### 3. Download the 0.8.3 model file
-
-The model is a Git-LFS file, so a plain download can give you a tiny text "pointer" instead of the real model.
-The size check below catches that.
-
-```bash
-cd /data/openpilot
-curl -L -o models/supercombo.dlc.083 \
-  https://media.githubusercontent.com/media/commaai/openpilot/v0.8.3/models/supercombo.dlc
-
-ls -l models/supercombo.dlc.083      # must be tens of MB (~60 MB). If it's a few hundred BYTES, the download
-                                     # gave you an LFS pointer, not the model - stop and tell me.
-```
-
-Optional integrity check (convenience, not authoritative — if comma's published hash differs, trust theirs):
-
-```bash
-python3 -c "import hashlib;print(hashlib.sha256(open('models/supercombo.dlc.083','rb').read()).hexdigest())"
-# recorded here: 059efa4e4c5f1430271362147e4b2eda650dc7ca9bad6a63725cc616afdf7f77
-```
-
-Put it in place:
-
-```bash
-cp models/supercombo.dlc.083 models/supercombo.dlc
-```
-
-### 4. Install the adapter and the two drop-in source files
-
-```bash
-cp /data/claude-stuff/tesla/model083/driving.h \
-   /data/claude-stuff/tesla/model083/driving.cc \
-   /data/claude-stuff/tesla/model083/model083_adapter.h \
-   /data/openpilot/selfdrive/modeld/models/
-```
-
-### 5. Rebuild `modeld` and reboot
-
-Only `modeld` changed, so only it needs building. If `/data/openpilot/prebuilt` exists, openpilot never rebuilds on
-its own, so this step is required either way.
-
-```bash
-cd /data/openpilot
-scons -j4 selfdrive/modeld/_modeld     # must end with no error
+sh tesla/model083/install.sh
 reboot
 ```
+
+`install.sh` does, in order, and stops with a clear message if any step fails:
+
+1. **Backups** of everything it replaces, kept as `*.075` next to each file (first run only, so a re-run never
+   overwrites the originals): the model, `driving.h`, `driving.cc`, `PCC_module.py`, `pcc_curves.py`.
+2. **The 0.8.3 model** from comma's v0.8.3 release, rejected unless it is the real file: 63,447,299 bytes,
+   sha256 `059efa4e4c5f1430271362147e4b2eda650dc7ca9bad6a63725cc616afdf7f77` (both verified against the download).
+3. **The adapter**: `driving.h`, `driving.cc`, `model083_adapter.h` into `selfdrive/modeld/models/`.
+4. **PCC with the curve-limit fix** (`PCC_module.py`, `pcc_curves.py` into `selfdrive/car/tesla/`). Required: the new
+   model publishes path points, which switches PCC's camera curve limit on, and without the fix it braked for
+   curves that aren't there at 58–68 km/h (see `tesla/AUDIT.md`). If your car's PCC files had local changes, they are
+   in the `*.075` backups.
+5. **Rebuild `modeld`** (`scons -j4 selfdrive/modeld/_modeld`). If `/data/openpilot/prebuilt` exists openpilot never
+   rebuilds on its own, so this is needed either way.
 
 ---
 
@@ -150,7 +104,8 @@ trusting it in a curve.
 - Lateral tuning (steer ratio, PID, camera offset) was set for the **old** model. The 0.8.3 path is smoother and
   centres slightly differently; small camera-offset / tuning tweaks may help. Change these gently, one at a time.
 - Because path points are now published, **`PCC_module`'s camera curve limit becomes active** (it was effectively
-  off before, with no points to read). If you want it off while you settle in: `touch /data/curve_limit_off`.
+  off before, with no points to read); `install.sh` puts in the fixed version. To switch it off while you settle in:
+  `touch /data/curve_limit_off`. radarweb's `/dash` shows a `CURVE` chip whenever it is holding your speed.
 
 ---
 
@@ -166,9 +121,12 @@ cd /data/openpilot/selfdrive/modeld && ./modeld
 
 Most likely cause and fix:
 
-- **SNPE / DLC load error** (a Qualcomm runtime message about the model version): the SNPE libraries in 0.7.5 are
-  older than the ones 0.8.3 shipped, and can't load the newer model. The fix is to also bring in 0.8.3's SNPE
-  libraries (`phonelibs/snpe`) — **this is the most likely blocker; tell me and I'll write that step.**
+- **SNPE / DLC load error** (a Qualcomm runtime message about the model or DLC version) — **the most likely
+  blocker**. The 0.8.3 model was converted with SNPE **1.43** (`converter-version=1.43.0.2307` inside the file);
+  0.7.5's SNPE is older (openpilot only moved to 1.41 in 0.7.10). 0.8.3's own SNPE 1.41 libraries are available and
+  verified (all 8 that modeld uses match openpilot's recorded checksums; `libc++_shared.so` is identical to yours).
+  The fix would give **modeld alone** its own SNPE folder: driver monitoring runs on the same SNPE on the DSP, and
+  swapping SNPE system-wide could break it (and with it, engaging). Send me the error and I'll write that step.
 - **Wrong output size / garbage lanes**: the `.dlc` you downloaded isn't the 0.8.3 supercombo, or is the LFS pointer.
   Re-check step 3.
 - Anything else: send me the output of the command above.
@@ -177,16 +135,12 @@ Most likely cause and fix:
 
 ## Roll back (≈2 minutes)
 
-Puts the original 0.7.5 model and sources back exactly.
-
 ```bash
-cd /data/openpilot
-cp models/supercombo.dlc.075            models/supercombo.dlc
-cp selfdrive/modeld/models/driving.h.075  selfdrive/modeld/models/driving.h
-cp selfdrive/modeld/models/driving.cc.075 selfdrive/modeld/models/driving.cc
-rm -f selfdrive/modeld/models/model083_adapter.h
-scons -j4 selfdrive/modeld/_modeld && reboot
+sh /data/claude-stuff/tesla/model083/uninstall.sh && reboot
 ```
+
+Puts back exactly what `install.sh` replaced (the `*.075` backups) and rebuilds `modeld`. Add `KEEP_PCC=1` in front
+to keep the fixed PCC files (harmless with the old model).
 
 ---
 
