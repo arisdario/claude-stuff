@@ -403,7 +403,9 @@ class CarController():
     # apply_angle = clip(apply_angle , self.last_angle - angle_rate_lim, self.last_angle + angle_rate_lim) 
     # LANEWIGGLE: slew-rate limit the command by lane confidence. rl = angle_rate_lim (tight) when blind, LANE_DAMP_RL
     # (no effect) when a lane is visible. Only while actually steering; disabled by /data/steerdamp_off.
-    if enable_steer_control and not self._steerdamp_off and self.lane_prob < LANE_CONF_BP[1]:
+    # NOT during a lane change (self.alca_enabled): the maneuver crosses lane lines so confidence drops, and damping
+    # would slow or block the steer-across.
+    if enable_steer_control and not self.alca_enabled and not self._steerdamp_off and self.lane_prob < LANE_CONF_BP[1]:
       rl = interp(self.lane_prob, LANE_CONF_BP, [angle_rate_lim, angle_rate_lim * LANE_DAMP_MULT])
       apply_angle = clip(apply_angle, self.last_angle - rl, self.last_angle + rl)
     # If human control, send the steering angle as read at steering wheel.
