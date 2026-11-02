@@ -133,6 +133,28 @@ class TestOracleIndependence(unittest.TestCase):
             self.assertEqual(o.reachable(src, {dst})[0], ok or src == dst, (src, dst))
 
 
+class TestRouteThatDoublesBack(unittest.TestCase):
+    """A loop ramp: the route passes within metres of a segment ~250 m further along. Progress must stay continuous, not jump to the later pass."""
+    def test_progress_does_not_jump_to_a_later_pass(self):
+        class R(object):
+            pass
+        r = R()
+        # geometry in metres (k = degrees per metre of latitude)
+        m_lat = 111320.0
+        k = 1.0 / m_lat
+        # east 150 m along y=0; north 30 m; west back to x=0; south to y=3 m; east again along y=3 m (a later pass ~357 m on, 2.5 m from the fix below)
+        pts = [(0.0, 0.0), (0.0, 150 * k), (20 * k, 150 * k), (20 * k, 0.0), (3 * k, 0.0), (3 * k, 400 * k)]
+        cum = [0.0]
+        for a, b in zip(pts, pts[1:]):
+            cum.append(cum[-1] + geo.hav(a[0], a[1], b[0], b[1]))
+        r.points, r.cum, r.distance_m = pts, cum, cum[-1]
+        rm = M.RouteMatcher(r)
+        rm.commit(140.0)
+        got = rm.match(2.5 * k, 140.0 * k, 90.0, M.AHEAD_M + 45.0)       # fix 2.5 m north of leg 1, 0.5 m from the later pass (leg 5)
+        self.assertTrue(got.ok)
+        self.assertLess(got.progress_m, 140.0 + M.NEAR_AHEAD_M + 45.0 + 1.0, 'jumped to a later pass at %.0f m' % got.progress_m)
+
+
 class TestParallelRoadRegression(unittest.TestCase):
     def setUp(self):
         self.dest_at = at(0, 800)

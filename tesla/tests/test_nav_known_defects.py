@@ -45,9 +45,8 @@ class TestKnownDefects(unittest.TestCase):
         bad = [s for s in (5, 7, 9, 12, 13) if E.run_one(c, s)['deviation']['sustained_wrong']]
         self.assertEqual(bad, [], 'seeds %s held a confident wrong road for >= 3 fixes' % bad)
 
-    @unittest.expectedFailure
     def test_a_near_tie_junction_must_not_cause_a_false_recalculation(self):
-        """DEFECT D4 (not yet diagnosed): on the 'diamond' (two roads that split and merge) a control drive along the planned road is declared off-route / recalculated in
+        """D4 - PASSES since the ambiguous-parallel evidence rule (matcher.OFF_FIXES_PARALLEL); verified on these 2 seeds only, the full benchmark was NOT re-run. Originally: on the 'diamond' (two roads that split and merge) a control drive along the planned road is declared off-route / recalculated in
         clear-class conditions (8 m separation, 2 m noise: 2/30 and 1/30; seed 12). Cause not investigated.
           python3 -m tesla.nav.evaluate --family diamond --filter sep=8 --filter noise=2 --seeds 1 --seed-base 11 --trace"""
         c = E.Condition('diamond', {'sep': 8}, 2, 'gauss')

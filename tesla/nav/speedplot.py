@@ -100,3 +100,26 @@ def plot(p, title, out_png):
     fig.tight_layout()
     fig.savefig(out_png, dpi=140)
     return ev
+
+
+def suspicious(p, min_cut=FLOOR_KMH):
+    """Points to investigate later (NOT changed here): (a) 1-2 sample curvature spikes (<= 20 m wide, neighbours >= 2x faster): usually a single noisy/kinked OSM vertex
+    or a junction node, not a real bend; (b) high-speed stretches (cruise >= 90) slowed by >= min_cut that are not within 150 m of a cruise-speed change (a bend on a
+    fast road with no junction)."""
+    n, out = len(p['curve']), []
+    for i in range(2, n - 2):
+        c = p['curve'][i]
+        if p['cut'][i] >= min_cut and c < 0.5 * min(p['curve'][i - 2], p['curve'][i + 2]) and c < p['cruise'][i]:
+            out.append(('spike', p['s_km'][i], p['cruise'][i], round(c), round(p['rec'][i])))
+    chg = [p['s_km'][i] for i in range(1, n) if p['cruise'][i] != p['cruise'][i - 1]]
+    for i in range(n):
+        if p['cruise'][i] >= 90 and p['cut'][i] >= min_cut and not any(abs(p['s_km'][i] - c) < 0.15 for c in chg):
+            out.append(('fast-road bend', p['s_km'][i], p['cruise'][i], round(p['curve'][i]), round(p['rec'][i])))
+    merged, last = [], None
+    for k, km, cr, cv, rc in out:                                    # collapse neighbours (< 50 m) of the same kind
+        if last and last[0] == k and km - last[1] < 0.05:
+            last[1] = km
+            continue
+        last = [k, km, cr, cv, rc]
+        merged.append(last)
+    return merged

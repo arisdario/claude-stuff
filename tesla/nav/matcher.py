@@ -22,10 +22,14 @@ except ImportError:
 ON_ROUTE_M = 30.0            # max cross-track error to count as on route
 HEADING_MAX_DEG = 100.0
 BACK_M = 60.0                # how far behind the last progress is still searched (GPS jitter)
+NEAR_AHEAD_M = 80.0          # first-pass look-ahead (plus the speed term) before widening to AHEAD_M
 AHEAD_M = 300.0              # how far ahead of the last progress is searched per fix (plus speed * dt * 3)
 OFF_FIXES = 3                # consecutive bad fixes before 'off_route'
 OFF_FIXES_AMBIG = 8          # ...but when the road the car is on lies within AMBIG_M of the route (GPS noise cannot separate them) wait for this many
 AMBIG_M = 15.0
+OFF_FIXES_PARALLEL = 30      # a road beside the route whose mean separation is below 2 x the fix accuracy (ramp/merge lane, parallel carriageway) cannot be told from the
+                             # route at that GPS quality (the benchmark's own 'ambiguous' class): demand this many bad fixes before calling it a wrong turn
+DEFAULT_SIGMA_M = 5.0
 MIN_SPEED_MS = 2.0           # below this a bad fix is just noise at a standstill
 ACC_MAX_M = 30.0             # fixes less accurate than this are ignored
 GPS_TIMEOUT_S = 5.0
@@ -48,6 +52,16 @@ class RouteMatcher(object):
         self.progress = None                                     # last matched distance along the route (m)
 
     def match(self, lat, lon, heading=None, max_ahead=AHEAD_M):
+        """Nearest route segment, preferring CONTINUITY: first search only a short way ahead of the last progress; widen to max_ahead only if nothing within
+        ON_ROUTE_M is found there. A route that doubles back near itself (loop ramp, cloverleaf) otherwise lets a later pass win by a few metres and the
+        progress jumps ~max_ahead forward (seen at km 3.2 of Fundulea->Bucuresti)."""
+        if self.progress is not None and max_ahead > NEAR_AHEAD_M:
+            near = self._match(lat, lon, heading, NEAR_AHEAD_M + (max_ahead - AHEAD_M if max_ahead > AHEAD_M else 0.0))
+            if near.ok and near.cross_track_m <= ON_ROUTE_M:
+                return near
+        return self._match(lat, lon, heading, max_ahead)
+
+    def _match(self, lat, lon, heading, max_ahead):
         if not geo.valid_latlon(lat, lon):
             return Match(False, reason='invalid position')
         pts, cum = self.pts, self.cum
@@ -171,6 +185,7 @@ class Navigator(object):
                 return self.state
             self.alarm = False
             self.off_fixes = 0
+            self._xt_sum = 0.0
             self.matcher.commit(m.progress_m)
             prog = self.matcher.progress
             rem = self.route.distance_m - prog
@@ -184,8 +199,12 @@ class Navigator(object):
         self.good_run = 0
         if v >= MIN_SPEED_MS:
             self.off_fixes += 1
+            self._xt_sum = getattr(self, '_xt_sum', 0.0) + (m.cross_track_m if (m.ok and m.cross_track_m is not None) else 1e9)
         # how much evidence is enough depends on how distinguishable the two roads are: a road 8 m from the route is inside one GPS error
         need = OFF_FIXES_AMBIG if (other_road and m.ok and m.cross_track_m is not None and m.cross_track_m < AMBIG_M) else OFF_FIXES
+        sigma = accuracy if (accuracy is not None and geo.is_finite_number(accuracy) and accuracy > 0) else DEFAULT_SIGMA_M
+        if need == OFF_FIXES_AMBIG and self.off_fixes and self._xt_sum / self.off_fixes < 2.0 * sigma:
+            need = OFF_FIXES_PARALLEL
         reason = 'on another road (edge %d, %s)' % (tk.edge.eid, tk.edge.name or tk.edge.highway) if other_road else (
             m.reason or 'cross-track %.0f m' % (m.cross_track_m or 0.0))
         if self.off_fixes < need and not self.alarm:
