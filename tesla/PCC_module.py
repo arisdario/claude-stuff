@@ -427,31 +427,35 @@ class PCCController():
           v_map = max_v_in_mapped_curve_ms(curv, dist, CS.v_ego)
           if v_map and os.path.exists('/data/mapcurve_debug'):
             print('MAPCURVE: v_pid_before=%.1f v_map=%.1f dist=%.0f' % (self.v_pid, v_map, dist))
-        # TESLACSA: Tesla's nav curve broadcast is the preferred map-curve source ONLY when it passes tesla_csa's
-        # validation (zero/SNA/implausible = unavailable). Then it REPLACES the SQLite curve (one source per curve, no
-        # double counting); otherwise SQLite is the fallback. Floor only: it can lower v_curve, never raise it.
-        # /data/tesla_csa_off disables it; /data/tesla_csa_shadow logs it without using it.
-        csa_src, csa_why, v_csa = 'none', 'off', None
-        if not os.path.exists(tesla_csa.OFF_FILE):
-          try:
-            csa, csa_why = tesla_csa.best_csa(
-              (CS.csaRoadCurvC2, CS.csaRoadCurvC3, CS.csaRoadCurvRange, CS.csaRoadCurvUsingTspline),
-              (CS.csaOfframpCurvC2, CS.csaOfframpCurvC3, CS.csaOfframpCurvRange, CS.csaOfframpCurvUsingTspline))
-            if csa is not None and not os.path.exists(tesla_csa.SHADOW_FILE):
+        # TESLACSA: Tesla's nav curve broadcast is SHADOW-ONLY by default: both interpretations are logged next to the
+        # SQLite curve (/data/csa_shadow.log) and nothing changes in control. Only if /data/tesla_csa_enable names a
+        # verified model (clothoid|offset) AND the frame passes tesla_csa's validation does it replace the SQLite curve
+        # (one source per curve, no double counting) as a floor (min(), never raises a limit). Zero/SNA/implausible =
+        # unavailable -> SQLite. /data/tesla_csa_off disables it entirely. See tesla_csa.py for what is/ isn't known.
+        csa_src, csa_why, v_csa, csa = 'none', 'shadow', None, None
+        try:
+          road_in, off_in = tesla_csa.read_inputs(CS)
+          model = tesla_csa.enabled_model()
+          if model is not None:
+            csa, csa_why = tesla_csa.best_csa(road_in, off_in, model)
+            if csa is not None:
               v_csa = pcc_curves.approach_speed(csa.speed, csa.dist, CS.v_ego)
               csa_src = csa.source
-          except Exception:
-            csa, csa_why = None, 'error'
+          if time.time() - self._curve_src_t > 1.0:
+            self._curve_src_t = time.time()
+            if any(x and any(abs(v) > 0 for v in x[:3] if isinstance(v, (int, float))) for x in (road_in, off_in)) or v_map:
+              tesla_csa.log_shadow(tesla_csa.shadow_record(road_in, off_in, v_map, 0.5, (self._map_curve or (0, None))[1], CS.v_ego))
+        except Exception:
+          csa, csa_why, v_csa = None, 'error', None
         if v_csa is not None:
           v_map = None                      # CSA is the map-curve source for this cycle
         elif v_map:
           csa_src = 'sqlite'
-        if time.time() - self._curve_src_t > 1.0 and (csa_src != self._curve_src or os.path.exists('/data/mapcurve_debug')):
-          self._curve_src_t = time.time(); self._curve_src = csa_src
+        if csa_src != self._curve_src:
+          self._curve_src = csa_src
           try:
             with open('/data/curve_source.json', 'w') as f:
-              f.write('{"source": "%s", "csa": "%s", "v_csa": %s, "v_map": %s}' % (
-                csa_src, csa_why, 'null' if v_csa is None else '%.1f' % v_csa, 'null' if not v_map else '%.1f' % v_map))
+              f.write('{"source": "%s", "csa": "%s"}' % (csa_src, csa_why))
           except Exception:
             pass
         vis_cs = self._curve_speed(CS)   # CURVELIMIT: camera model-path curve speed
