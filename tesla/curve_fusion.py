@@ -65,9 +65,9 @@ def fuse(sources, v_ego, v_cruise, no_lead_speed=255.):
         curve_conf = min(1.0, curve_conf + 0.25 * s.get('conf', 1.0))   # corroboration raises confidence
     # a geometry source that is NOT binding and says "much faster" (e.g. map says straight, vision says curve) is a
     # disagreement: we still act on the restrictive one, but note it. It never raises the target.
-  # decel authority: confident + corroborated -> full; low confidence or single source -> reduced, so a shaky reading
-  # cannot slam the brakes. Floor at 0.3 so a real (if uncertain) curve still gets meaningful slowing.
-  decel_authority = max(0.3, min(1.0, curve_conf * (1.15 if agree else 0.85)))
+  # decel authority tracks confidence: a reliable reading (high conf) brakes firmly even alone; a shaky one (low conf)
+  # brakes gently so it cannot slam the brakes on a phantom; corroboration is a 1.2x bonus. Floor 0.3.
+  decel_authority = max(0.3, min(1.0, curve_conf * (1.2 if agree else 1.0)))
 
   # --- lead (radar) constraint: always a hard min, confidence-independent --------------------------------------
   lead_target = min((s['speed'] for s in leads), default=None)
