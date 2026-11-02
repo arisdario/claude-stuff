@@ -144,7 +144,10 @@ class PCCController():
     # MAPCURVE FIX: liveMapData comes 4x/s but update_pdl runs 20x/s; recv_one_or_none only saw it 1 cycle in 5, so the
     # map limit flickered on and off. Keep the last one (curvature, distance, time) and use it until it is 2 s old.
     self._map_curve = None
-    self._curve_src = None; self._curve_src_t = 0.   # TESLACSA: last logged curve source (tesla_csa|sqlite|none)
+    self._curve_src = None                          # TESLACSA: last curve source written to /data/curve_source.json
+    self._csa_logger = tesla_csa.ShadowLogger()      # TESLACSA: shadow log of what the car broadcasts (zero/SNA/missing too)
+    self._csa_map_sock = messaging.sub_sock('liveMapData', conflate=True)   # TESLACSA: its OWN subscriber; control's is untouched
+    self._csa_sql = None
     self._curve_warn_t = 0.
     self._vision_prob = 0.0        # CURVEFUSION: lane probability from the model, a proxy for vision-curve confidence
     global PEDAL_MAP
@@ -334,6 +337,19 @@ class PCCController():
 
     return can_sends
     
+  def _csa_shadow_tick(self, CS, engaged):
+    """TESLACSA log-only. Reads ONLY its own liveMapData subscriber (so the control path's message handling is untouched)
+    and delegates to tesla_csa.shadow_tick, which can only read signals, validate and log. It assigns no control state:
+    not v_pid, v_curve, accel/jerk limits, curve authority or any actuator variable. Never raises."""
+    try:
+      m = messaging.recv_one_or_none(self._csa_map_sock)
+      if m is not None:
+        lmd = m.liveMapData
+        self._csa_sql = (lmd.curvature, lmd.distToTurn, time.time()) if (lmd.mapValid and lmd.curvatureValid) else None
+      tesla_csa.shadow_tick(self._csa_logger, CS, self._csa_sql, CS.v_ego, engaged)
+    except Exception:
+      pass
+
   def update_pdl(self, enabled, CS, frame, actuators, pcm_speed, speed_limit_ms, set_speed_limit_active, speed_limit_offset,alca_enabled):
     idx = self.pedal_idx
 
@@ -365,6 +381,7 @@ class PCCController():
       self.speed_limit_kph = 0.
     self.pedal_idx = (self.pedal_idx + 1) % 16
 
+    self._csa_shadow_tick(CS, enabled)    # TESLACSA: log-only (reads signals, validates, logs; touches no control state)
     if not self.pcc_available or not enabled:
       return 0., 0, idx
     # Alternative speed decision logic that uses the lead car's distance
@@ -427,30 +444,13 @@ class PCCController():
           v_map = max_v_in_mapped_curve_ms(curv, dist, CS.v_ego)
           if v_map and os.path.exists('/data/mapcurve_debug'):
             print('MAPCURVE: v_pid_before=%.1f v_map=%.1f dist=%.0f' % (self.v_pid, v_map, dist))
-        # TESLACSA: Tesla's nav curve broadcast is SHADOW-ONLY by default: both interpretations are logged next to the
-        # SQLite curve (/data/csa_shadow.log) and nothing changes in control. Only if /data/tesla_csa_enable names a
-        # verified model (clothoid|offset) AND the frame passes tesla_csa's validation does it replace the SQLite curve
-        # (one source per curve, no double counting) as a floor (min(), never raises a limit). Zero/SNA/implausible =
-        # unavailable -> SQLite. /data/tesla_csa_off disables it entirely. See tesla_csa.py for what is/ isn't known.
-        csa_src, csa_why, v_csa, csa = 'none', 'shadow', None, None
-        try:
-          road_in, off_in = tesla_csa.read_inputs(CS)
-          model = tesla_csa.enabled_model()
-          if model is not None:
-            csa, csa_why = tesla_csa.best_csa(road_in, off_in, model)
-            if csa is not None:
-              v_csa = pcc_curves.approach_speed(csa.speed, csa.dist, CS.v_ego)
-              csa_src = csa.source
-          if time.time() - self._curve_src_t > 1.0:
-            self._curve_src_t = time.time()
-            if any(x and any(abs(v) > 0 for v in x[:3] if isinstance(v, (int, float))) for x in (road_in, off_in)) or v_map:
-              tesla_csa.log_shadow(tesla_csa.shadow_record(road_in, off_in, v_map, 0.5, (self._map_curve or (0, None))[1], CS.v_ego))
-        except Exception:
-          csa, csa_why, v_csa = None, 'error', None
-        if v_csa is not None:
-          v_map = None                      # CSA is the map-curve source for this cycle
-        elif v_map:
-          csa_src = 'sqlite'
+        # TESLACSA: Tesla's nav curve broadcast is SHADOW-ONLY by default (logged by _csa_shadow_tick, never used) because
+        # its meaning and units are not verified. resolve() returns no CSA curve and passes v_map through untouched unless
+        # BOTH /data/tesla_csa_enable and /data/tesla_csa_evidence exist (and /data/tesla_csa_off does not). When enabled, a
+        # valid frame replaces the SQLite curve for that cycle (one source per curve), as a floor (min(), never raises a
+        # limit), and tesla_csa.limit_authority caps its braking authority so it can never cause full curve braking.
+        v_csa, csa_src, csa_why, csa, v_map = tesla_csa.resolve(CS, CS.v_ego, v_map, pcc_curves.approach_speed)
+        csa_binding = False
         if csa_src != self._curve_src:
           self._curve_src = csa_src
           try:
@@ -471,16 +471,14 @@ class PCCController():
             srcs.append({'name': 'map', 'kind': 'map', 'speed': v_map, 'conf': 0.5, 'valid': True})
           if v_csa is not None:
             srcs.append({'name': csa_src, 'kind': 'route', 'speed': v_csa, 'conf': csa.conf, 'valid': True})
-          fus =curve_fusion.fuse(srcs, CS.v_ego, self.v_pid)
+          fus = curve_fusion.fuse(srcs, CS.v_ego, self.v_pid)
           if fus.target is not None:
             v_curve = min(v_curve, fus.target)
           curve_authority = fus.decel_authority
+          csa_binding = v_csa is not None and fus.binding == csa_src
         else:
-          if v_map:
-            v_curve = min(v_curve, v_map)
-          if v_csa is not None:
-            v_curve = min(v_curve, v_csa)
-          v_curve = min(v_curve, vis_cs)
+          v_curve, csa_binding = tesla_csa.combine_nonfusion(v_curve, v_map, v_csa, vis_cs)
+        curve_authority = tesla_csa.limit_authority(curve_authority, csa_binding)   # TESLACSA: never full braking
         self.v_pid = min(self.v_pid, v_curve)
         # take fleet speed into consideration
         self.v_pid = min(self.v_pid, self.fleet_speed.adjust(CS, self.pedal_speed_kph * CV.KPH_TO_MS, frame))
