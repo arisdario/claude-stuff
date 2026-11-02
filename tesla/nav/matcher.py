@@ -31,6 +31,8 @@ ACC_MAX_M = 30.0             # fixes less accurate than this are ignored
 GPS_TIMEOUT_S = 5.0
 REROUTE_COOLDOWN_S = 4.0
 RETURN_FIXES = 3             # once off-route is established, this many consecutive good fixes are needed to clear it
+AMBIG_GIVE_UP_FIXES = 20     # recalculating from a CONTESTED track is deferred (status stays off_route, ambiguous=True) for at most this many fixes; then it
+                             # recalculates from the best estimate but flags confidence='low' - never silently as if the road were known
 ARRIVE_M = 30.0
 
 
@@ -87,6 +89,8 @@ class NavState(object):
         self.off_route_fixes = kw.get('off_route_fixes', 0)
         self.reroutes = kw.get('reroutes', 0)
         self.message = kw.get('message', '')
+        self.ambiguous = kw.get('ambiguous', False)   # off route, but which road the car is on cannot yet be told: no recalculation is made
+        self.confidence = kw.get('confidence', 'normal')
 
     def as_dict(self):
         d = dict(self.__dict__)
@@ -109,6 +113,7 @@ class Navigator(object):
         self.last_reroute_t = -1e9
         self.last_t = None
         self.alarm = False           # off-route established (>= OFF_FIXES bad fixes); cleared by RETURN_FIXES good ones or a recalculation
+        self.contested_fixes = 0
         self.good_run = 0
         self.state = NavState(status='idle')
 
@@ -121,6 +126,7 @@ class Navigator(object):
         self.off_fixes = 0
         self.alarm = False
         self.good_run = 0
+        self.contested_fixes = 0
         return route
 
     def plan(self, lat, lon, heading=None):
@@ -195,6 +201,13 @@ class Navigator(object):
         if t - self.last_reroute_t < REROUTE_COOLDOWN_S:
             self.state = NavState(status='off_route', off_route_fixes=self.off_fixes, reroutes=self.reroutes, message=reason)
             return self.state
+        # never recalculate from a track that is contested: two roads that cannot be told apart at this GPS accuracy are reported as ambiguous
+        if tk.known and tk.contested and self.contested_fixes < AMBIG_GIVE_UP_FIXES:
+            self.contested_fixes += 1
+            self.state = NavState(status='off_route', off_route_fixes=self.off_fixes, reroutes=self.reroutes, ambiguous=True,
+                                  message='off route, but the road the car is on cannot yet be told (%d/%d)' % (self.contested_fixes, AMBIG_GIVE_UP_FIXES))
+            return self.state
+        low = tk.known and tk.contested
         self.last_reroute_t = t
         try:
             if tk.known:
@@ -202,12 +215,13 @@ class Navigator(object):
             else:
                 self.plan(lat, lon, heading)                         # track lost (GPS gap/teleport): fall back to snapping
             self.reroutes += 1
+            self.contested_fixes = 0
             self.matcher.commit(0.0)
             nxt = self._next_step(0.0)
             self.state = NavState(status='rerouted', progress_m=0.0, remaining_m=self.route.distance_m,
                                   next_step=None if nxt is None else nxt.as_dict(),
                                   distance_to_next_m=None if nxt is None else nxt.start_m, reroutes=self.reroutes,
-                                  message='recalculated after leaving the route (%s)' % reason)
+                                  message='recalculated after leaving the route (%s)' % reason, confidence='low' if low else 'normal')
         except NoRoute as e:
             self.state = NavState(status='no_route', off_route_fixes=self.off_fixes, reroutes=self.reroutes, message=str(e))
         return self.state

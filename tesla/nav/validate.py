@@ -71,22 +71,54 @@ def _along(points, cum, s):
     return lat, lon, geo.bearing(points[i][0], points[i][1], points[i + 1][0], points[i + 1][1])
 
 
-def fixes_along(points, speed=15.0, hz=1.0, noise_m=5.0, heading_noise=4.0, seed=1, t0=0.0, accuracy=None):
-    """GPS fixes (t, lat, lon, heading, speed, accuracy) for driving a polyline at constant speed with Gaussian noise. The reported
-    accuracy defaults to the noise actually injected (a receiver reports its own error), at least 3 m."""
+NOISE_MODELS = ('gauss', 'ar1', 'heavy', 'uniform')
+
+
+def _noise_sampler(model, sigma, rnd):
+    """-> f() giving one (north, east) GPS position error in metres. All models have per-axis scale ~sigma. 'gauss' draws EXACTLY as the
+    original simulator did (north then east), so existing seeded results are unchanged.
+      ar1      temporally correlated error (rho 0.9, marginal sigma): a real receiver's error drifts, it is not white
+      heavy    mixture: 90% N(0, 0.7 sigma), 10% N(0, 3 sigma) - occasional large excursions
+      uniform  bounded, +-sqrt(3) sigma"""
+    if model == 'gauss':
+        return lambda: (rnd.gauss(0, sigma), rnd.gauss(0, sigma))
+    if model == 'ar1':
+        st = [rnd.gauss(0, sigma), rnd.gauss(0, sigma)]
+        rho = 0.9
+        k = math.sqrt(1.0 - rho * rho)
+        def f():
+            st[0] = rho * st[0] + k * rnd.gauss(0, sigma)
+            st[1] = rho * st[1] + k * rnd.gauss(0, sigma)
+            return st[0], st[1]
+        return f
+    if model == 'heavy':
+        def f():
+            return tuple(rnd.gauss(0, sigma * (3.0 if rnd.random() < 0.1 else 0.7)) for _ in range(2))
+        return f
+    if model == 'uniform':
+        w = math.sqrt(3.0) * sigma
+        return lambda: (rnd.uniform(-w, w), rnd.uniform(-w, w))
+    raise ValueError('unknown noise model %r (choose from %s)' % (model, ', '.join(NOISE_MODELS)))
+
+
+def fixes_along(points, speed=15.0, hz=1.0, noise_m=5.0, heading_noise=4.0, seed=1, t0=0.0, accuracy=None, noise_model='gauss', s0=0.0):
+    """GPS fixes (t, lat, lon, heading, speed, accuracy) for driving a polyline at constant speed with GPS noise. The reported accuracy defaults to
+    the noise actually injected (a receiver reports its own error), at least 3 m. s0 = distance along the polyline of the first fix (sampling phase);
+    the true position of a fix is s0 + (t - t0) * speed. Identical arguments always give identical fixes."""
     if accuracy is None:
         accuracy = max(3.0, noise_m)
     cum = [0.0]
     for i in range(len(points) - 1):
         cum.append(cum[-1] + geo.hav(points[i][0], points[i][1], points[i + 1][0], points[i + 1][1]))
     rnd = random.Random(seed)
-    out, t, s = [], t0, 0.0
+    sample = _noise_sampler(noise_model, noise_m, rnd)
+    out, t, s = [], t0, s0
     m_lat = (math.pi / 180.0) * geo.R_EARTH
     while s <= cum[-1]:
         lat, lon, hdg = _along(points, cum, s)
         k = m_lat * math.cos(math.radians(lat))
-        out.append((t, lat + rnd.gauss(0, noise_m) / m_lat, lon + rnd.gauss(0, noise_m) / k, (hdg + rnd.gauss(0, heading_noise)) % 360.0,
-                    speed, accuracy))
+        dn, de = sample()
+        out.append((t, lat + dn / m_lat, lon + de / k, (hdg + rnd.gauss(0, heading_noise)) % 360.0, speed, accuracy))
         t += 1.0 / hz; s += speed / hz
     return out
 
