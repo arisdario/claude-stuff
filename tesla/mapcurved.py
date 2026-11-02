@@ -345,8 +345,10 @@ def main():
 if __name__ == '__main__':
     main()
 
-# --- Wiring into the process manager -----------------------------------
-# This fork's process manager (likely selfdrive/manager.py in this version)
-# needs an entry added for this process so it starts/stops with the rest of
-# the stack. Need to see that file's existing entries (e.g. how 'locationd'
-# or 'paramsd' are registered) to match the pattern before adding mapcurved.
+# --- How this starts ----------------------------------------------------
+# This is NOT registered in openpilot's process manager (this repo's deploy_car.sh
+# only touches selfdrive/car/tesla, not selfdrive/manager.py). Instead
+# mapcurve_launcher.ensure_running() - called once from carcontroller.__init__ -
+# launches this script with the car stack when /data/mapcurve.sqlite exists.
+# Disable with:  touch /data/mapcurve_off
+# Run by hand:   cd /data/openpilot && PYTHONPATH=/data/openpilot python3 selfdrive/car/tesla/mapcurved.py -v

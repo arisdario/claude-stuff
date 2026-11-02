@@ -47,25 +47,33 @@ empty road you know, foot over the brake. Every new behaviour has a kill switch.
 - No-lead acceleration profile (#7), learned pedal map in `tesla_compute_gb` (#8), no-radar crash (#9).
 - With a lead car, the following logic and its limits are unchanged.
 
-**`mapcurved.py`**
+**`mapcurved.py`** (road-aware)
 - Falls back to `gpsLocationExternal`, which `carcontroller.py` publishes from the car's own GPS on CAN when
   **`use_tesla_gps = True`** (#1). Fixes worse than 20 m or older than 2 s are ignored.
-- Publishes the curve point that limits the speed *now* (same braking rule) instead of the slowest point within 400 m.
-- Points only from a corridor along the heading (10 m + 30% of the distance to each side) instead of a 50 deg cone,
-  which at 400 m spans ~650 m and reaches parallel and side streets.
+- **Road-aware lookup**: locks to the road you are physically on (`way_id`/`segment_id`), picks the travel direction
+  along the stored point order (`seq`) from your heading vs the segment tangent (honouring OSM oneway), and walks ONLY
+  forward along that segment by along-road distance. This replaces the old heading-cone/corridor lookup, which on a
+  hairpin/switchback (e.g. DN73A) read the adjacent leg or a parallel road and either missed the curve or demanded a
+  phantom slam at its straight-line distance. Needs a road-aware DB (built by `tools/mapcurve_build.py`); an old
+  nearest-point-only DB is refused with a rebuild message.
+- Of the points walked within 400 m, publishes the one that limits speed *now* (lowest `approach_speed`, same braking
+  rule PCC uses), so a near moderate bend isn't dropped for a tighter curve much further on.
+- **Auto-starts with the stack** via `mapcurve_launcher.ensure_running()`, called once from `carcontroller.__init__`
+  (it's not in openpilot's process manager, which `deploy_car.sh` doesn't touch). Guarded + never raises, so it can't
+  affect the car; only runs if `/data/mapcurve.sqlite` exists; won't spawn a second copy; disable with
+  `touch /data/mapcurve_off`.
 
 ## Install
 
 ```
-cd /data/openpilot/selfdrive/car/tesla
-cp PCC_module.py PCC_module.py.before_curves         # keep the old one
-# copy from this folder: PCC_module.py pcc_curves.py mapcurved.py
+sh /data/claude-stuff/tesla/deploy_car.sh --yes      # copies the tesla car code (incl. mapcurved.py + launcher)
 ```
 
-In `/data/bb_openpilot.cfg` set `use_tesla_gps = True` (then reboot), and keep `mapcurved.py` running (it isn't in the
-process manager yet - see the note at the bottom of `mapcurved.py`; until then start it by hand:
-`cd /data/openpilot && PYTHONPATH=/data/openpilot python3 selfdrive/car/tesla/mapcurved.py -v` shows what it finds).
-`/data/mapcurve.sqlite` is used as before (built by your `mapcurve_build.py`).
+Then the whole map workflow is: **upload `mapcurve.sqlite` to `/data/mapcurve.sqlite`**, set `use_tesla_gps = True` in
+`/data/bb_openpilot.cfg` once, and **reboot**. `mapcurved` starts itself with openpilot - nothing to run by hand.
+(To watch what it finds, `touch /data/mapcurve_debug` and read `/data/mapcurved.log`, or run it directly:
+`cd /data/openpilot && PYTHONPATH=/data/openpilot python3 selfdrive/car/tesla/mapcurved.py -v`.)
+Build the DB on a PC: `python3 tools/mapcurve_build.py myarea.osm.pbf mapcurve.sqlite`.
 
 ## Kill switches and debug
 
@@ -73,7 +81,8 @@ process manager yet - see the note at the bottom of `mapcurved.py`; until then s
 |---|---|
 | `touch /data/curve_limit_off` | no camera curve limit (as before) |
 | `touch /data/pcc_pedalmap_off` | fixed `accel / 3` again |
-| `touch /data/mapcurve_debug` | prints map-curve decisions (as before) |
+| `touch /data/mapcurve_debug` | prints map-curve decisions to `/data/mapcurved.log` |
+| `touch /data/mapcurve_off` | don't auto-start the map daemon (`mapcurved`) |
 | `rm /data/params/pccPedalMap.json` | forget the learned pedal response |
 
 Tuning constants are at the top of `pcc_curves.py`.
@@ -81,7 +90,7 @@ Tuning constants are at the top of `pcc_curves.py`.
 ## Tests
 
 ```
-python3 -m unittest tesla/tests/test_pcc_curves.py tesla/tests/test_mapcurved.py     # 18 tests, no openpilot needed
+python3 -m unittest tesla.tests.test_pcc_curves tesla.tests.test_mapcurved tesla.tests.test_mapcurve_launcher   # no openpilot needed
 ```
 
 Offline simulation of the old and new `PCC_module.py` (openpilot pieces replaced by simplified stand-ins, a simple

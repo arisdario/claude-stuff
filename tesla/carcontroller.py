@@ -109,6 +109,14 @@ class CarController():
     self.GYRO = GYROController()
     self.AHB = AHBController(self)
     self.UDS = UdsRelay()          # radarweb's read-only diagnostic requests, parked only (off unless /data/uds_read)
+    # MAPCURVE: start the road-aware map curve-speed daemon (mapcurved.py) with the stack, if /data/mapcurve.sqlite
+    # exists. Guarded + never raises, so it can't affect the car; disable with /data/mapcurve_off. (Not in the
+    # openpilot process manager - see mapcurve_launcher.py.)
+    try:
+      from selfdrive.car.tesla.mapcurve_launcher import ensure_running as _mapcurve_ensure_running
+      _mapcurve_ensure_running()
+    except Exception:
+      pass
     self.sent_DAS_bootID = False
     self.speedlimit = None
     self.trafficevents = messaging.sub_sock('trafficEvents', conflate=True)
