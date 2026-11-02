@@ -33,7 +33,12 @@ the independent oracle, classified `DETECTION_FAILURE` / `RECALC_FAILURE` / `RER
 every failure naming the wrong-road edge, junction node, oracle verdict and navigator status · planner-vs-oracle parity on every directed edge near
 the route, from the edge and from mid-edge GPS fixes · `NO ROUTE` diagnosed as disconnected data vs a oneway/access block.
 
-## Measured behaviour (synthetic parallel road, 30 seeds per cell, 1 Hz fixes)
+## Benchmark
+`BENCHMARK.md` is the seeded benchmark (147 conditions x 30 seeds, ground truth + the independent oracle, ambiguity classes never pooled, Wilson 95% intervals); reproduce it with
+`python3 -m tesla.nav.evaluate --all --seeds 30 --md BENCHMARK.md`. It lists the known defects D1-D5 (pinned as expected-failure tests in `tests/test_nav_known_defects.py`). The older figures below
+predate the tracker fixes and are superseded by it.
+
+## Measured behaviour (OLD, superseded by BENCHMARK.md - synthetic parallel road, 30 seeds per cell)
 Wrong road with **no connection** (oracle: unreachable): **0 snap-backs in 360 runs**; detected 358/360 (the 2 misses: 8 m separation, GPS noise >= 5 m).
 Driving the route beside a parallel road: **no false alarms at >= 12 m separation with <= 5 m GPS noise, none at >= 20 m at any tested noise**;
 at 8 m separation (about one GPS error) false alarms are 3/30 (5 m noise) and 6/30 (8 m noise). With a legitimate connection the recalculation starts on
