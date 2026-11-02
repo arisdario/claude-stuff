@@ -4,7 +4,8 @@ reachability oracle, never against the navigator's own opinion. Advisory tooling
   python3 -m tesla.nav.evaluate --all --seeds 30 --md tesla/nav/BENCHMARK.md --json bench.json     # the complete benchmark
   python3 -m tesla.nav.evaluate --family parallel --filter sep=20 --filter noise=8 --seeds 30      # one scenario family / slice
   python3 -m tesla.nav.evaluate --family parallel --filter sep=8 --filter noise=5 --filter connected=true --seeds 1 --seed-base 17 --trace   # ONE run, per fix
-  python3 -m tesla.nav.evaluate --all --override tracker.SWITCH_LLR=6                              # evidence for a parameter change (never changes the defaults)
+  python3 -m tesla.nav.evaluate --all --override tracker.SWITCH_LLR=6 --json variant.json         # evidence for a parameter change (never changes the defaults)
+  python3 -m tesla.nav.evaluate --compare baseline.json variant.json [...]                        # the variants side by side, per ambiguity class (classes are never pooled)
 
 Reproducibility: a run is fully determined by (family, scenario parameters, GPS noise sigma, noise model, seed). The seed drives the GPS noise, the sampling
 phase of the drive and (gps_events) the timing of outliers/dropouts; the networks themselves are deterministic. Every record stores seed, parameters, noise
@@ -570,6 +571,35 @@ def trace_run(cond, seed):
                 print('   ambiguous episodes:', rec[key]['episodes'])
 
 
+COMPARE_COLS = (('false recalc (control)', 'false_recalc'), ('wrong-road recalc (confident)', 'wrong_confident'), ('snap-back', 'snap_back'),
+                ('detection', 'detection'), ('sustained wrong belief', 'sustained_wrong'), ('fixes uncertain', 'fix_uncertain'),
+                ('persistent ambiguity', 'persistent_amb'), ('arrival', 'arrival'))
+
+
+def compare(paths):
+    """Side-by-side of several benchmark JSONs, one table per ambiguity class (never pooled across classes). Pools families WITHIN a class."""
+    runs = []
+    for p in paths:
+        d = json.load(open(p))
+        runs.append((os.path.basename(p), d['meta'], d['records']))
+    L = ['# Benchmark comparison', '']
+    for cl in CLASS_ORDER:
+        L += ['## %s - %s' % (cl, CLASS_NOTE[cl]), '', '| variant | overrides | runs | ' + ' | '.join(c for c, _ in COMPARE_COLS) + ' | time to correct identification m |',
+              '|---|---|---|' + '---|' * (len(COMPARE_COLS) + 1)]
+        for name, meta, recs in runs:
+            cr = [r for r in recs if r['class'] == cl and 'planning' not in r]
+            if not cr:
+                continue
+            s = summarise(cr)
+            cells = []
+            for _c, key in COMPARE_COLS:
+                t = s[key]
+                cells.append(pct(t) if t[0] == t[0] else 'n/a')
+            L.append('| %s | %s | %d | %s | %s |' % (name, ', '.join(meta['overrides']) or 'defaults', len(cr), ' | '.join(cells), fmt_med(s['ident_delay'])))
+        L.append('')
+    return '\n'.join(L) + '\n'
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--all', action='store_true'); ap.add_argument('--quick', action='store_true', help='reduced grid (used by the test-suite)')
@@ -577,7 +607,15 @@ def main(argv=None):
     ap.add_argument('--seeds', type=int, default=30); ap.add_argument('--seed-base', type=int, default=0)
     ap.add_argument('--override', action='append', default=[], metavar='MODULE.CONST=VALUE')
     ap.add_argument('--json'); ap.add_argument('--md'); ap.add_argument('--trace', action='store_true')
+    ap.add_argument('--compare', nargs='+', metavar='RESULT.json')
     a = ap.parse_args(argv)
+    if a.compare:
+        out = compare(a.compare)
+        if a.md:
+            open(a.md, 'w').write(out)
+        else:
+            print(out)
+        return 0
     apply_overrides(a.override)
     conds = quick_grid() if a.quick else full_grid()
     if a.family:
