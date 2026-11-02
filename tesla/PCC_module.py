@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 from selfdrive.car.tesla import teslacan
 from selfdrive.car.tesla import pcc_curves  # curve approach speeds, accel profile, learned pedal map (see that file)
+from selfdrive.car.tesla import tesla_csa      # TESLACSA: validated Tesla nav curvature (preferred map-curve source)
 from selfdrive.car.tesla import curve_fusion   # CURVEFUSION: confidence-weighted vision+map curve fusion (opt-in)
 from selfdrive.car.tesla.speed_utils.fleet_speed import FleetSpeed
 from selfdrive.controls.lib.longcontrol import LongControl, LongCtrlState
@@ -143,6 +144,7 @@ class PCCController():
     # MAPCURVE FIX: liveMapData comes 4x/s but update_pdl runs 20x/s; recv_one_or_none only saw it 1 cycle in 5, so the
     # map limit flickered on and off. Keep the last one (curvature, distance, time) and use it until it is 2 s old.
     self._map_curve = None
+    self._curve_src = None; self._curve_src_t = 0.   # TESLACSA: last logged curve source (tesla_csa|sqlite|none)
     self._curve_warn_t = 0.
     self._vision_prob = 0.0        # CURVEFUSION: lane probability from the model, a proxy for vision-curve confidence
     global PEDAL_MAP
@@ -425,6 +427,33 @@ class PCCController():
           v_map = max_v_in_mapped_curve_ms(curv, dist, CS.v_ego)
           if v_map and os.path.exists('/data/mapcurve_debug'):
             print('MAPCURVE: v_pid_before=%.1f v_map=%.1f dist=%.0f' % (self.v_pid, v_map, dist))
+        # TESLACSA: Tesla's nav curve broadcast is the preferred map-curve source ONLY when it passes tesla_csa's
+        # validation (zero/SNA/implausible = unavailable). Then it REPLACES the SQLite curve (one source per curve, no
+        # double counting); otherwise SQLite is the fallback. Floor only: it can lower v_curve, never raise it.
+        # /data/tesla_csa_off disables it; /data/tesla_csa_shadow logs it without using it.
+        csa_src, csa_why, v_csa = 'none', 'off', None
+        if not os.path.exists(tesla_csa.OFF_FILE):
+          try:
+            csa, csa_why = tesla_csa.best_csa(
+              (CS.csaRoadCurvC2, CS.csaRoadCurvC3, CS.csaRoadCurvRange, CS.csaRoadCurvUsingTspline),
+              (CS.csaOfframpCurvC2, CS.csaOfframpCurvC3, CS.csaOfframpCurvRange, CS.csaOfframpCurvUsingTspline))
+            if csa is not None and not os.path.exists(tesla_csa.SHADOW_FILE):
+              v_csa = pcc_curves.approach_speed(csa.speed, csa.dist, CS.v_ego)
+              csa_src = csa.source
+          except Exception:
+            csa, csa_why = None, 'error'
+        if v_csa is not None:
+          v_map = None                      # CSA is the map-curve source for this cycle
+        elif v_map:
+          csa_src = 'sqlite'
+        if time.time() - self._curve_src_t > 1.0 and (csa_src != self._curve_src or os.path.exists('/data/mapcurve_debug')):
+          self._curve_src_t = time.time(); self._curve_src = csa_src
+          try:
+            with open('/data/curve_source.json', 'w') as f:
+              f.write('{"source": "%s", "csa": "%s", "v_csa": %s, "v_map": %s}' % (
+                csa_src, csa_why, 'null' if v_csa is None else '%.1f' % v_csa, 'null' if not v_map else '%.1f' % v_map))
+          except Exception:
+            pass
         vis_cs = self._curve_speed(CS)   # CURVELIMIT: camera model-path curve speed
         curve_authority = 1.0
         if os.path.exists(CURVE_FUSION_FILE):
@@ -436,13 +465,17 @@ class PCCController():
                    'conf': max(0.25, min(0.95, 0.3 + 0.65 * self._vision_prob)), 'valid': vis_cs < 254.}]
           if v_map:
             srcs.append({'name': 'map', 'kind': 'map', 'speed': v_map, 'conf': 0.5, 'valid': True})
-          fus = curve_fusion.fuse(srcs, CS.v_ego, self.v_pid)
+          if v_csa is not None:
+            srcs.append({'name': csa_src, 'kind': 'route', 'speed': v_csa, 'conf': csa.conf, 'valid': True})
+          fus =curve_fusion.fuse(srcs, CS.v_ego, self.v_pid)
           if fus.target is not None:
             v_curve = min(v_curve, fus.target)
           curve_authority = fus.decel_authority
         else:
           if v_map:
             v_curve = min(v_curve, v_map)
+          if v_csa is not None:
+            v_curve = min(v_curve, v_csa)
           v_curve = min(v_curve, vis_cs)
         self.v_pid = min(self.v_pid, v_curve)
         # take fleet speed into consideration
