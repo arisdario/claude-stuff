@@ -121,6 +121,7 @@ def _clean(x):
     return None if x is None or (isinstance(x, float) and math.isnan(x)) else x
 
 
+NETWORK_TYPE = 'driving+service'
 RAW_KEYS = ('junction', 'tunnel', 'bridge', 'layer', 'oneway', 'oneway:motorcar', 'oneway:motor_vehicle', 'access', 'motor_vehicle', 'motorcar', 'vehicle',
             'service', 'maxspeed', 'name', 'ref')
 
@@ -147,10 +148,12 @@ def edges_from_pyrosm(osm, raw=None):
     """(way_id, u, v, coords, tags) tuples from pyrosm's node-to-node edges. Extra tag columns are requested only where the PBF has them; when `raw` (raw_way_tags) is given
     its tags are AUTHORITATIVE and override pyrosm's, so no tag depends on what pyrosm chose to expose."""
     extra = ['access', 'motor_vehicle', 'motorcar', 'vehicle', 'junction', 'maxspeed', 'oneway', 'ref', 'service', 'name', 'bridge', 'tunnel', 'layer']
+    # 'driving+service', NOT 'driving': pyrosm's 'driving' type silently drops every highway=service way (found by auditing a real Romanian extract against the raw
+    # PBF: 100% of 4,240 routable service ways, incl. service tunnels and roundabouts). Which service roads count is decided by OUR rules (osm_rules.access_ok).
     try:
-        _nodes, edges = osm.get_network(network_type='driving', nodes=True, extra_attributes=extra)
+        _nodes, edges = osm.get_network(network_type=NETWORK_TYPE, nodes=True, extra_attributes=extra)
     except Exception:
-        _nodes, edges = osm.get_network(network_type='driving', nodes=True)
+        _nodes, edges = osm.get_network(network_type=NETWORK_TYPE, nodes=True)
     cols = set(edges.columns)
     for row in edges.itertuples(index=False):
         d = row._asdict()
@@ -198,7 +201,7 @@ def build(pbf, out_path, bbox=None, use_raw_tags=True):
     extra = {'source_file': os.path.basename(pbf), 'source_bytes': str(os.path.getsize(pbf)), 'source_md5': file_md5(pbf),
              'bbox': json.dumps(bbox) if bbox else 'none (whole file)', 'built_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
              'tag_source': 'pyrosm + raw PBF tags (pyosmium)' if raw is not None else 'pyrosm only (pyosmium not installed or disabled)',
-             'raw_ways_read': str(len(raw)) if raw is not None else '0'}
+             'raw_ways_read': str(len(raw)) if raw is not None else '0', 'pyrosm_network_type': NETWORK_TYPE}
     try:
         import pyrosm
         extra['pyrosm_version'] = getattr(pyrosm, '__version__', '?')

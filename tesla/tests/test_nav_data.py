@@ -85,7 +85,7 @@ class TestTagPreservationFromAPbfWithKnownTruth(unittest.TestCase):
         lat0, lon0 = 45.50, 25.57
         pt = lambda n, e: (lon0 + e / (111320 * math.cos(math.radians(lat0))), lat0 + n / 111320)
         for i, (n, e) in {1: (0, 0), 2: (0, 200), 3: (0, 400), 4: (0, 600), 5: (0, 800), 6: (0, 1000), 10: (30, 500), 11: (0, 530), 12: (-30, 500), 13: (0, 470),
-                          20: (200, 200), 30: (-200, 200), 31: (-200, 400)}.items():
+                          20: (200, 200), 21: (200, 400), 22: (200, 600), 23: (230, 600), 24: (200, 630), 30: (-200, 200), 31: (-200, 400)}.items():
             w.add_node(osmium.osm.mutable.Node(id=i, location=pt(n, e), tags={}))
         way = lambda i, ns, **t: w.add_way(osmium.osm.mutable.Way(id=i, nodes=ns, tags=t))
         way(100, [1, 2], highway='primary', name='Entry Rd', ref='DN1')
@@ -98,6 +98,10 @@ class TestTagPreservationFromAPbfWithKnownTruth(unittest.TestCase):
         way(107, [2, 20], highway='residential', name='Side A', oneway='-1')
         way(108, [3, 31], highway='tertiary', name='Side B', motor_vehicle='no')
         way(109, [2, 30], highway='motorway', name='Motorway Stub')
+        way(110, [20, 21], highway='service', name='Service Lane')                           # a normal service road: must be routable
+        way(111, [30, 31], highway='service', service='driveway')                          # a driveway: excluded by OUR rules, not silently by the reader
+        way(112, [21, 22], highway='service', service='parking_aisle')
+        way(113, [22, 23, 24, 22], highway='service', junction='roundabout', tunnel='yes')   # a service roundabout in a tunnel
         w.close()
 
     def build(self, raw):
@@ -109,9 +113,21 @@ class TestTagPreservationFromAPbfWithKnownTruth(unittest.TestCase):
         for raw in (False, True):
             db = self.build(raw)
             q = lambda sql: db.execute(sql).fetchone()[0]
-            self.assertEqual(q('select count(*) from edges where roundabout=1'), 4, raw)             # the closed ring, one-way
+            self.assertEqual(q('select count(*) from edges where roundabout=1'), 7, raw)             # way 103 (4 edges) + the service roundabout 113 (3), both one-way
             self.assertEqual(q("select count(*) from edges where way_id='101' and tunnel=1 and layer=-1"), 2, raw)
             self.assertEqual(q("select count(*) from edges where way_id='105' and bridge=1 and layer=1"), 1, raw)   # oneway=yes: one direction
+
+    def test_service_roads_are_not_silently_dropped_by_the_reader(self):
+        """DEFECT found by auditing a real Romanian extract against the raw PBF: the graph was built with pyrosm network_type='driving', which drops EVERY highway=service
+        way (100% of 4,240 routable service ways in the Predeal-Brasov extract), including service tunnels and roundabouts. Our own rules decide which service roads count."""
+        for raw in (False, True):
+            db = self.build(raw)
+            ways = {r[0] for r in db.execute('select distinct way_id from edges')}
+            self.assertIn('110', ways, raw)                                                   # an ordinary service road is routable
+            self.assertNotIn('111', ways); self.assertNotIn('112', ways)                      # driveway / parking aisle: excluded by osm_rules
+            self.assertEqual(db.execute("select count(*) from edges where way_id='113' and roundabout=1 and tunnel=1").fetchone()[0], 3, raw)
+            rej = dict(db.execute("select key, value from meta where key='rejected'").fetchall())['rejected']
+            self.assertIn('service:driveway', rej)                                            # our rules' exclusions are counted, not silent (pyrosm pre-drops parking aisles itself)
 
     def test_oneway_access_and_names_are_preserved(self):
         db = self.build(True)
