@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 from selfdrive.car.tesla import teslacan
 from selfdrive.car.tesla import pcc_curves  # curve approach speeds, accel profile, learned pedal map (see that file)
+from selfdrive.car.tesla import curve_fusion   # CURVEFUSION: confidence-weighted vision+map curve fusion (opt-in)
 from selfdrive.car.tesla.speed_utils.fleet_speed import FleetSpeed
 from selfdrive.controls.lib.longcontrol import LongControl, LongCtrlState
 from common.numpy_fast import clip, interp
@@ -91,6 +92,7 @@ class PCCModes():
 
 PEDAL_MAP = None   # pcc_curves.PedalMap, set by PCCController; None = old fixed conversion
 PEDAL_MAP_OFF_FILE = '/data/pcc_pedalmap_off'   # touch to go back to the fixed accel / 3
+CURVE_FUSION_FILE = '/data/curve_fusion'        # CURVEFUSION: touch to enable confidence-weighted curve fusion (default off)
 
 def tesla_compute_gb(accel, speed):
   # PEDALMAP: positive accelerations use the learned acceleration-per-pedal for this speed (a Tesla's response to the
@@ -142,6 +144,7 @@ class PCCController():
     # map limit flickered on and off. Keep the last one (curvature, distance, time) and use it until it is 2 s old.
     self._map_curve = None
     self._curve_warn_t = 0.
+    self._vision_prob = 0.0        # CURVEFUSION: lane probability from the model, a proxy for vision-curve confidence
     global PEDAL_MAP
     self.pedal_map = PEDAL_MAP = pcc_curves.PedalMap('/data/params/pccPedalMap.json')
     self.lead_1 = None
@@ -415,24 +418,39 @@ class PCCController():
       if self.enable_pedal_cruise and not self.accelerator_pedal_pressed:
         self.v_pid = self.calc_follow_speed_ms(CS,alca_enabled)
         v_follow = self.v_pid
-        v_curve = 255.
+        v_curve = 255.; v_map = None
         if self._map_curve is not None and time.time() - self._map_curve[2] < 2.:
           curv, dist, t_map = self._map_curve
           dist = max(0., dist - CS.v_ego * (time.time() - t_map))   # we kept driving since the message
           v_map = max_v_in_mapped_curve_ms(curv, dist, CS.v_ego)
+          if v_map and os.path.exists('/data/mapcurve_debug'):
+            print('MAPCURVE: v_pid_before=%.1f v_map=%.1f dist=%.0f' % (self.v_pid, v_map, dist))
+        vis_cs = self._curve_speed(CS)   # CURVELIMIT: camera model-path curve speed
+        curve_authority = 1.0
+        if os.path.exists(CURVE_FUSION_FILE):
+          # CURVEFUSION (opt-in): fuse vision + map by confidence. The target is still the most restrictive source
+          # (safety floor), but the curve-brake authority is scaled by confidence, so the 0.8.3 model's night path
+          # jitter (low lane prob) cannot trigger phantom hard braking, while a confident/corroborated curve brakes
+          # firmly. Default off -> the two min()s below run instead and behaviour is identical to before.
+          srcs = [{'name': 'vision', 'kind': 'vision', 'speed': vis_cs,
+                   'conf': max(0.25, min(0.95, 0.3 + 0.65 * self._vision_prob)), 'valid': vis_cs < 254.}]
           if v_map:
-            if os.path.exists('/data/mapcurve_debug'):  # touch this file to enable, rm to disable
-              print('MAPCURVE: v_pid_before=%.1f v_curve=%.1f dist=%.0f applied=%s' % (self.v_pid, v_map, dist, v_map < self.v_pid))
+            srcs.append({'name': 'map', 'kind': 'map', 'speed': v_map, 'conf': 0.5, 'valid': True})
+          fus = curve_fusion.fuse(srcs, CS.v_ego, self.v_pid)
+          if fus.target is not None:
+            v_curve = min(v_curve, fus.target)
+          curve_authority = fus.decel_authority
+        else:
+          if v_map:
             v_curve = min(v_curve, v_map)
-        # CURVELIMIT: slow down for curves using the camera model path
-        v_curve = min(v_curve, self._curve_speed(CS))
+          v_curve = min(v_curve, vis_cs)
         self.v_pid = min(self.v_pid, v_curve)
         # take fleet speed into consideration
         self.v_pid = min(self.v_pid, self.fleet_speed.adjust(CS, self.pedal_speed_kph * CV.KPH_TO_MS, frame))
         # CURVEBRAKE: when a curve is what limits us and we are above its approach speed, allow real deceleration
         # (without a lead the limit was ~0.5 m/s2 - far too weak to get down to a curve speed in time)
         if v_curve < v_follow and CS.v_ego > v_curve + 0.3:
-          accel_limits[0] = min(accel_limits[0], -pcc_curves.CURVE_BRAKE)
+          accel_limits[0] = min(accel_limits[0], -pcc_curves.CURVE_BRAKE * curve_authority)  # CURVEFUSION: scaled by confidence (1.0 when fusion off)
           jerk_limits[0] = min(jerk_limits[0], accel_limits[0] / 2.)
         # CURVEWARN: the pedal can only use regen (~1.6-2 m/s2). Far above the approach speed, regen alone won't get
         # down in time - only the driver's brake can. Say so on the cluster (at most every 3 s).
@@ -667,6 +685,8 @@ class PCCController():
         pts = list(m.model.path.points)
         self._curve_points = np.array(pts, dtype=np.float64) if len(pts) >= 20 else None
         self._curve_stds = list(m.model.path.stds)    # PATHEND: where the model's prediction ends
+        try: self._vision_prob = max(m.model.leftLane.prob, m.model.rightLane.prob)   # CURVEFUSION: lane confidence
+        except Exception: pass
       pts = self._curve_points
       if pts is None:
         return 255.
