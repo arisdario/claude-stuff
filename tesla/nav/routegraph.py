@@ -4,17 +4,20 @@ SCHEMA_V2_AND_RUNTIME.md); this file never touches it.
 
 Schema:
   nodes(id, lat, lon)                     OSM node id -> position (edge endpoints only)
-  edges(eid, way_id, seg, u, v, length_m, cost_s, highway, name, ref, roundabout, rev, oneway, access, geom, cell_lat, cell_lon)
+  edges(eid, way_id, seg, u, v, length_m, cost_s, highway, name, ref, roundabout, rev, oneway, access, geom, cell_lat, cell_lon,
+        bridge, tunnel, layer, maxspeed_kph)                    (the last four: schema v2)
         one row per LEGAL DIRECTION of each node-to-node OSM edge. rev=1: runs against the OSM way order. oneway/access keep
         the raw tags so the validator can re-apply the rules independently. geom = 'lat,lon;lat,lon;...' in travel order.
   places(name, norm, place, lat, lon)     place=* nodes, to resolve 'Predeal' etc. from the data itself
   meta(key, value)
 Two edges are connected iff they share an OSM node ID (v of one == u of the next). Never by coordinates."""
 import collections
+import hashlib
 import json
 import math
 import os
 import sqlite3
+import time
 
 try:
     from . import geo, osm_rules as R
@@ -23,25 +26,39 @@ except ImportError:                                           # run as a plain s
     import osm_rules as R
 
 CELL_DEG = 0.01
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2          # v2 adds bridge / tunnel / layer / maxspeed_kph to edges; v1 databases are still readable
+READABLE_VERSIONS = ('1', '2')
 TAG_KEYS = ('highway', 'name', 'ref', 'oneway', 'oneway:motorcar', 'oneway:motor_vehicle', 'junction', 'maxspeed', 'access',
-            'motor_vehicle', 'motorcar', 'vehicle', 'service')
+            'motor_vehicle', 'motorcar', 'vehicle', 'service', 'bridge', 'tunnel', 'layer')
 
 SCHEMA_SQL = '''
 CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL NOT NULL, lon REAL NOT NULL);
 CREATE TABLE edges (eid INTEGER PRIMARY KEY, way_id TEXT NOT NULL, seg INTEGER NOT NULL, u INTEGER NOT NULL, v INTEGER NOT NULL,
   length_m REAL NOT NULL, cost_s REAL NOT NULL, highway TEXT, name TEXT, ref TEXT, roundabout INTEGER NOT NULL, rev INTEGER NOT NULL,
-  oneway TEXT, access TEXT, geom TEXT NOT NULL, cell_lat INTEGER NOT NULL, cell_lon INTEGER NOT NULL);
+  oneway TEXT, access TEXT, geom TEXT NOT NULL, cell_lat INTEGER NOT NULL, cell_lon INTEGER NOT NULL,
+  bridge INTEGER NOT NULL DEFAULT 0, tunnel INTEGER NOT NULL DEFAULT 0, layer INTEGER, maxspeed_kph REAL);
 CREATE TABLE places (name TEXT, norm TEXT, place TEXT, lat REAL, lon REAL);
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
 '''
+
+
+def _flag(v, no=('no', 'false', '0', '')):
+    return 0 if v is None or str(v).strip().lower() in no or str(v).strip().lower() == 'nan' else 1
+
+
+def _layer(v):
+    try:
+        x = int(float(str(v)))
+        return x if -5 <= x <= 5 else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _geom_text(pts):
     return ';'.join('%.7f,%.7f' % (a, b) for a, b in pts)
 
 
-def build_from_edges(edges, out_path, places=()):
+def build_from_edges(edges, out_path, places=(), meta_extra=None):
     """edges: iterable of (way_id, u, v, coords[(lon, lat), ...], tags dict) - node-to-node pieces of ways in way order.
     places: iterable of (name, place, lat, lon). Pure function (no pyrosm): unit-testable."""
     if os.path.exists(out_path):
@@ -80,18 +97,20 @@ def build_from_edges(edges, out_path, places=()):
         for rev, (a, b, p) in ((0, (u, v, pts)), (1, (v, u, pts[::-1]))):
             if (rev == 0 and d in ('both', 'fwd')) or (rev == 1 and d in ('both', 'rev')):
                 db.execute('INSERT INTO edges (way_id, seg, u, v, length_m, cost_s, highway, name, ref, roundabout, rev, oneway, access, geom, '
-                           'cell_lat, cell_lon) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                           'cell_lat, cell_lon, bridge, tunnel, layer, maxspeed_kph) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                            (str(way_id), seg, int(a), int(b), length, cost, str(tags.get('highway')), name, ref,
                             1 if R.is_roundabout(tags) else 0, rev, raw_ow, raw_ac, _geom_text(p),
-                            int(math.floor(p[0][0] / CELL_DEG)), int(math.floor(p[0][1] / CELL_DEG))))
+                            int(math.floor(p[0][0] / CELL_DEG)), int(math.floor(p[0][1] / CELL_DEG)),
+                            _flag(tags.get('bridge')), _flag(tags.get('tunnel')), _layer(tags.get('layer')), R.maxspeed_kph(tags)))
                 n_dir += 1
     db.executemany('INSERT INTO nodes VALUES (?,?,?)', [(k, p[0], p[1]) for k, p in nodes.items()])
     n_pl = 0
     for name, place, lat, lon in places:
         if name:
             db.execute('INSERT INTO places VALUES (?,?,?,?,?)', (name, R.norm_name(name), place, lat, lon)); n_pl += 1
-    db.executemany('INSERT INTO meta VALUES (?,?)', [('schema_version', str(SCHEMA_VERSION)), ('rejected', json.dumps(dict(rejected))),
-                                                      ('turn_restrictions', 'not modelled')])
+    meta_rows = [('schema_version', str(SCHEMA_VERSION)), ('rejected', json.dumps(dict(rejected))), ('turn_restrictions', 'not modelled')]
+    meta_rows += [(str(k), v if isinstance(v, str) else json.dumps(v)) for k, v in (meta_extra or {}).items()]
+    db.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)', meta_rows)
     db.executescript('CREATE INDEX idx_edges_u ON edges(u); CREATE INDEX idx_edges_v ON edges(v); CREATE INDEX idx_edges_cell ON edges(cell_lat, cell_lon); '
                      'CREATE INDEX idx_edges_way ON edges(way_id); CREATE INDEX idx_places_norm ON places(norm);')
     db.commit(); db.close()
@@ -102,10 +121,32 @@ def _clean(x):
     return None if x is None or (isinstance(x, float) and math.isnan(x)) else x
 
 
-def edges_from_pyrosm(osm):
-    """(way_id, u, v, coords, tags) tuples from pyrosm's node-to-node edges. Extra tag columns are requested only where the
-    PBF has them; remaining tags are read from pyrosm's `tags` column."""
-    extra = ['access', 'motor_vehicle', 'motorcar', 'vehicle', 'junction', 'maxspeed', 'oneway', 'ref', 'service', 'name']
+RAW_KEYS = ('junction', 'tunnel', 'bridge', 'layer', 'oneway', 'oneway:motorcar', 'oneway:motor_vehicle', 'access', 'motor_vehicle', 'motorcar', 'vehicle',
+            'service', 'maxspeed', 'name', 'ref')
+
+
+def raw_way_tags(pbf):
+    """GROUND-TRUTH tags straight from the PBF, way by way, for routable highways only: {way_id(str): {tag: value}}. A way-only streaming pass (no nodes, no geometry), so it is
+    fast and small even for a country. Needs pyosmium (`pip install osmium`); returns None if it is not installed. Used to supplement pyrosm, which silently drops tag
+    columns it does not recognise or that are absent from its parse (roundabouts and tunnels are the ones that matter for routing and display)."""
+    try:
+        import osmium
+    except ImportError:
+        return None
+    out = {}
+    for o in osmium.FileProcessor(pbf, osmium.osm.WAY):
+        hw = o.tags.get('highway')
+        if hw is None or hw not in R.ROUTABLE:
+            continue
+        out[str(o.id)] = {k: o.tags[k] for k in RAW_KEYS if k in o.tags}
+        out[str(o.id)]['highway'] = hw
+    return out
+
+
+def edges_from_pyrosm(osm, raw=None):
+    """(way_id, u, v, coords, tags) tuples from pyrosm's node-to-node edges. Extra tag columns are requested only where the PBF has them; when `raw` (raw_way_tags) is given
+    its tags are AUTHORITATIVE and override pyrosm's, so no tag depends on what pyrosm chose to expose."""
+    extra = ['access', 'motor_vehicle', 'motorcar', 'vehicle', 'junction', 'maxspeed', 'oneway', 'ref', 'service', 'name', 'bridge', 'tunnel', 'layer']
     try:
         _nodes, edges = osm.get_network(network_type='driving', nodes=True, extra_attributes=extra)
     except Exception:
@@ -114,18 +155,21 @@ def edges_from_pyrosm(osm):
     for row in edges.itertuples(index=False):
         d = row._asdict()
         tags = {k: _clean(d.get(k)) for k in TAG_KEYS if k in cols}
-        raw = d.get('tags')
-        if isinstance(raw, str) and raw.startswith('{'):
+        rawj = d.get('tags')
+        if isinstance(rawj, str) and rawj.startswith('{'):
             try:
-                for k, v in json.loads(raw).items():
+                for k, v in json.loads(rawj).items():
                     if k in TAG_KEYS and tags.get(k) is None:
                         tags[k] = v
             except ValueError:
                 pass
+        wid = str(int(d['id']))
+        if raw is not None and wid in raw:
+            tags.update(raw[wid])
         geom = d['geometry']
         lines = [list(geom.coords)] if geom.geom_type == 'LineString' else [list(g.coords) for g in geom.geoms]
         for coords in lines:
-            yield (str(int(d['id'])), int(d['u']), int(d['v']), coords, tags)
+            yield (wid, int(d['u']), int(d['v']), coords, tags)
 
 
 def places_from_pyrosm(osm):
@@ -138,10 +182,29 @@ def places_from_pyrosm(osm):
             yield (r.name, getattr(r, 'place', None), float(r.lat), float(r.lon))
 
 
-def build(pbf, out_path, bbox=None):
+def file_md5(path, chunk=1 << 20):
+    h = hashlib.md5()
+    with open(path, 'rb') as f:
+        for blk in iter(lambda: f.read(chunk), b''):
+            h.update(blk)
+    return h.hexdigest()
+
+
+def build(pbf, out_path, bbox=None, use_raw_tags=True):
+    """Build routegraph.sqlite from a PBF, entirely locally. Records provenance (source file, size, md5 - compare with Geofabrik's .md5 - bbox, tag source, versions)."""
     from pyrosm import OSM
     osm = OSM(pbf, bounding_box=bbox) if bbox else OSM(pbf)
-    return build_from_edges(edges_from_pyrosm(osm), out_path, list(places_from_pyrosm(osm)))
+    raw = raw_way_tags(pbf) if use_raw_tags else None
+    extra = {'source_file': os.path.basename(pbf), 'source_bytes': str(os.path.getsize(pbf)), 'source_md5': file_md5(pbf),
+             'bbox': json.dumps(bbox) if bbox else 'none (whole file)', 'built_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+             'tag_source': 'pyrosm + raw PBF tags (pyosmium)' if raw is not None else 'pyrosm only (pyosmium not installed or disabled)',
+             'raw_ways_read': str(len(raw)) if raw is not None else '0'}
+    try:
+        import pyrosm
+        extra['pyrosm_version'] = getattr(pyrosm, '__version__', '?')
+    except ImportError:
+        pass
+    return build_from_edges(edges_from_pyrosm(osm, raw), out_path, list(places_from_pyrosm(osm)), extra)
 
 
 Edge = collections.namedtuple('Edge', 'eid way_id seg u v length_m cost_s highway name ref roundabout rev')
@@ -158,9 +221,10 @@ class Graph(object):
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.execute('PRAGMA query_only=ON')
         meta = dict(self.db.execute('SELECT key, value FROM meta'))
-        if meta.get('schema_version') != str(SCHEMA_VERSION):
+        if meta.get('schema_version') not in READABLE_VERSIONS:
             raise RuntimeError('unsupported routegraph schema %r' % (meta.get('schema_version'),))
         self.meta = meta
+        self.has_v2 = 'bridge' in {r[1] for r in self.db.execute('PRAGMA table_info(edges)')}
         self._out, self._in, self._edge, self._geom, self._node = {}, {}, {}, {}, {}
 
     def out_edges(self, node):
@@ -171,6 +235,17 @@ class Graph(object):
                 self._out.clear()
             self._out[node] = r
         return r
+
+    def edge_info(self, eid):
+        """everything stored about one edge as a dict (v2 fields are None on a v1 database); the routing engine does not use these"""
+        cols = ['eid', 'way_id', 'u', 'v', 'length_m', 'highway', 'name', 'ref', 'roundabout', 'rev', 'oneway', 'access']
+        if self.has_v2:
+            cols += ['bridge', 'tunnel', 'layer', 'maxspeed_kph']
+        row = self.db.execute('SELECT %s FROM edges WHERE eid=?' % ', '.join(cols), (eid,)).fetchone()
+        d = dict(zip(cols, row))
+        for k in ('bridge', 'tunnel', 'layer', 'maxspeed_kph'):
+            d.setdefault(k, None)
+        return d
 
     def in_edges(self, node):
         r = self._in.get(node)
