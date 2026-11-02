@@ -152,3 +152,58 @@ class TestTagPreservationFromAPbfWithKnownTruth(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestSpatialIndex(unittest.TestCase):
+    """The R-tree replaces a grid that scanned ~24,000 edges (347 ms) per fix in dense Bucharest and could not see the middle of a long edge."""
+    def short_net(self):
+        net = S.Net()
+        for r in range(6):
+            ids = [net.node() for _ in range(8)]
+            net.way('Row%d' % r, [(ids[c], 90.0 * r, 70.0 * c) for c in range(8)])
+        return net
+
+    def graphs(self, net):
+        p = os.path.join(tempfile.mkdtemp(), 'g.sqlite')
+        RG.build_from_edges(net.edges, p, [])
+        a, b = RG.Graph(p), RG.Graph(p)
+        b.has_rtree = False                                           # the same database through the grid fallback
+        return a, b
+
+    def test_rtree_is_built_and_recorded(self):
+        g, _ = self.graphs(self.short_net())
+        self.assertTrue(g.has_rtree); self.assertEqual(g.meta['spatial_index'], 'rtree')
+        self.assertEqual(g.db.execute('select count(*) from edge_rtree').fetchone()[0], g.db.execute('select count(*) from edges').fetchone()[0])
+
+    def test_rtree_and_grid_agree_on_short_edges(self):
+        import random
+        a, b = self.graphs(self.short_net())
+        rnd = random.Random(4)
+        for _ in range(60):
+            la, lo = S.at(rnd.uniform(-40, 500), rnd.uniform(-40, 520))
+            for hd in (None, 90.0, 250.0):
+                x = [(s.edge.eid, round(s.dist_m, 6)) for s in a.snap(la, lo, hd, 60.0, limit=50)]
+                y = [(s.edge.eid, round(s.dist_m, 6)) for s in b.snap(la, lo, hd, 60.0, limit=50)]
+                self.assertEqual(x, y, (la, lo, hd))
+
+    def test_a_long_edge_is_found_mid_way_by_the_rtree_but_missed_by_the_grid(self):
+        """DEFECT in the grid: an edge is indexed by its START cell only, so a fix more than ~2 cells (1.1 km) from the start of a long rural edge never sees it."""
+        net = S.Net()
+        a, b = net.node(), net.node()
+        net.way('Long Rural Road', [(a, 0.0, 0.0), (b, 0.0, 6000.0)])           # one 6 km edge between two nodes
+        g, grid = self.graphs(net)
+        la, lo = S.at(4.0, 3000.0)                                              # 4 m from the middle of it
+        self.assertTrue(g.snap(la, lo, 90.0, 35.0), 'rtree must find the edge')
+        self.assertFalse(grid.snap(la, lo, 90.0, 35.0), 'the grid cannot (this is the defect the rtree fixes)')
+        r = RT.find_route(g, S.at(0, 100), S.at(0, 5900))
+        self.assertAlmostEqual(r.distance_m, 5800.0, delta=5.0)
+
+    def test_database_without_the_rtree_table_still_works(self):
+        net = self.short_net()
+        p = os.path.join(tempfile.mkdtemp(), 'g.sqlite')
+        RG.build_from_edges(net.edges, p, [])
+        db = sqlite3.connect(p); db.execute('DROP TABLE edge_rtree'); db.commit(); db.close()
+        g = RG.Graph(p)
+        self.assertFalse(g.has_rtree)
+        r = RT.find_route(g, S.at(0, 10), S.at(0, 400))                         # within one row (the rows are not connected to each other)
+        self.assertAlmostEqual(r.distance_m, 390.0, delta=3.0)

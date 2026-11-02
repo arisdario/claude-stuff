@@ -4,6 +4,8 @@ SCHEMA_V2_AND_RUNTIME.md); this file never touches it.
 
 Schema:
   nodes(id, lat, lon)                     OSM node id -> position (edge endpoints only)
+  edge_rtree(eid, minlat, maxlat, minlon, maxlon)         bounding box of every edge (SQLite R-tree) - the spatial index; absent on older databases / SQLite without R-tree,
+                                                          in which case the coarse grid (cell_lat/cell_lon, indexed by the edge START only) is the fallback
   edges(eid, way_id, seg, u, v, length_m, cost_s, highway, name, ref, roundabout, rev, oneway, access, geom, cell_lat, cell_lon,
         bridge, tunnel, layer, maxspeed_kph)                    (the last four: schema v2)
         one row per LEGAL DIRECTION of each node-to-node OSM edge. rev=1: runs against the OSM way order. oneway/access keep
@@ -66,6 +68,11 @@ def build_from_edges(edges, out_path, places=(), meta_extra=None):
     db = sqlite3.connect(out_path)
     db.execute('PRAGMA journal_mode=OFF'); db.execute('PRAGMA synchronous=OFF')
     db.executescript(SCHEMA_SQL)
+    try:
+        db.execute('CREATE VIRTUAL TABLE edge_rtree USING rtree(eid, minlat, maxlat, minlon, maxlon)')
+        spatial = 'rtree'
+    except sqlite3.OperationalError:
+        spatial = 'grid'                                       # this SQLite has no R-tree: the (slower, start-point-only) grid index is used
     rejected = collections.Counter()
     nodes = {}
     seg_of_way = collections.Counter()
@@ -96,19 +103,21 @@ def build_from_edges(edges, out_path, places=(), meta_extra=None):
         seg = seg_of_way[way_id]; seg_of_way[way_id] += 1
         for rev, (a, b, p) in ((0, (u, v, pts)), (1, (v, u, pts[::-1]))):
             if (rev == 0 and d in ('both', 'fwd')) or (rev == 1 and d in ('both', 'rev')):
-                db.execute('INSERT INTO edges (way_id, seg, u, v, length_m, cost_s, highway, name, ref, roundabout, rev, oneway, access, geom, '
+                cur = db.execute('INSERT INTO edges (way_id, seg, u, v, length_m, cost_s, highway, name, ref, roundabout, rev, oneway, access, geom, '
                            'cell_lat, cell_lon, bridge, tunnel, layer, maxspeed_kph) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                            (str(way_id), seg, int(a), int(b), length, cost, str(tags.get('highway')), name, ref,
                             1 if R.is_roundabout(tags) else 0, rev, raw_ow, raw_ac, _geom_text(p),
                             int(math.floor(p[0][0] / CELL_DEG)), int(math.floor(p[0][1] / CELL_DEG)),
                             _flag(tags.get('bridge')), _flag(tags.get('tunnel')), _layer(tags.get('layer')), R.maxspeed_kph(tags)))
+                if spatial == 'rtree':
+                    db.execute('INSERT INTO edge_rtree VALUES (?,?,?,?,?)', (cur.lastrowid, min(q[0] for q in p), max(q[0] for q in p), min(q[1] for q in p), max(q[1] for q in p)))
                 n_dir += 1
     db.executemany('INSERT INTO nodes VALUES (?,?,?)', [(k, p[0], p[1]) for k, p in nodes.items()])
     n_pl = 0
     for name, place, lat, lon in places:
         if name:
             db.execute('INSERT INTO places VALUES (?,?,?,?,?)', (name, R.norm_name(name), place, lat, lon)); n_pl += 1
-    meta_rows = [('schema_version', str(SCHEMA_VERSION)), ('rejected', json.dumps(dict(rejected))), ('turn_restrictions', 'not modelled')]
+    meta_rows = [('schema_version', str(SCHEMA_VERSION)), ('rejected', json.dumps(dict(rejected))), ('turn_restrictions', 'not modelled'), ('spatial_index', spatial)]
     meta_rows += [(str(k), v if isinstance(v, str) else json.dumps(v)) for k, v in (meta_extra or {}).items()]
     db.executemany('INSERT OR REPLACE INTO meta VALUES (?,?)', meta_rows)
     db.executescript('CREATE INDEX idx_edges_u ON edges(u); CREATE INDEX idx_edges_v ON edges(v); CREATE INDEX idx_edges_cell ON edges(cell_lat, cell_lon); '
@@ -228,6 +237,7 @@ class Graph(object):
             raise RuntimeError('unsupported routegraph schema %r' % (meta.get('schema_version'),))
         self.meta = meta
         self.has_v2 = 'bridge' in {r[1] for r in self.db.execute('PRAGMA table_info(edges)')}
+        self.has_rtree = self.db.execute("SELECT 1 FROM sqlite_master WHERE name='edge_rtree'").fetchone() is not None
         self._out, self._in, self._edge, self._geom, self._node = {}, {}, {}, {}, {}
 
     def out_edges(self, node):
@@ -326,16 +336,24 @@ class Graph(object):
         from it are dropped (so a car is snapped to the carriageway it is driving along, not the opposite one)."""
         if not geo.valid_latlon(lat, lon):
             return []
-        cl, co = int(math.floor(lat / CELL_DEG)), int(math.floor(lon / CELL_DEG))
-        rows = self.db.execute('SELECT eid FROM edges WHERE cell_lat BETWEEN ? AND ? AND cell_lon BETWEEN ? AND ?',
-                               (cl - 2, cl + 2, co - 2, co + 2)).fetchall()
+        if self.has_rtree:
+            # exact bounding-box query: only edges whose box is within max_m of the fix (a few dozen, even in a dense city) - and long edges are found wherever
+            # the fix is along them, which the start-point-only grid below cannot do
+            dlat = max_m * 1.05 / 111320.0 + 1e-6
+            dlon = dlat / max(0.05, math.cos(math.radians(lat)))
+            rows = self.db.execute('SELECT eid FROM edge_rtree WHERE maxlat >= ? AND minlat <= ? AND maxlon >= ? AND minlon <= ?',
+                                   (lat - dlat, lat + dlat, lon - dlon, lon + dlon)).fetchall()
+        else:
+            cl, co = int(math.floor(lat / CELL_DEG)), int(math.floor(lon / CELL_DEG))
+            rows = self.db.execute('SELECT eid FROM edges WHERE cell_lat BETWEEN ? AND ? AND cell_lon BETWEEN ? AND ?',
+                                   (cl - 2, cl + 2, co - 2, co + 2)).fetchall()
         out = []
         for (eid,) in rows:
             d, along, plat, plon, err = self.measure(eid, lat, lon, heading)
             if d > max_m or (err is not None and err > 90.0):
                 continue
             out.append(Snap(self.edge(eid), d, along, plat, plon, err))
-        out.sort(key=lambda s: s.dist_m + 0.3 * (s.heading_err or 0.0))
+        out.sort(key=lambda s: (s.dist_m + 0.3 * (s.heading_err or 0.0), s.edge.eid))     # eid breaks exact ties (a road's two directions): deterministic, index-independent
         return out[:limit]
 
     def find_places(self, name):
