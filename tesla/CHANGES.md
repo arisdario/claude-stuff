@@ -63,6 +63,27 @@ empty road you know, foot over the brake. Every new behaviour has a kill switch.
   affect the car; only runs if `/data/mapcurve.sqlite` exists; won't spawn a second copy; disable with
   `touch /data/mapcurve_off`.
 
+### Route continuity through OSM node IDs (DB schema v2)
+
+`tools/mapcurve_build.py` now records `start_node_id` / `end_node_id` (OSM node IDs) per segment plus a `meta` table
+(`schema_version=2`). Ways are split into segments at every node shared with another drivable way, so every junction is a
+segment endpoint. node IDs come from pyrosm's `get_network(nodes=True)` (verified on pyrosm output: every edge's `u`/`v`
+match the first/last coordinate). The runtime follows a road past the end of its segment **only through a shared node ID**:
+
+- **Never by proximity.** Two roads whose endpoints coincide exactly but have different node IDs are not joined.
+- **Oneway respected** (explicit tag wins; `motorway`/`motorway_link` are oneway by default). A connected road that can only be
+  entered against its oneway is not a candidate.
+- **Same OSM way** continuing through the node is taken directly (any deflection, e.g. a hairpin apex).
+- **Different roads at a junction:** heading picks the continuation only if it is within 30 deg of straight AND beats the
+  runner-up by 25 deg; a single continuation is taken up to 100 deg of turn. Otherwise prediction **stops** (`ambiguous` /
+  `sharp_turn`) - nothing is guessed. Up to 8 hops, never revisiting a segment.
+- **Old databases (v1, no node columns) keep working** and simply stop at the segment end (`no_node_ids`).
+- An unusable position / heading (NaN, inf, None, out of range) now matches nothing (a NaN heading used to pass the gate).
+
+To get node IDs the national DB must be **rebuilt from the PBF** (the existing `.sqlite` has no node IDs and they cannot be
+recovered from coordinates): `python3 tools/mapcurve_build.py romania.osm.pbf mapcurve.sqlite`. Limits: OSM `junction=roundabout`
+implied oneway is not read; `mapcurve_check.py --at ...` prints the connections followed and why prediction ended.
+
 ## Install
 
 ```

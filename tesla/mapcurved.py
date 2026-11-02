@@ -116,7 +116,14 @@ class MapCurveLookup:
     MATCH_RADIUS_M = 35.0     # road identity must be established near the car, not by a far point
     MATCH_HEADING_DEG = 45.0  # tangent-vs-heading gate (widen if noisy GPS heading drops the match mid-bend)
     CANDIDATE_LIMIT = 16
-    CACHE_SEGMENTS = 12
+    CACHE_SEGMENTS = 32
+    # Route continuity (needs a v2 DB with OSM node IDs; see tools/mapcurve_build.py). Roads are linked ONLY through a
+    # shared node ID - never because coordinates are close. Heading/geometry only choose among nodes that are really shared.
+    MAX_HOPS = 8
+    BEARING_SPAN_M = 20.0        # distance used to measure the approach / departure bearing at a junction
+    MAX_TURN_DEG = 100.0         # a continuation turning more than this is not a continuation (U-turn / reversal)
+    STRAIGHT_DEG = 30.0          # with several options, the best must be this close to straight ahead...
+    AMBIGUITY_MARGIN_DEG = 25.0  # ...and beat the runner-up by this much, otherwise prediction STOPS (no guessing)
 
     def __init__(self, db_path=DB_PATH):
         self.db = sqlite3.connect(db_path, check_same_thread=False)
@@ -129,6 +136,10 @@ class MapCurveLookup:
             raise RuntimeError('mapcurve DB is missing road-aware columns: %s; rebuild with '
                                'tools/mapcurve_build.py' % ', '.join(sorted(missing)))
         self.segment_cache = {}
+        self.meta_cache = {}
+        seg_cols = {r[1] for r in self.db.execute('PRAGMA table_info(segments)')}
+        # old (v1) DBs have no node IDs -> no cross-segment links: prediction stops at the segment end
+        self.has_nodes = {'start_node_id', 'end_node_id', 'oneway'} <= seg_cols
 
     @staticmethod
     def _distance(lat, lon, plat, plon, m_lat, m_lon):
@@ -160,6 +171,105 @@ class MapCurveLookup:
             self.segment_cache[key] = rows
         return rows
 
+    def _span_bearing(self, rows, e, step, m_lat, m_lon):
+        """Compass bearing from rows[e] to the point ~BEARING_SPAN_M away stepping by `step` (+1/-1); None if the segment is
+        degenerate (< 1 m)."""
+        far = e
+        walked = 0.0
+        i = e
+        while 0 <= i + step < len(rows) and walked < self.BEARING_SPAN_M:
+            walked += self._distance(rows[i][0], rows[i][1], rows[i + step][0], rows[i + step][1], m_lat, m_lon)
+            i += step
+            far = i
+        if walked < 1.0:
+            return None
+        return bearing_deg_to(rows[e][0], rows[e][1], rows[far][0], rows[far][1])
+
+    def _continuation(self, cur_key, cur_rows, sign, visited, m_lat, m_lon):
+        """Next segment after leaving cur_key at its end in direction `sign`, or (None, reason).
+        Candidates are exactly the segments that share the exit node ID, legal for travel (oneway), not already visited.
+        One legal candidate = take it. Several = take the best only if clearly straight-ahead and clearly better than the
+        runner-up; otherwise stop (ambiguous)."""
+        exit_i = len(cur_rows) - 1 if sign > 0 else 0
+        meta = self._seg_meta(*cur_key)
+        node = None if meta is None else (meta[2] if sign > 0 else meta[1])
+        if node is None:
+            return None, 'no_node_id'
+        cands = self.db.execute('SELECT way_id, segment_id, oneway, start_node_id, end_node_id FROM segments '
+                                'WHERE start_node_id=? OR end_node_id=?', (node, node)).fetchall()
+        approach = self._span_bearing(cur_rows, exit_i, -sign, m_lat, m_lon)
+        if approach is None:
+            return None, 'no_bearing'
+        approach = (approach + 180.0) % 360.0          # direction of travel into the junction
+        options = []
+        blocked = 0
+        for w, sg, ow, sn, en in cands:
+            key = (str(w), int(sg))
+            if key in visited:
+                continue
+            ow = int(ow or 0)
+            for enter_at_start, ok in ((True, sn == node and ow >= 0), (False, en == node and ow <= 0)):
+                if sn == node and enter_at_start and ow < 0 or en == node and not enter_at_start and ow > 0:
+                    blocked += 1                       # shares the node but travel in that direction is not allowed
+                if not ok:
+                    continue
+                rows = self._segment(*key)
+                if len(rows) < 2:
+                    continue
+                sgn = 1 if enter_at_start else -1
+                e = 0 if enter_at_start else len(rows) - 1
+                brg = self._span_bearing(rows, e, sgn, m_lat, m_lon)
+                options.append((None if brg is None else angle_diff_deg(brg, approach), key, rows, e, sgn))
+        if not options:
+            return None, 'oneway' if blocked else 'dead_end'
+        # The SAME OSM way continuing through the node (adjacent segment of one way_id) is established by node identity and
+        # way identity, which is stronger evidence than any heading test: take it whatever the deflection (a hairpin apex
+        # can turn ~170 degrees). Heading is only used below, to choose among DIFFERENT roads.
+        same = [o for o in options if o[1][0] == cur_key[0] and abs(o[1][1] - cur_key[1]) == 1]
+        if len(same) == 1:
+            dev, key, rows, e, sgn = same[0]
+            return {'key': key, 'rows': rows, 'idx': e, 'sign': sgn, 'node': node,
+                    'deviation': 0.0 if dev is None else dev, 'candidates': len(options), 'same_way': True}, 'ok'
+        if len(options) > 1 and any(o[0] is None for o in options):
+            return None, 'ambiguous'
+        options.sort(key=lambda o: (o[0] is None, o[0]))
+        if options[0][0] is None:
+            return None, 'no_bearing'
+        legal = [o for o in options if o[0] <= self.MAX_TURN_DEG]
+        if not legal:
+            return None, 'sharp_turn'
+        if len(legal) > 1:
+            if legal[0][0] > self.STRAIGHT_DEG or legal[1][0] - legal[0][0] < self.AMBIGUITY_MARGIN_DEG:
+                return None, 'ambiguous'
+        dev, key, rows, e, sgn = legal[0]
+        return {'key': key, 'rows': rows, 'idx': e, 'sign': sgn, 'node': node, 'deviation': dev,
+                'candidates': len(options), 'same_way': False}, 'ok'
+
+    def _seg_meta(self, way_id, segment_id):
+        key = (str(way_id), int(segment_id))
+        if key not in self.meta_cache:
+            r = self.db.execute('SELECT oneway, start_node_id, end_node_id FROM segments WHERE way_id=? AND segment_id=?',
+                                key).fetchone() if self.has_nodes else None
+            self.meta_cache[key] = r
+        return self.meta_cache[key]
+
+    def _walk_segment(self, rows, i, sign, along, v_ego, best, m_lat, m_lon):
+        """Walk rows from index i in direction sign, ranking each point by approach_speed. Returns
+        (best, along, last_index, reached_end) - reached_end is False if the lookahead ran out first."""
+        while True:
+            speed = rows[i][2]
+            if along <= LOOKAHEAD_M and speed is not None and speed >= MIN_SPEED_MS:
+                v_now = approach_speed(speed, along, v_ego)
+                if best is None or v_now < best[0]:
+                    best = (v_now, speed, along)
+            nxt = i + sign
+            if nxt < 0 or nxt >= len(rows):
+                return best, along, i, True
+            along += self._distance(rows[i][0], rows[i][1], rows[nxt][0], rows[nxt][1], m_lat, m_lon)
+            i = nxt
+            if along > LOOKAHEAD_M:
+                return best, along, i, False
+
     def query_ahead(self, lat, lon, heading_deg, v_ego=0.0):
         """Return (binding_speed_ms, distance_m, match_info) or None.
 
@@ -167,6 +277,15 @@ class MapCurveLookup:
         NOW (lowest approach_speed over the forward walk); distance_m is its
         along-road distance ahead; match_info names the matched road/direction.
         """
+        # An unusable position or heading matches NOTHING (no road is guessed). NaN needs an explicit check: every comparison
+        # with it is False, so the heading gate below would otherwise let it straight through.
+        for x in (lat, lon, heading_deg):
+            if not isinstance(x, (int, float)) or isinstance(x, bool) or not math.isfinite(x):
+                return None
+        if not (-90.0 < lat < 90.0 and -180.0 <= lon <= 180.0):
+            return None
+        if not isinstance(v_ego, (int, float)) or not math.isfinite(v_ego) or v_ego < 0.0:
+            v_ego = 0.0
         m_lat, m_lon = meters_per_deg(lat)
         # Match radius is deliberately local: road identity must be established
         # near the car, not by a point hundreds of metres away.
@@ -219,7 +338,7 @@ class MapCurveLookup:
             if oneway <= 0:
                 options.append((angle_diff_deg((tangent + 180.0) % 360.0, heading_deg), -1))
             heading_diff, travel_sign = min(options, key=lambda x: x[0])
-            if heading_diff > self.MATCH_HEADING_DEG:
+            if not (heading_diff <= self.MATCH_HEADING_DEG):      # written so a NaN can never pass
                 continue
             # Distance dominates; heading breaks ties between nearby carriageways.
             score = point_dist + heading_diff * 0.35
@@ -233,31 +352,36 @@ class MapCurveLookup:
         (_score, match_dist, heading_diff, way_id, segment_id,
          rows, idx, travel_sign) = best_match
 
-        # Walk only forward along the matched segment's ordered samples. Distance
-        # starts at the nearest sample; subsequent distances follow the road
-        # geometry, not straight-line bearings from the vehicle. Rank each point
-        # by approach_speed (the speed allowable NOW to reach it slowing at
-        # A_CURVE_DECEL) so the binding curve wins, near or far.
-        best = None               # (v_now, stored_speed, along)
+        # Walk forward along the matched segment by along-road distance, ranking each point by approach_speed (the speed
+        # allowable NOW to reach it slowing at A_CURVE_DECEL) so the binding curve wins, near or far. When the segment ends
+        # before the lookahead does, continue ONLY through a shared OSM node (see _continuation); any doubt stops here.
+        cur_key = (str(way_id), int(segment_id))
+        visited = {cur_key}
+        connections = []
+        best = None
         along = match_dist
-        prev = idx
         i = idx
-        while 0 <= i < len(rows):
-            plat, plon, speed, _seq, _direction = rows[i]
-            if along <= LOOKAHEAD_M and speed is not None and speed >= MIN_SPEED_MS:
-                v_now = approach_speed(speed, along, v_ego)
-                if best is None or v_now < best[0]:
-                    best = (v_now, speed, along)
-            nxt = i + travel_sign
-            if nxt < 0 or nxt >= len(rows):
+        sign = travel_sign
+        truncated = 'lookahead'
+        while True:
+            best, along, i, reached_end = self._walk_segment(rows, i, sign, along, v_ego, best, m_lat, m_lon)
+            if not reached_end:
                 break
-            step = self._distance(rows[prev][0], rows[prev][1],
-                                  rows[nxt][0], rows[nxt][1], m_lat, m_lon)
-            along += step
-            prev = nxt
-            i = nxt
-            if along > LOOKAHEAD_M:
+            if len(connections) >= self.MAX_HOPS:
+                truncated = 'hop_limit'
                 break
+            if not self.has_nodes:
+                truncated = 'no_node_ids'
+                break
+            cont, why = self._continuation(cur_key, rows, sign, visited, m_lat, m_lon)
+            if cont is None:
+                truncated = why
+                break
+            connections.append({'way_id': cont['key'][0], 'segment_id': cont['key'][1], 'node': cont['node'],
+                                'deviation': round(cont['deviation'], 1), 'candidates': cont['candidates'],
+                                'same_way': cont['same_way'], 'at_m': round(along, 1)})
+            visited.add(cont['key'])
+            cur_key, rows, i, sign = cont['key'], cont['rows'], cont['idx'], cont['sign']
 
         if best is None:
             return None
@@ -265,7 +389,8 @@ class MapCurveLookup:
         return best_speed, best_dist, {
             'way_id': way_id, 'segment_id': segment_id,
             'match_m': match_dist, 'heading_error': heading_diff,
-            'direction': travel_sign
+            'direction': travel_sign,
+            'connections': connections, 'truncated': truncated, 'node_ids': self.has_nodes
         }
 
 

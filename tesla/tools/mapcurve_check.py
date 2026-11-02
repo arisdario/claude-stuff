@@ -53,6 +53,16 @@ def at(db, lat, lon, hdg, v_kmh):
         % (m['way_id'], m['segment_id'], m['direction'], m['match_m'], m['heading_error']))
   print('binding curve ahead: safe %.0f km/h at %.0f m.  At %.0f km/h the map would target %.0f km/h NOW (%s).'
         % (sp * 3.6, dist, v_kmh, vnow * 3.6, 'SLOW DOWN' if vnow < v - 0.5 else 'ok, already slow enough'))
+  hops = m.get('connections', [])
+  if hops:
+    print('route: followed %d connection(s) through SHARED OSM NODES: %s' % (len(hops), ' -> '.join(
+        '%s/%s (node %s, %.0f deg%s)' % (h['way_id'], h['segment_id'], h['node'], h['deviation'], ', same way' if h['same_way'] else '')
+        for h in hops)))
+  why = {'lookahead': 'reached the %.0f m lookahead' % _mc.LOOKAHEAD_M, 'dead_end': 'end of the mapped road (no connected continuation)',
+         'ambiguous': 'AMBIGUOUS junction - prediction stopped, nothing guessed', 'sharp_turn': 'continuation turns too sharply - stopped',
+         'oneway': 'the only connected road is one-way against us - stopped', 'no_node_ids': 'database has no OSM node IDs (v1) - roads are not joined',
+         'no_node_id': 'this segment has no node ID - stopped', 'hop_limit': 'connection limit reached', 'no_bearing': 'degenerate geometry - stopped'}
+  print('prediction ends: %s' % why.get(m.get('truncated'), m.get('truncated')))
 
 
 def load_trace(path):
