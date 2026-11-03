@@ -102,3 +102,16 @@ best physically possible (sqrt(33^2 - 2*413) = 16.2 m/s). Every other bend is en
 printed a bend's END as its start); tests added: `TestLateEntryIsOnlyPhysicallyUnavoidable` (any late entry must be a bend closer than its braking distance, and braking must have been the physical maximum).
 Limit worth knowing: with an 800 m horizon and 1.0 m/s^2 the advisory can only be early enough for entry speeds up to ~40 m/s (146 km/h) at the slowest curve speed (8.9 m/s).
 Settings unchanged: CurveCue engine, a_lat 1.85 m/s^2 (not 0.35 g), advisory only, no new detector.
+
+## Update 6 - validation on a REAL drive (map_20261101_175314, Bucharest->Fundulea, 32.7 km, 30 min)  [`python3 -m tesla.nav.real_drive_validate`]
+- Driven route reconstructed from the GPS trace (waypoint legs every 300 m): 33.1 km, every fix within 8 m of it. The CurveCue engine finds only 4 curves on it (A2 is nearly straight): a 22 m hairpin at km 2.54-2.77,
+  a firm right (R 72) at km 27.97, and two gentle bends (not announced at standard verbosity).
+- Announced: 2 curves, no duplicates (a duplicate in an earlier replay was the replay's own dead-reckoning overshoot, fixed by keeping progress monotone). Hairpin: announced 791 m ahead, the driver went 67 -> 45 (100 m before)
+  -> 28 km/h in the bend (curve speed 32): agrees, and was already at/below the advisory envelope. Firm right: announced 795 m ahead; no usable speed samples near it (GPS too sparse) -> inconclusive.
+- Driver slow-downs with NO curve in the geometry (km 0.4 and 1.3 urban, 7.5 and 26.9 on the A2: 103->76, 112->85 km/h): traffic/ramps; nothing was announced there (no false slowdowns).
+- **Real-data limits found:** (1) the logged GPS position refreshes only every ~14 s (134 distinct positions in 1812 s; 92% duplicates) - progress must be dead-reckoned from speed between updates (the validator does; the production
+  CurveAhead does NOT yet); (2) the reference Navigator recalculated 11-22 times on this drive (the driver did not follow the planner's route, and the sparse GPS produces jumps) - rerouting was therefore excluded from this validation;
+  (3) only 2 announceable curves: this drive cannot validate curve timing statistically. A winding-road drive is needed for that.
+- MCU2 navigation: the DBC in the repo defines passive CAN signals from the MCU (UI_driverAssistMapData 0x3C8: UI_navRouteActive, UI_nextBranchDist, UI_roadClass, UI_mapSpeedLimit, UI_gpsRoadMatch;
+  MCU_locationStatus 0x3D8 lat/lon; UI_gpsVehicleSpeed 0x2F8 heading; MCU_locationStatus2 0x68 navigonExpectedSpeed). No next-turn direction, route geometry or destination signal exists. Our drive logs recorded only 0x3D8 and 0x2F8,
+  so what the MCU actually sends for 0x3C8/0x68 is UNVERIFIED: next step is to add those two IDs to the (listen-only) logger and drive once with MCU navigation active.
