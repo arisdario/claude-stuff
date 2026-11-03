@@ -39,3 +39,8 @@ If it says the mode isn't available, pick one from the list it prints: `./uvctes
 
 What it does **not** answer: whether a hub can carry the panda *and* a camera while the phone charges — that is a
 separate test, and the deciding one for a C920 road camera.
+
+## Result on the owner's EON (3 Nov 2026)
+Logitech C920 (046d:082d, label V-U0028), plugged straight into the EON, car parked: `./uvctest 046d:082d 1280 720 30` -> **MJPEG 1280x720 @ 30 fps, 297 frames in 9.9 s = 30.0 fps, average frame 130,721 bytes (~31 Mbit/s), VERDICT OK**,
+`frame.jpg` saved. Exposure priority off and autofocus off are both available. Required: the local libuvc patch in `libuvc/src/stream.c` (the payload-size equality check made every mode fail with "Invalid mode" -51 on this camera).
+Not yet tested: a long run (10 min: `./uvctest 046d:082d 1280 720 30 600`), panda + camera + power through a hub on the step-down supply, the picture itself (focus/exposure/mount), and anything on the openpilot side.
