@@ -7,7 +7,7 @@
 
 `run` records CPU (total, per core, rest-of-system), per-process CPU, free RAM, every thermal zone, GPU load and clock, CPU clocks,
 battery temperature and - when cereal is importable - the driving model's and camerad's real message rates, frame-id gaps and thermald's
-thermal status. Run it with the detector OFF, onroad (bench or car), to measure what the driving stack already uses. Needs no openpilot code.
+thermal status (this SUBSCRIBES to cereal; if it prints "evicting all subscribers" another reader may have been dropped: use --no-cereal). Run it with the detector OFF, onroad (bench or car), to measure what the driving stack already uses. Needs no openpilot code.
 `summary --suggest` turns a baseline run into the limits file the governor requires (it refuses a run that is too short or lacks readings).
 """
 import argparse
@@ -27,8 +27,11 @@ MIN_BASELINE_S = 600
 class CerealProbe(object):
   """message rates of the driving model / camerad and thermald's status; silently absent when cereal cannot be imported"""
 
-  def __init__(self):
+  def __init__(self, enabled=True):
     self.ok = False
+    if not enabled:
+      self.err = 'disabled with --no-cereal'
+      return
     try:
       import cereal.messaging as messaging
       self.m = messaging
@@ -111,7 +114,7 @@ COLS_FIXED = ['t', 'label', 'cpu_total_pct', 'others_cpu_pct', 'self_cpu_core_pc
 
 def run(a):
   os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-  smp, cer = S.Sampler(), CerealProbe()
+  smp, cer = S.Sampler(), CerealProbe(not a.no_cereal)
   print('cereal: %s' % ('on (model/frame/thermal)' if cer.ok else 'off (%s) - model fps and thermal status will be empty' % getattr(cer, 'err', '?')))
   smp.sample()
   cer.poll(1.0)
@@ -241,6 +244,7 @@ def main():
   r.add_argument('--label', default='')
   r.add_argument('--interval', type=float, default=1.0)
   r.add_argument('--duration', type=float, default=0)
+  r.add_argument('--no-cereal', action='store_true', help='do not subscribe to openpilot message queues (no model fps / thermal status). Use if the "evicting all subscribers" warning appears')
   s = sub.add_parser('summary')
   s.add_argument('csv')
   s.add_argument('--suggest')
