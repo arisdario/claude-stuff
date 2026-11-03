@@ -145,3 +145,14 @@ vertex spacing, so some bends may be under-reported (this is the likely reason t
 - I ran mapd's NodesData curvature code unchanged (scipy) on our two Bucharest<->Fundulea routes: 37 and 30 turn-speed sections vs CurveCue engine 10 / 11 and our old detector 15 / 12: it fragments real bends into many
   sections (e.g. the A2 on-ramp loop at km 14.2-14.6 -> 9 sections) and reports junction corners with R of 2-10 m. Noisier than CurveCue's engine for announcing; its value is the road-following (Route.py) and the data pipeline.
 - Needs internet (Overpass) or a local OSM server; cereal there has liveMapData.turnSpeedLimit* fields that the 0.7.5 Tesla cereal does not.
+
+## Update 10 - the three detectors combined and scored on the REAL drive; our own detector restored as PRIMARY
+Detectors: OWN (tesla/nav/own_detector.py, restored from c98e2db), CC (CurveCue engine port), MAPD (openpilotkr mapd spline curvature, unmodified, scipy). Script: `tesla/nav/detector_compare.py`, output
+`tesla/nav/validation/curve/three_detectors_real_drive.md`. Driven route (33.1 km, rebuilt from the GPS trace), curves with R < 200 m, scored against what the driver did (rule fixed in advance: speed drop >= 12 km/h
+between 400..100 m before and the slowest point -30..+120 m, or slowest point within 10 km/h of the curve speed). 6 clusters, 5 with speed data, all 5 slowed:
+OWN 5/5, MAPD 5/5, CurveCue 1/5 (it misses the short sharp bends: km 0.4 R32, 27.5, 27.65, 30.3 - the driver went 54->20, 91->76, 91->67, 56->30 km/h). No detector announced a curve the driver ignored.
+Null baseline: the same rule fires at 12% of random places (14 of 113) -> 5 of 5 by luck ~ 0.00003. Combinations ('OWN or CC', 'any two agree', union) add nothing here; 'all three' is as weak as CurveCue.
+CAVEATS: ONE drive, FIVE scored curves; 'driver slowed' is a proxy (traffic, junctions also slow people); the rule also fired at km 1.0-1.2, 4.8-9.5, 13.5, 22.0, 26.8-27.0 where NO detector saw a curve (possible misses by all three, or traffic).
+Decision implemented: `curveahead.DEFAULT_DETECTOR = 'own'`; each curve also carries `confirmed` (True when the CurveCue engine finds a curve at the same place) and the announcer passes it through, so downstream can
+treat 'confirmed' differently from 'own only'. CurveCue stays available (`detector='curvecall'`), still verified against the original engine.js. mapd is NOT used (needs Overpass/OSM server + scipy, and is noisy on sparse geometry).
+Replay on Bucharest<->Fundulea at 25 m/s with OWN: 15 / 12 curves announced once each, 0 false, max braking 1.0 m/s^2; the one curve entered above curve speed is a hairpin 150 m after the replay's first fix (start-up).

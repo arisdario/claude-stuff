@@ -12,12 +12,13 @@ d metres before the curve and still reach v_curve at DECEL;  slowing must begin 
 import math
 
 try:
-    from . import geo, curvecall_engine as ENG
+    from . import geo, curvecall_engine as ENG, own_detector as OWN
     from .matcher import Navigator
     from .tracker import CONTEST_LLR
 except ImportError:
     import geo
     import curvecall_engine as ENG
+    import own_detector as OWN
     from matcher import Navigator
     from tracker import CONTEST_LLR
 
@@ -25,6 +26,7 @@ A_LAT = 1.85            # m/s^2 lateral acceleration used for the curve speed (s
 DECEL = 1.0             # m/s^2 assumed comfortable deceleration (configurable)
 DR_MAX_AGE_S = 60.0     # progress is dead-reckoned from speed for at most this long without a NEW GPS position (then confidence drops to 'low')
 DR_BACK_TOL_M = 50.0    # a new position slightly behind the dead-reckoned progress does not move the car backwards (it would re-announce a passed curve)
+DEFAULT_DETECTOR = 'own'  # 'own' = our Menger detector (primary: caught 5 of 5 real slow-downs on the real drive vs 1 of 5 for CurveCue); 'curvecall' = CurveCue engine port
 HORIZON_M = 800.0       # look-ahead along the route
 V_FLOOR = 8.94          # m/s, same floor as mapcurve
 
@@ -60,18 +62,28 @@ def _analysis(points, lateral_g):
     return hit[1]
 
 
-def find_curves(points, cum, s_now, horizon_m=HORIZON_M, a_lat=A_LAT):
-    """curves ahead on the route polyline in (s_now, s_now + horizon]: [{'dist_m' (to where the bend STARTS; <= 0 = inside it), 'start_m', 'end_m', 'radius_m', 'v_curve', 'severity',
-    'direction', 'text'}], nearest first. ALL detection is CurveCue's engine (curvecall_engine.py); this function only filters by distance and converts the speed with a_lat."""
+def find_curves(points, cum, s_now, horizon_m=HORIZON_M, a_lat=A_LAT, detector=None):
+    """curves ahead on the route polyline in (s_now, s_now + horizon]: [{'dist_m', 'start_m', 'end_m', 'radius_m', 'v_curve', 'severity', 'direction', 'text', 'confirmed'}], nearest first.
+    detector 'own' (default, our Menger detector) or 'curvecall' (CurveCue's engine). With 'own', each curve also carries confirmed=True when CurveCue's engine finds a curve at the same place
+    (two independent detectors agree); this function only filters by distance and converts the speed with a_lat."""
+    detector = detector or DEFAULT_DETECTOR
+    cc = _analysis(points, a_lat / ENG.GRAVITY)
     out = []
-    for c in _analysis(points, a_lat / ENG.GRAVITY):
+    if detector == 'own':
+        for c in OWN.find_curves_own(points, cum, s_now, horizon_m, a_lat):
+            sev = severity(c['radius_m'])
+            a0, a1 = s_now + c['start_m'], s_now + c['end_m']
+            conf = any(k['distance_from_start'] - 30.0 <= a1 and k['end_distance'] + 30.0 >= a0 for k in cc)
+            out.append(dict(c, severity=sev, text=narration(sev, c['direction'], c['v_curve']), confirmed=conf))
+        return out
+    for c in cc:
         d0, d1 = c['distance_from_start'] - s_now, c['end_distance'] - s_now
         if d1 < 0.0 or d0 > horizon_m:
             continue
         rad = c['min_radius']
         vc = max(V_FLOOR, min(255.0, math.sqrt(a_lat * rad)))
         sev, dirn = c['severity'].lower(), c['direction'].lower()
-        out.append({'dist_m': d0, 'start_m': d0, 'end_m': d1, 'radius_m': rad, 'v_curve': vc, 'severity': sev, 'direction': dirn, 'text': narration(sev, dirn, vc)})
+        out.append({'dist_m': d0, 'start_m': d0, 'end_m': d1, 'radius_m': rad, 'v_curve': vc, 'severity': sev, 'direction': dirn, 'text': narration(sev, dirn, vc), 'confirmed': True})
     return out
 
 
@@ -109,7 +121,7 @@ class CurveAnnouncer(object):
                 ov = [(min(a1, v['a1']) - max(a0, v['a0']), k) for k, v in self.curves.items() if a0 <= v['a1'] + self.MERGE_M and a1 >= v['a0'] - self.MERGE_M]
                 hit = max(ov)[1] if ov else None
                 if hit is None:
-                    self.curves[self.next_id] = {'id': self.next_id, 'a0': a0, 'a1': a1, 'abs': ab, 'radius_m': c['radius_m'], 'speed_ms': c['v_curve'], 'severity': c['severity'], 'direction': c['direction'], 'text': c['text']}
+                    self.curves[self.next_id] = {'id': self.next_id, 'a0': a0, 'a1': a1, 'abs': ab, 'radius_m': c['radius_m'], 'speed_ms': c['v_curve'], 'severity': c['severity'], 'direction': c['direction'], 'text': c['text'], 'confirmed': c.get('confirmed', False)}
                     new.append(self.next_id)
                     self.next_id += 1
                 else:
@@ -118,13 +130,14 @@ class CurveAnnouncer(object):
                     if c['v_curve'] <= v['speed_ms'] or ab == v['abs']:                  # radius/speed follow the tightest point seen
                         v['abs'], v['radius_m'], v['speed_ms'] = ab, c['radius_m'], c['v_curve']
                         v['severity'], v['direction'], v['text'] = c['severity'], c['direction'], c['text']
+                    v['confirmed'] = v.get('confirmed', False) or c.get('confirmed', False)
         out = []                                    # distance_m = distance to where the bend STARTS (0 = in it)
         for k in sorted(self.curves):
             v = self.curves[k]
             if progress is not None and progress > v['a1'] + self.PASSED_M:
                 passed.append(k)
                 continue
-            out.append({'id': k, 'new': k in new, 'distance_m': None if progress is None else max(0.0, v['a0'] - progress), 'radius_m': v['radius_m'], 'speed_ms': v['speed_ms'], 'severity': v['severity'], 'direction': v['direction'], 'text': v['text']})
+            out.append({'id': k, 'new': k in new, 'distance_m': None if progress is None else max(0.0, v['a0'] - progress), 'radius_m': v['radius_m'], 'speed_ms': v['speed_ms'], 'severity': v['severity'], 'direction': v['direction'], 'text': v['text'], 'confirmed': v.get('confirmed', False)})
         for k in passed:
             del self.curves[k]
         return {'new': new, 'passed': passed, 'active': out}

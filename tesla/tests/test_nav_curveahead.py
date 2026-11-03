@@ -104,8 +104,8 @@ class TestTargetSpeed(unittest.TestCase):
 
 
 class TestLateEntryIsOnlyPhysicallyUnavoidable(unittest.TestCase):
-    """33 m/s on Bucharest->Fundulea: the first bend (sharp, R=29 m, 8.9 m/s) starts 413 m after the replay's first fix; slowing from 33 to 8.9 m/s at 1.0 m/s^2 needs 505 m.
-    Entered at 15.5 m/s = the best the advisory can do (sqrt(33^2 - 2*413) = 15.4). Not an announcement-timing problem: the bend is announced at the very first fix (inside the 800 m horizon).
+    """33 m/s on Bucharest->Fundulea: the first bend ends up too close to the replay's first fix for a cruise-speed start (CurveCue detector: R=29 m at 413 m needs 505 m; own detector: R=18 m hairpin at 150 m).
+    Entered at the best the advisory can do. Not an announcement-timing problem: the bend is announced at the very first fix (inside the 800 m horizon).
     Invariant: any entry above curve speed + 0.75 m/s must be a bend that starts closer than its braking distance from a cruise-speed start."""
     def test_every_late_entry_is_unavoidable(self):
         import json
@@ -119,7 +119,7 @@ class TestLateEntryIsOnlyPhysicallyUnavoidable(unittest.TestCase):
                 for start, vc, ve in late:
                     need = (v * v - vc * vc) / (2.0 * C.DECEL)
                     self.assertLess(start, need, '%s at %.0f m/s: bend at %.0f m entered at %.1f m/s although %.0f m were enough to slow to %.1f' % (name, v, start, ve, start, vc))
-                    self.assertGreaterEqual(ve, math.sqrt(max(0.0, v * v - 2 * C.DECEL * (start + v * 0.5 + 1.0))), 'entered above the best physically possible speed (braked too late)')
+                    self.assertGreaterEqual(ve, math.sqrt(max(0.0, v * v - 2 * C.DECEL * (start + v * 1.0 + 1.0))), 'entered above the best physically possible speed (braked too late)')       # tolerance = two simulation steps (dt 0.5 s)
                     self.assertLessEqual(ve, math.sqrt(max(0.0, v * v - 2 * C.DECEL * start)) + 1.0, 'braked less than the physical maximum')
 
     def test_first_bend_is_announced_at_the_first_fix(self):
@@ -129,8 +129,9 @@ class TestLateEntryIsOnlyPhysicallyUnavoidable(unittest.TestCase):
         for a, b in zip(pts, pts[1:]):
             cum.append(cum[-1] + geo.hav(a[0], a[1], b[0], b[1]))
         r = C.CurveAnnouncer().update(0.0, 'high', C.find_curves(pts, cum, 0.0))
-        self.assertEqual(len(r['new']), 1 + len([x for x in r['active'] if x['id'] != 1]))     # everything within the horizon is announced at once
-        self.assertAlmostEqual(r['active'][0]['distance_m'], 413.0, delta=15.0)
+        first = [c for c in C.find_curves(pts, cum, 0.0) if C.SEVERITY_ORDER.index(c['severity']) >= 1][0]       # the announcer's standard verbosity: moderate and tighter
+        self.assertEqual(len(r['new']), len(r['active']))                      # everything within the horizon is announced at once, at the first fix
+        self.assertAlmostEqual(r['active'][0]['distance_m'], max(0.0, first['start_m']), delta=1.0)
 
 
 def sparse_road():
