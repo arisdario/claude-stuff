@@ -50,3 +50,8 @@ Not yet tested: a long run (10 min: `./uvctest 046d:082d 1280 720 30 600`), pand
 ## Recording a clip for the model (offline, on a PC - nothing touches openpilot)
 `UVC_FOCUS=0 UVC_SAVE=clip.mjpg UVC_SAVE_SECS=25 ./uvctest 046d:082d 1280 720 30 25` writes the camera's raw MJPEG frames (about 5 MB/s: keep the seconds short, disk is limited). Copy `clip.mjpg` to a PC and run
 `sh clip_to_eon.sh clip.mjpg fcamera_c920.hevc`, then `tesla/model083/tools/replay083.py` (needs the model file and ffmpeg) to see the path and lanes the driving model draws on the C920's picture. The geometry conversion is explained at the top of `clip_to_eon.sh`.
+
+## Aim the camera with a live view (`uvcview`)
+`sh tesla/usbcam/build.sh` also builds `uvcview`. On the EON (camera plugged in): `UVC_FOCUS=100 ./uvcview 046d:082d 1280 720 30 8090`, then open `http://<EON ip>:8090/` on a laptop or phone on the same network:
+the live picture with a red centre cross, a green box = the part the EON model uses (middle 1164 of 1280 px), and a focus slider (0 = infinity, for the road; about 100-150 for a screen 35 cm away). No password: use only while aiming, then Ctrl+C.
+Find the EON's address with `ip addr show wlan0` (or `ifconfig wlan0`). Tested here only with a fake picture source (page, snapshot, stream, focus request); not yet with the camera.
