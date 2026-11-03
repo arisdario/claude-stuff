@@ -32,3 +32,10 @@ The picture geometry was checked against ffmpeg on a real C920 frame (black bars
 - The C920 sees 43 deg vertically (the EON camera 51 deg): the model gets a narrower view with black bars above and below. After switching, openpilot's calibration must re-learn the vanishing point (drive straight for a few minutes; if it is wildly off, remove /data/params/d/CalibrationParams and reboot).
 - Not tested yet: panda + C920 on the EON's USB at the same time in the car; day/night exposure; heat. Test parked first, then a short drive with a passenger watching the screen.
 - Nothing here changes steering, braking or acceleration code.
+
+## Status LED
+
+The C920's blue LED is switched off by camerad at every start (the camera forgets the setting at power loss), through the Logitech peripheral
+extension unit (selector 9, "LED1 Mode" = 0). It was verified on a real C920 with `tesla/usbcam/ledtool` (`set 0` printed VERIFIED). camerad uses the same
+strict checks (control must be readable, settable and 5 bytes long; only the 2 mode bits change; read back) and logs
+`external camera: LED off verified`. To leave the LED on auto, create `/data/camera_led_auto`. Nothing else about the camera is changed.
