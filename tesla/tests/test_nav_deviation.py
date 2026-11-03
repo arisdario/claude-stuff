@@ -167,35 +167,6 @@ class TestParallelRoadRegression(unittest.TestCase):
         d = Drive(g, route, M_[2], 'Par', noise=noise, seed=seed)
         return g, route, d, Oracle(g.path), M_
 
-    def test_tracker_locked_on_a_parallel_road_while_the_car_is_on_the_route_is_not_rerouted(self):
-        """Fundulea->Bucuresti ~11.8 km after a reroute: the (connectivity-based) tracker locked onto a road running 1-10 m beside the route; the route explained the fixes much
-        better than the tracked road (mean 6.9 m vs 15.0 m) but the navigator still recalculated FROM THE PARALLEL ROAD although the car never left the route. Reproduced
-        deterministically by forcing the tracker onto the parallel road 900 m into a 2 km stretch and driving the route with 5 m noise. The tracker must be re-anchored on the route."""
-        from nav import scenarios as SC
-        from nav.tracker import EdgeTracker
-        net = SC.Net()
-        mn = [net.node() for _ in range(61)]
-        net.way('Main', [(mn[c], 0.0, 50.0 * c) for c in range(61)], highway='secondary')
-        pn = [net.node() for _ in range(61)]
-        net.way('Par', [(mn[10], 0.0, 500.0)] + [(pn[c], 10.0, 50.0 * c) for c in range(11, 50)] + [(mn[50], 0.0, 2500.0)], highway='secondary')
-        g = net.build()
-        route = RT.find_route(g, SC.at(0, 0), SC.at(0, 3000))
-        resyncs = 0
-        for seed in (1, 2, 3, 4, 5):
-            nav = M.Navigator(g, (route.goal.lat, route.goal.lon))
-            nav.plan(route.points[0][0], route.points[0][1], None)
-            locked = False
-            for f in V.fixes_along(route.points, 15.0, noise_m=5.0, seed=seed):
-                if not locked and f[0] * 15.0 >= 900.0:
-                    par = [x for x in g.snap(f[1], f[2], f[3], 15.0, limit=8) if x.edge.eid not in nav.route_eids]
-                    if par:
-                        nav.tracker, locked = EdgeTracker(g, par[0].edge, 0.0), True
-                nav.update(*f)
-            self.assertTrue(locked, 'scenario did not lock the tracker onto the parallel road')
-            self.assertEqual(nav.reroutes, 0, 'seed %d: recalculated from a parallel road although the car stayed on the route' % seed)
-            resyncs += getattr(nav, 'resyncs', 0)
-        self.assertGreaterEqual(resyncs, 1, 'the tracker was never re-anchored on the route')
-
     def test_20m_parallel_road_without_connection_is_detected_and_never_snaps_back(self):
         for seed in (1, 2, 3):
             g, route, d, o, _ = self.run_case(20.0, False, seed=seed)

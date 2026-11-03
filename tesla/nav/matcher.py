@@ -30,7 +30,6 @@ AMBIG_M = 15.0
 OFF_FIXES_PARALLEL = 30      # a road beside the route whose mean separation is below 2 x the fix accuracy (ramp/merge lane, parallel carriageway) cannot be told from the
                              # route at that GPS quality (the benchmark's own 'ambiguous' class): demand this many bad fixes before calling it a wrong turn
 DEFAULT_SIGMA_M = 5.0
-RESYNC_MARGIN_SIGMA = 0.5    # the route must fit the fixes better than the tracker's road by this many sigmas (mean over the bad run) before the tracker is re-anchored to it
 MIN_SPEED_MS = 2.0           # below this a bad fix is just noise at a standstill
 ACC_MAX_M = 30.0             # fixes less accurate than this are ignored
 GPS_TIMEOUT_S = 5.0
@@ -144,32 +143,6 @@ class Navigator(object):
         self.contested_fixes = 0
         return route
 
-    def _track_dist(self, lat, lon, edge):
-        g = self.graph.geom(edge.eid)
-        return min(geo.project(lat, lon, g[i][0], g[i][1], g[i + 1][0], g[i + 1][1])[0] for i in range(len(g) - 1))
-
-    def _maybe_resync(self, lat, lon, m, tk, accuracy, other_road):
-        """The tracker can lock onto a road running beside the route (dual carriageway / parallel street) and, being connectivity-based, never leaves it. If over the bad
-        run the ROUTE explains the fixes clearly better than the tracker's road (mean distance smaller by RESYNC_MARGIN_SIGMA x accuracy), the tracker was wrong, not the
-        car: re-anchor it on the route edge at the matched progress. A genuine departure onto a parallel road never satisfies this (the road the car is on fits better)."""
-        if not (other_road and not self.alarm and m.ok and m.cross_track_m is not None and m.cross_track_m <= ON_ROUTE_M):
-            return other_road
-        d_trk = min(30.0, self._track_dist(lat, lon, tk.edge))
-        n = self.off_fixes + 1
-        mean_trk = (getattr(self, '_dtrk_sum', 0.0) + d_trk) / n
-        mean_rt = (getattr(self, '_drt_sum', 0.0) + min(30.0, m.cross_track_m)) / n
-        self._dtrk_cur, self._drt_cur = d_trk, min(30.0, m.cross_track_m)
-        sigma = accuracy if (accuracy is not None and geo.is_finite_number(accuracy) and accuracy > 0) else DEFAULT_SIGMA_M
-        if n > OFF_FIXES and mean_trk - mean_rt >= RESYNC_MARGIN_SIGMA * sigma:
-            off = self.route.edge_offsets
-            i = max(0, bisect.bisect_right(off, m.progress_m) - 1)
-            self.tracker = EdgeTracker(self.graph, self.route.edges[i], max(0.0, m.progress_m - off[i]))
-            self._xt_sum = self._far_run = self._dtrk_sum = self._drt_sum = 0.0
-            self.off_fixes = 0
-            self.resyncs = getattr(self, 'resyncs', 0) + 1
-            return False
-        return other_road
-
     def plan(self, lat, lon, heading=None):
         return self._adopt(self.planner(self.graph, (lat, lon), self.dest, heading))
 
@@ -203,7 +176,6 @@ class Navigator(object):
         tk = self.tracker.update(lat, lon, heading if geo.is_finite_number(heading) else None, v * dt)
         # the car is on a connected edge that is NOT part of the route (a road beside it, a side street): never 'on route', however close
         other_road = tk.known and tk.edge.eid not in self.route_eids
-        other_road = self._maybe_resync(lat, lon, m, tk, accuracy, other_road)
         if m.ok and m.cross_track_m <= ON_ROUTE_M and not other_road:
             self.good_run += 1
             if self.alarm and self.good_run < RETURN_FIXES:      # still alarmed: one good-looking fix does not clear it
@@ -214,8 +186,6 @@ class Navigator(object):
             self.alarm = False
             self.off_fixes = 0
             self._xt_sum = 0.0
-            self._far_run = 0
-            self._dtrk_sum = self._drt_sum = 0.0
             self.matcher.commit(m.progress_m)
             prog = self.matcher.progress
             rem = self.route.distance_m - prog
@@ -229,21 +199,11 @@ class Navigator(object):
         self.good_run = 0
         if v >= MIN_SPEED_MS:
             self.off_fixes += 1
-            # separation evidence, each fix clipped at AMBIG_M so ONE outlier cannot dominate the mean; far = this fix is not close to the route
-            near = m.ok and m.cross_track_m is not None and m.cross_track_m < AMBIG_M
-            if other_road:
-                self._dtrk_sum = getattr(self, '_dtrk_sum', 0.0) + getattr(self, '_dtrk_cur', 0.0)
-                self._drt_sum = getattr(self, '_drt_sum', 0.0) + getattr(self, '_drt_cur', 0.0)
-            self._xt_sum = getattr(self, '_xt_sum', 0.0) + (m.cross_track_m if near else AMBIG_M)
-            self._far_run = 0 if near else getattr(self, '_far_run', 0) + 1
+            self._xt_sum = getattr(self, '_xt_sum', 0.0) + (m.cross_track_m if (m.ok and m.cross_track_m is not None) else 1e9)
         # how much evidence is enough depends on how distinguishable the two roads are: a road 8 m from the route is inside one GPS error
-        near = m.ok and m.cross_track_m is not None and m.cross_track_m < AMBIG_M
-        need = OFF_FIXES_AMBIG if (other_road and near) else OFF_FIXES
+        need = OFF_FIXES_AMBIG if (other_road and m.ok and m.cross_track_m is not None and m.cross_track_m < AMBIG_M) else OFF_FIXES
         sigma = accuracy if (accuracy is not None and geo.is_finite_number(accuracy) and accuracy > 0) else DEFAULT_SIGMA_M
-        # a run whose mean separation is below 2 x the fix accuracy is ambiguous (ramp/merge lane, parallel carriageway). Such a run needs OFF_FIXES_PARALLEL fixes,
-        # and a single far fix (GPS outlier; seen: 16.9 m after ten fixes at 1-7 m on a parallel secondary road, Fundulea->Bucuresti ~11.8 km) must not end the
-        # ambiguity - two consecutive far fixes do (a genuine departure moves away and stays away, so it is still detected)
-        if other_road and self.off_fixes and self._xt_sum / self.off_fixes < 2.0 * sigma and (near or getattr(self, '_far_run', 0) < 2):
+        if need == OFF_FIXES_AMBIG and self.off_fixes and self._xt_sum / self.off_fixes < 2.0 * sigma:
             need = OFF_FIXES_PARALLEL
         reason = 'on another road (edge %d, %s)' % (tk.edge.eid, tk.edge.name or tk.edge.highway) if other_road else (
             m.reason or 'cross-track %.0f m' % (m.cross_track_m or 0.0))
