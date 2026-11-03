@@ -114,7 +114,7 @@ Settings unchanged: CurveCue engine, a_lat 1.85 m/s^2 (not 0.35 g), advisory onl
   (3) only 2 announceable curves: this drive cannot validate curve timing statistically. A winding-road drive is needed for that.
 - MCU2 navigation: the DBC in the repo defines passive CAN signals from the MCU (UI_driverAssistMapData 0x3C8: UI_navRouteActive, UI_nextBranchDist, UI_roadClass, UI_mapSpeedLimit, UI_gpsRoadMatch;
   MCU_locationStatus 0x3D8 lat/lon; UI_gpsVehicleSpeed 0x2F8 heading; MCU_locationStatus2 0x68 navigonExpectedSpeed). No next-turn direction, route geometry or destination signal exists. Our drive logs recorded only 0x3D8 and 0x2F8,
-  so what the MCU actually sends for 0x3C8/0x68 is UNVERIFIED: next step is to add those two IDs to the (listen-only) logger and drive once with MCU navigation active.
+  (CORRECTED in Update 12: the logger stores the raw bytes of EVERY CAN id it sees, 253 ids, and 0x3C8 / 0x68 are simply absent from those drives.)
 
 ## Update 7 - speed-based progress estimate (dead reckoning) in `CurveAhead`
 When the GPS position has NOT changed since the last update (the MCU log refreshes it only every ~14 s), the position is no longer fed to the Navigator as a new fix (that froze the matcher, which saw
@@ -164,3 +164,18 @@ Result with the advisory active (own detector, a_lat 1.85, decel 1.0), constant 
 the car slows into EVERY one (0 entered above curve speed, max braking 1.00 m/s^2, lowest 32 km/h) and runs straight stretches at full speed, but it is below cruise for 51% of the drive at 79 km/h and 68% at 101 km/h:
 the road is winding (km 30-52 nearly continuous bends). OPEN TUNING QUESTION (not changed): at a_lat 1.85 m/s^2 a moderate bend of R 150-190 m caps the speed at 60-69 km/h - may be too conservative for a driver's feel.
 Simulation only: a constant-speed car obeying target_speed(); no real car / openpilot / PCC was involved.
+
+
+## Update 12 - the enable option (advisory_runtime.py) and the drive plan for Pitesti -> Ramnicu Valcea
+- CORRECTION: radarweb's /data/maplog/map_*.jsonl already stores, once a second, the raw bytes of every CAN id seen (253 distinct ids in the Nov 1 drives) plus the decoded messages. MCU navigation messages 0x3C8
+  (UI_driverAssistMapData: navRouteActive, nextBranchDist, roadClass...) and 0x68 (navigonExpectedSpeed) are NOT in those drives: either the MCU does not broadcast them on this car/bus or MCU navigation was not active.
+  No logger change is needed. On the next drive, use the MCU navigation for part of the trip and look for '0x3c8' / '0x68' in the log's `raw`.
+- `tesla/nav/advisory_runtime.py` (+ `tesla/tests/test_nav_advisory_runtime.py`, 8 tests): switches on the EON, same convention as tesla_csa. Default = SHADOW (computes and logs to /data/curveadvice_shadow.log, never notifies);
+  `touch /data/tesla_curveadvice_enable` = text notifications ON, only while road confidence is high, speed >= 8 m/s, GPS position <= 30 s old, curve moderate or tighter, within braking + 3 s reaction distance (>= 200 m), once per curve;
+  `touch /data/tesla_curveadvice_off` overrides everything. No control output, no vehicle-control imports (the nav isolation test passes).
+- NOT WIRED: nothing on the EON calls this module yet and no screen shows the text. Wiring (a process feeding GPS/speed into CurveAhead + the display path) is the next step and needs explicit approval because the EON-screen alert path
+  lives in the car interface / controls events (see Update 8).
+- Gate run over the simulated Pitesti drive (enabled): 94 notifications, each curve once, at both 79 and 101 km/h cruise; 8 per run came with less distance than the braking distance - an artifact of that demo, which passes only the nearest
+  curve to the gate; the real integration passes all active curves.
+- DRIVE PLAN: drive Pitesti -> Ramnicu Valcea with radarweb logging on (it does by default); use the MCU navigation for a while; upload the /data/maplog/map_*.jsonl. Then: `python3 -m tesla.nav.real_drive_validate` (driven route, announcements vs
+  what you did) and the three-detector comparison (`tesla/tools/detector_compare.py`) on a winding road.
