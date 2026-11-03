@@ -162,7 +162,7 @@ def simulate_follow(points, cum, v_cruise, decel=DECEL, accel=1.0, min_severity=
     """Open-loop check on clean geometry (no GPS): a car that cruises at v_cruise and obeys target_speed() with at most `decel` of braking. Returns
     {'entries': [(bend start m, curve speed, speed at entry)], 'max_decel': ..., 'min_speed': ...}. Advisory maths only - nothing here drives a car."""
     ann, s, v = CurveAnnouncer(min_severity), 0.0, v_cruise
-    entries, max_dec, vmin, pending = {}, 0.0, v, {}
+    entries, max_dec, vmin, pending, trace = {}, 0.0, v, {}, []
     while s < cum[-1] - 1.0:
         r = ann.update(s, 'high', find_curves(points, cum, s, HORIZON_M, a_lat))
         tgt, _who = target_speed(r['active'], decel)
@@ -175,8 +175,9 @@ def simulate_follow(points, cum, v_cruise, decel=DECEL, accel=1.0, min_severity=
                 entries[a['id']] = (s, a['speed_ms'], nv)
         v = nv
         vmin = min(vmin, v)
+        trace.append((s, v, tgt, [(a['id'], a['distance_m'], a['speed_ms'], a['text'], a.get('confirmed', False)) for a in r['active']][:1]))
         s += v * dt
-    return {'entries': [(pending[k][0], e[1], e[2]) for k, e in sorted(entries.items())], 'max_decel': max_dec, 'min_speed': vmin, 'announced': len(pending)}
+    return {'entries': [(pending[k][0], e[1], e[2]) for k, e in sorted(entries.items())], 'max_decel': max_dec, 'min_speed': vmin, 'announced': len(pending), 'trace': trace}
 
 
 class CurveAhead(object):

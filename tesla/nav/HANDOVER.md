@@ -156,3 +156,11 @@ CAVEATS: ONE drive, FIVE scored curves; 'driver slowed' is a proxy (traffic, jun
 Decision implemented: `curveahead.DEFAULT_DETECTOR = 'own'`; each curve also carries `confirmed` (True when the CurveCue engine finds a curve at the same place) and the announcer passes it through, so downstream can
 treat 'confirmed' differently from 'own only'. CurveCue stays available (`detector='curvecall'`), still verified against the original engine.js. mapd is NOT used (needs Overpass/OSM server + scipy, and is noisy on sparse geometry).
 Replay on Bucharest<->Fundulea at 25 m/s with OWN: 15 / 12 curves announced once each, 0 false, max braking 1.0 m/s^2; the one curve entered above curve speed is a hairpin 150 m after the replay's first fix (start-up).
+
+## Update 11 - simulated drive Pitesti -> Ramnicu Valcea (`python3 -m tesla.nav.advisory_drive_test`, route from the national mapcurve v1 DB via `tesla/nav/national_route.py`)
+No routing graph / PBF exists for that area (and none can be downloaded here), so the route (64.2 km, trunk+primary, 11,913 points) was built by joining the national DB's roads where they share a vertex (one-way codes honoured).
+This is a TEST helper, not the routing engine; it was not checked against a map of the real DN7/DN65 line.
+Result with the advisory active (own detector, a_lat 1.85, decel 1.0), constant cruise: 94 curves of moderate or tighter (92 also found by CurveCue; 2 hairpin-class are sharp/hairpin: 24 sharp, 22 firm, 140 moderate counted over the two speed runs),
+the car slows into EVERY one (0 entered above curve speed, max braking 1.00 m/s^2, lowest 32 km/h) and runs straight stretches at full speed, but it is below cruise for 51% of the drive at 79 km/h and 68% at 101 km/h:
+the road is winding (km 30-52 nearly continuous bends). OPEN TUNING QUESTION (not changed): at a_lat 1.85 m/s^2 a moderate bend of R 150-190 m caps the speed at 60-69 km/h - may be too conservative for a driver's feel.
+Simulation only: a constant-speed car obeying target_speed(); no real car / openpilot / PCC was involved.
