@@ -168,11 +168,11 @@ void publish_live(const uint8_t *data, size_t len) {
   int64_t t = now_ns();
   if (t - last < 90000000LL) return;
   last = t;
-  FILE *fp = fopen("/dev/shm/c920_live.tmp", "wb");
+  FILE *fp = fopen("/dev/c920_live.tmp", "wb");
   if (!fp) return;
   size_t w = fwrite(data, 1, len, fp);
   fclose(fp);
-  if (w == len) rename("/dev/shm/c920_live.tmp", "/dev/shm/c920_live.jpg");
+  if (w == len) rename("/dev/c920_live.tmp", "/dev/c920_live.jpg");
 }
 
 void on_frame(uvc_frame_t *f, void *) {

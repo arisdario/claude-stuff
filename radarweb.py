@@ -1516,7 +1516,7 @@ def _to_jpeg(buf, maxw=720, q=60):
     ok, j = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), q])
     return j.tobytes() if ok else None
 
-LIVE_JPG = '/dev/shm/c920_live.jpg'    # written by camerad (external C920): the camera's own full-size MJPEG frames
+LIVE_JPG = '/dev/c920_live.jpg'    # written by camerad (external C920): the camera's own full-size MJPEG frames
 def _live_fresh():
     try: return time.time() - os.stat(LIVE_JPG).st_mtime < 2.0
     except OSError: return False
