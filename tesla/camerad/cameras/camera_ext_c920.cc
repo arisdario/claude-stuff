@@ -245,6 +245,7 @@ bool ext_open() {
   g_last_frame_ns = now_ns();
   if (uvc_start_streaming(g.devh, &ctrl, on_frame, NULL, 0) < 0) { ext_close(); return false; }
   g.streaming = 1;
+  apply_led_off(g.devh);                                            // again once streaming: the firmware may switch the LED with the stream
   return true;
 }
 
