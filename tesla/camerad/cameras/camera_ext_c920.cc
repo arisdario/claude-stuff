@@ -208,10 +208,10 @@ bool ext_open() {
 void *capture_thread(void *) {
   g_dispatch = true;
   while (!g_stop && !do_exit) {
-    if (!ext_open()) { printf("external camera: not available, retrying\n"); sleep(1); continue; }
-    printf("external camera: C920 streaming %dx%d MJPEG @ %d fps\n", SRC_W, SRC_H, SRC_FPS);
+    if (!ext_open()) { fprintf(stderr, "external camera: not available, retrying\n"); sleep(1); continue; }
+    fprintf(stderr, "ROAD CAMERA: external C920 streaming %dx%d MJPEG @ %d fps\n", SRC_W, SRC_H, SRC_FPS);
     while (!g_stop && !do_exit && (now_ns() - g_last_frame_ns) < 3000000000LL) usleep(100000);
-    if (!g_stop && !do_exit) printf("external camera: no frames for 3 s, restarting the camera\n");
+    if (!g_stop && !do_exit) fprintf(stderr, "external camera: no frames for 3 s, restarting the camera\n");
     ext_close();
   }
   ext_close();
@@ -221,6 +221,7 @@ void *capture_thread(void *) {
 }  // namespace
 
 int ext_c920_selftest(int timeout_ms) {
+  fprintf(stderr, "external camera: self-test (opening the C920 ...)\n");
   g_dispatch = false;
   g_frames = 0;
   if (!ext_open()) return 0;
@@ -228,6 +229,7 @@ int ext_c920_selftest(int timeout_ms) {
   while (g_frames < 3 && waited < timeout_ms) { usleep(50000); waited += 50; }
   int ok = g_frames >= 3;
   ext_close();
+  fprintf(stderr, "external camera: self-test %s (%lu frames)\n", ok ? "PASSED" : "FAILED", (unsigned long)g_frames);
   return ok;
 }
 
