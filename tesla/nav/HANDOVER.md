@@ -192,3 +192,8 @@ Simulation only: a constant-speed car obeying target_speed(); no real car / open
   (24 were 25 m - 700 m from the DN3 trace). Replaced by `predicted_dn3_bucuresti_fundulea.md` = the DN3 trace of the Fundulea->Bucuresti log, reversed.
 - The Nov 1 logs already contain the country road: map_20261101_182944 = Fundulea -> Bucuresti, 27.1 km of DN3 (rebuilt road within 7 m median / 22 m max of the trace), max 90 km/h, with an 85 min stop at 6 km from Fundulea and a 3 h stop at the end.
 - No MCU navigation ids (0x3c8, 0x68) in any of these logs.
+
+## Update 14 - the 101 MB database in git
+`tesla/tools/mapcurve_national.sqlite.gz` (101 MB) was committed to main on 2 Nov (ab3ad14, message "Ignore generated mapcurve database"), so a plain `git pull` on the EON downloads it (~1 hour at 600 KB/s).
+It is untracked + git-ignored on offline-nav from this commit on (the local file is kept). It STAYS IN THE HISTORY of main and offline-nav: removing it for good needs a history rewrite + force push of main (not done: needs your explicit OK).
+Fast EON update without it: `git fetch --depth 1 origin offline-nav && git checkout -B offline-nav FETCH_HEAD` (only the newest snapshot, which no longer contains the file).

@@ -10,3 +10,7 @@ carto_api_key
 
 routegraph*.sqlite
 *_report.md
+
+# generated national map-curve database (~100 MB): build it with tesla/tools/mapcurve_build.py, never commit it
+tesla/tools/mapcurve_national.sqlite
+tesla/tools/mapcurve_national.sqlite.gz
