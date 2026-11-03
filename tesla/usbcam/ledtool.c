@@ -43,11 +43,14 @@ int main(int argc, char **argv) {
     for (u = uvc_get_extension_units(devh); u; u = u->next) {
       printf("--- unit %u\n", u->bUnitID);
       for (int sel = 1; sel <= 30; sel++) {
+        uint8_t info = 0; int ri = uvc_get_ctrl(devh, u->bUnitID, sel, &info, 1, UVC_GET_INFO);   /* bit0 = can GET, bit1 = can SET */
         int l = uvc_get_ctrl_len(devh, u->bUnitID, sel);
-        if (l <= 0 || l > 16) continue;
-        uint8_t buf[16] = {0}; int r = uvc_get_ctrl(devh, u->bUnitID, sel, buf, l, UVC_GET_CUR);
-        printf("  selector %2d  len %2d  cur ", sel, l);
-        if (r < 0) printf("(read error %d)", r); else for (int i = 0; i < l; i++) printf("%02x ", buf[i]);
+        if (ri < 0 && l <= 0) continue;                                 /* nothing there */
+        printf("  selector %2d  info %s0x%02x%s  len %d", sel, ri < 0 ? "(err " : "", ri < 0 ? (unsigned)(-ri) : info, ri < 0 ? ")" : (info & 2 ? " (can SET)" : ""), l);
+        if (l > 0 && l <= 16) {
+          uint8_t buf[16] = {0}; int r = uvc_get_ctrl(devh, u->bUnitID, sel, buf, l, UVC_GET_CUR);
+          printf("  cur "); if (r < 0) printf("(read error %d)", r); else for (int i = 0; i < l; i++) printf("%02x ", buf[i]);
+        }
         printf("\n");
       }
     }
