@@ -10,18 +10,18 @@ from nav import curveahead as C, geo  # noqa: E402
 M_LAT = 111320.0
 
 
-def line_with_arc(radius, straight=1500.0, turn_deg=60.0):
+def line_with_arc(radius, straight=1500.0, turn_deg=60.0, step=10.0):
     """east along y=0 for `straight` m, then an arc of `radius` turning left by turn_deg, then straight on. -> (points (lat, lon), cum)"""
     k = 1.0 / M_LAT
     pts, x, y, th = [(0.0, 0.0)], 0.0, 0.0, 0.0
     for _ in range(int(straight / 10)):
         x += 10.0
         pts.append((y * k, x * k))
-    steps = int(math.radians(turn_deg) * radius / 10.0)
+    steps = int(math.radians(turn_deg) * radius / step)
     for _ in range(steps):
-        th += 10.0 / radius
-        x += 10.0 * math.cos(th)
-        y += 10.0 * math.sin(th)
+        th += step / radius
+        x += step * math.cos(th)
+        y += step * math.sin(th)
         pts.append((y * k, x * k))
     for _ in range(100):
         x += 10.0 * math.cos(th)
@@ -131,6 +131,80 @@ class TestLateEntryIsOnlyPhysicallyUnavoidable(unittest.TestCase):
         r = C.CurveAnnouncer().update(0.0, 'high', C.find_curves(pts, cum, 0.0))
         self.assertEqual(len(r['new']), 1 + len([x for x in r['active'] if x['id'] != 1]))     # everything within the horizon is announced at once
         self.assertAlmostEqual(r['active'][0]['distance_m'], 413.0, delta=15.0)
+
+
+def sparse_road():
+    """the arc road with realistic edge lengths: 100 m edges on the straights, 10 m edges only through the bend (a tracker cannot follow 10 m edges at 25 m/s with 1 fix/s)"""
+    pts, _cum = line_with_arc(100.0, straight=2500.0, turn_deg=90.0)
+    n_straight = 250
+    keep = [i for i in range(len(pts)) if (i <= n_straight and i % 10 == 0) or (n_straight < i < len(pts) - 100) or (i >= len(pts) - 100 and (i - (len(pts) - 100)) % 10 == 0) or i == len(pts) - 1]
+    return [pts[i] for i in keep]
+
+
+def _along(points, cum, s):
+    j = max(i for i in range(len(cum) - 1) if cum[i] <= s)
+    f = (s - cum[j]) / max(cum[j + 1] - cum[j], 1e-9)
+    return (points[j][0] + f * (points[j + 1][0] - points[j][0]), points[j][1] + f * (points[j + 1][1] - points[j][1]),
+            geo.bearing(points[j][0], points[j][1], points[j + 1][0], points[j + 1][1]))
+
+
+class TestDeadReckoning(unittest.TestCase):
+    """The logged MCU GPS position refreshes only every ~14 s: between updates the progress must advance with the car's speed, not freeze."""
+    def drive(self, dead_reckon, refresh_s=14.0, v=8.0, seed=1):
+        import random
+        from nav import scenarios as SC, router as RT
+        pts, _c = line_with_arc(100.0, straight=2500.0, turn_deg=90.0, step=5.0)       # vertices no further apart than the engine's 5 m resampling (see HANDOVER: engine quirk with long chords)
+        net = SC.Net()
+        ids = [net.node() for _ in pts]
+        net.way('Main', [(ids[i], pts[i][0] * M_LAT, pts[i][1] * M_LAT) for i in range(len(pts))], highway='secondary')
+        g = net.build()
+        goal = SC.at(pts[-1][0] * M_LAT, pts[-1][1] * M_LAT)
+        rt = RT.find_route(g, SC.at(0, 0), goal)
+        ca = C.CurveAhead(g, goal, dead_reckon=dead_reckon)
+        ca.start(rt.points[0][0], rt.points[0][1], None)
+        rnd, errs, news, last, dr, hi, n, t, s = random.Random(seed), [], 0, None, 0, 0, 0, 0.0, 0.0
+        while s < 2600.0:
+            if last is None or t - last[0] >= refresh_s:
+                lat, lon, h = _along(rt.points, rt.cum, s)
+                last = (t, lat + rnd.gauss(0, 3) / M_LAT, lon + rnd.gauss(0, 3) / M_LAT, h)
+            msg = ca.update(t, last[1], last[2], last[3], v, 3.0)
+            n += 1
+            hi += msg['confidence'] == 'high'
+            if msg['route_progress_m'] is not None:
+                errs.append(abs(msg['route_progress_m'] - s))
+            if 'announce' in msg:
+                news += len(msg['announce']['new'])
+                dr += msg['advisory']['dead_reckoned']
+            t += 1.0
+            s += v
+        self.high_fraction = hi / float(n)
+        return max(errs), news, dr
+
+    def test_progress_follows_the_car_between_gps_updates(self):
+        err_dr, news_dr, n_dr = self.drive(True)
+        err_no, _news_no, _ = self.drive(False)
+        self.assertGreater(n_dr, 0)
+        self.assertLess(err_dr, 30.0)                       # GPS noise + route snapping, not 14 s x 8 m/s = 112 m
+        self.assertGreater(err_no, 60.0)                    # the control: without dead reckoning the progress freezes between updates
+        self.assertEqual(news_dr, 1)                        # the one bend announced exactly once
+        self.assertGreater(self.high_fraction, 0.6)         # and the road stays confidently identified between GPS updates
+
+    def test_without_a_new_position_for_too_long_confidence_drops(self):
+        from nav import scenarios as SC, router as RT
+        pts, _ = line_with_arc(100.0, straight=2500.0, turn_deg=90.0)
+        net = SC.Net()
+        ids = [net.node() for _ in pts]
+        net.way('Main', [(ids[i], pts[i][0] * M_LAT, pts[i][1] * M_LAT) for i in range(len(pts))], highway='secondary')
+        g = net.build()
+        goal = SC.at(pts[-1][0] * M_LAT, pts[-1][1] * M_LAT)
+        rt = RT.find_route(g, SC.at(0, 0), goal)
+        ca = C.CurveAhead(g, goal)
+        ca.start(rt.points[0][0], rt.points[0][1], None)
+        lat, lon, h = _along(rt.points, rt.cum, 100.0)
+        for t in range(0, 5):
+            ca.update(float(t), lat, lon, h, 20.0, 3.0)
+        late = ca.update(5.0 + C.DR_MAX_AGE_S + 5.0, lat, lon, h, 20.0, 3.0)
+        self.assertNotEqual(late['confidence'], 'high')        # a position that never changed for > 60 s is not trusted for progress
 
 
 if __name__ == '__main__':

@@ -115,3 +115,15 @@ Settings unchanged: CurveCue engine, a_lat 1.85 m/s^2 (not 0.35 g), advisory onl
 - MCU2 navigation: the DBC in the repo defines passive CAN signals from the MCU (UI_driverAssistMapData 0x3C8: UI_navRouteActive, UI_nextBranchDist, UI_roadClass, UI_mapSpeedLimit, UI_gpsRoadMatch;
   MCU_locationStatus 0x3D8 lat/lon; UI_gpsVehicleSpeed 0x2F8 heading; MCU_locationStatus2 0x68 navigonExpectedSpeed). No next-turn direction, route geometry or destination signal exists. Our drive logs recorded only 0x3D8 and 0x2F8,
   so what the MCU actually sends for 0x3C8/0x68 is UNVERIFIED: next step is to add those two IDs to the (listen-only) logger and drive once with MCU navigation active.
+
+## Update 7 - speed-based progress estimate (dead reckoning) in `CurveAhead`
+When the GPS position has NOT changed since the last update (the MCU log refreshes it only every ~14 s), the position is no longer fed to the Navigator as a new fix (that froze the matcher, which saw
+"the car moved 25 m/s but stayed put"); instead progress advances by the car's speed (trapezoid of the last two speeds) and confidence is whatever the last REAL position update gave, dropping to 'low' after
+DR_MAX_AGE_S = 60 s without a new position. A new position slightly behind the dead-reckoned progress (<= 50 m) does not move the car backwards (no re-announcement). `dead_reckon=False` restores the old behaviour.
+Message: `advisory.dead_reckoned`, `advisory.position_age_s`. Tests: `TestDeadReckoning` (14 s updates at 8 m/s: max progress error < 30 m vs > 60 m without; the bend announced once; confidence stays high).
+Also changed: the tracker's `contested` flag fires when a long position jump leaves many candidate edges ahead ON THE SAME road; `CurveAhead._contested_off_route` now only counts evidence for edges that are NOT on the route
+(a parallel road still lowers confidence). Replay on Bucharest<->Fundulea at 25 m/s: unchanged results (9 / 8 curves, once each, 0 false), high-confidence fixes 1469->1559 and 1413->1494, still 0 with progress wrong > 40 m.
+FINDING (CurveCue engine, not modified): the engine resamples the route at 5 m and smooths the RADIUS with a plain average (radius capped 10,000 m). On a polyline whose vertices are >= 10 m apart, every other resampled point lies
+on a straight chord (infinite radius) and swamps the average: a real R = 99 m arc built from 10 m chords came out as R = 8010 m and no curve at all; with vertices <= 5 m apart it is detected correctly. Real OSM geometry has irregular
+vertex spacing, so some bends may be under-reported (this is the likely reason the engine finds fewer curves than our old 30 m-baseline detector on the same routes). Mitigation available WITHOUT changing the engine: pass a larger
+`spacing` (the engine option exists) or densify route geometry; not done - needs a decision and a comparison against real bends.

@@ -14,13 +14,17 @@ import math
 try:
     from . import geo, curvecall_engine as ENG
     from .matcher import Navigator
+    from .tracker import CONTEST_LLR
 except ImportError:
     import geo
     import curvecall_engine as ENG
     from matcher import Navigator
+    from tracker import CONTEST_LLR
 
 A_LAT = 1.85            # m/s^2 lateral acceleration used for the curve speed (same as mapcurve A_Y)
 DECEL = 1.0             # m/s^2 assumed comfortable deceleration (configurable)
+DR_MAX_AGE_S = 60.0     # progress is dead-reckoned from speed for at most this long without a NEW GPS position (then confidence drops to 'low')
+DR_BACK_TOL_M = 50.0    # a new position slightly behind the dead-reckoned progress does not move the car backwards (it would re-announce a passed curve)
 HORIZON_M = 800.0       # look-ahead along the route
 V_FLOOR = 8.94          # m/s, same floor as mapcurve
 
@@ -164,36 +168,64 @@ def simulate_follow(points, cum, v_cruise, decel=DECEL, accel=1.0, min_severity=
 
 class CurveAhead(object):
     """Wraps a Navigator only to know WHERE on the route the car is and HOW SURE that is. update() returns the advisory dict (see publish())."""
-    def __init__(self, graph, destination, a_lat=A_LAT, decel=DECEL, horizon_m=HORIZON_M, navigator=None, min_severity=DEFAULT_MIN_SEVERITY):
+    def __init__(self, graph, destination, a_lat=A_LAT, decel=DECEL, horizon_m=HORIZON_M, navigator=None, min_severity=DEFAULT_MIN_SEVERITY, dead_reckon=True):
         self.nav = navigator or Navigator(graph, destination)
         self.a_lat, self.decel, self.horizon = a_lat, decel, horizon_m
-        self._last_prog, self._last_t = None, None
         self.announcer = CurveAnnouncer(min_severity)
+        self.dead_reckon = dead_reckon
+        self._pos = self._pos_t = self._dr_prog = self._last_t = self._last_v = None
+        self._conf, self._route = 'none', None
 
     def start(self, lat, lon, heading=None):
         self.nav.plan(lat, lon, heading)
 
+    def _contested_off_route(self, tk):
+        """the tracker's 'contested' flag also fires when the car simply moved several edges along the SAME road between two GPS positions (a long jump has many candidate edges
+        ahead). That is not ambiguity about WHICH road. Only evidence for an edge that is NOT on the route counts against confidence here (a parallel road still does)."""
+        if not tk.contested:
+            return False
+        eids = self.nav.route_eids
+        return any(v >= CONTEST_LLR and k not in eids for d in (tk.llr, tk.llr_unconnected) for k, v in d.items())
+
     def update(self, t, lat, lon, heading, speed, accuracy=None):
-        st = self.nav.update(t, lat, lon, heading, speed, accuracy)
         route = self.nav.route
-        tk = self.nav.tracker
-        sure = st.status in ('on_route', 'arrived') and tk is not None and tk.known and not tk.contested and tk.edge.eid in self.nav.route_eids
-        if st.progress_m is not None and st.status in ('on_route', 'arrived', 'rerouted', 'checking'):
-            prog = st.progress_m if st.status != 'checking' else self.nav.matcher.progress
+        v = speed or 0.0
+        stale = (self.dead_reckon and lat is not None and lon is not None and (lat, lon) == self._pos and self._dr_prog is not None and route is self._route
+                 and self._conf in ('high', 'low'))
+        if stale:
+            # the GPS position has not changed since the last update: do NOT feed it to the matcher as a new fix; advance the progress by the car's own speed
+            dt = max(0.0, t - self._last_t)
+            prog = min(route.distance_m, self._dr_prog + 0.5 * (v + (self._last_v if self._last_v is not None else v)) * dt)
+            conf, status = (self._conf if (t - self._pos_t) <= DR_MAX_AGE_S else 'low'), 'dead_reckoning'      # confidence is what the last REAL update gave; a position frozen for > DR_MAX_AGE_S is not trusted
         else:
-            prog = self.nav.matcher.progress
+            st = self.nav.update(t, lat, lon, heading, speed, accuracy)
+            route = self.nav.route
+            tk = self.nav.tracker
+            sure = st.status in ('on_route', 'arrived') and tk is not None and tk.known and tk.edge.eid in self.nav.route_eids and not self._contested_off_route(tk)
+            if st.progress_m is not None and st.status in ('on_route', 'arrived', 'rerouted', 'checking'):
+                prog = st.progress_m if st.status != 'checking' else self.nav.matcher.progress
+            else:
+                prog = self.nav.matcher.progress
+            conf = 'high' if sure else ('low' if st.status in ('checking', 'on_route', 'gps_poor') else 'none')
+            status = st.status
+            if prog is not None and route is self._route and self._dr_prog is not None and 0.0 < self._dr_prog - prog <= DR_BACK_TOL_M:
+                prog = self._dr_prog                                                # monotone
+            if lat is not None and lon is not None and status not in ('gps_lost', 'gps_poor'):
+                self._pos, self._pos_t = (lat, lon), t
+        self._route, self._last_t, self._last_v = route, t, v
         if prog is None:
-            return self.publish(t, 'none', None, [], None, None, st.status)
-        conf = 'high' if sure else ('low' if st.status in ('checking', 'on_route', 'gps_poor') else 'none')
+            self._dr_prog, self._conf = None, 'none'
+            return self.publish(t, 'none', None, [], None, None, status)
+        self._dr_prog, self._conf = prog, conf
         curves = find_curves(route.points, route.cum, prog, self.horizon, self.a_lat)
-        rows, adv, bind = advise(curves, speed or 0.0, self.decel)
-        msg = self.publish(t, conf, prog, rows, adv if conf == 'high' else None, bind, st.status)
+        rows, adv, bind = advise(curves, v, self.decel)
+        msg = self.publish(t, conf, prog, rows, adv if conf == 'high' else None, bind, status)
         msg['announce'] = self.announcer.update(prog, conf, curves)
         tgt, who = target_speed(msg['announce']['active'], self.decel) if conf == 'high' else (None, None)
-        v = speed or 0.0
         msg['advisory'] = {'confidence': conf, 'target_speed_ms': tgt, 'slow_down': tgt is not None and v > tgt + 0.5,
                            'curve_distance_m': None if who is None else who['distance_m'], 'curve_speed_ms': None if who is None else who['speed_ms'],
-                           'curve_radius_m': None if who is None else who['radius_m'], 'curve_severity': None if who is None else who['severity']}
+                           'curve_radius_m': None if who is None else who['radius_m'], 'curve_severity': None if who is None else who['severity'],
+                           'dead_reckoned': bool(stale), 'position_age_s': None if self._pos_t is None else t - self._pos_t}
         return msg
 
     @staticmethod
