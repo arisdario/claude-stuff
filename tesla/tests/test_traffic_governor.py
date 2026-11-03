@@ -79,13 +79,29 @@ class TestGovernor(unittest.TestCase):
     d, t2 = run(g, 5, t + 2, others_cpu_pct=55.0)                       # sustained: trips
     self.assertFalse(d.allowed)
 
-  def test_model_fps_drop_trips_quickly(self):
+  def test_model_fps_drop_trips_on_the_mean(self):
     g = G.Governor(LIM)
     _, t = run(g, 10, 0)
-    g.update(ok(model_fps=15.0), t)
-    d = g.update(ok(model_fps=15.0), t + 2)
+    d, t = run(g, 8, t, model_fps=15.0)
     self.assertFalse(d.allowed)
-    self.assertIn('driving model', d.reason)
+    self.assertIn('driving model', g.last_trip)
+
+  def test_one_jittery_second_does_not_trip(self):
+    g = G.Governor(LIM)
+    _, t = run(g, 10, 0)
+    seq = [15.5, 23.9, 23.0, 17.0, 24.0, 22.5, 19.5, 20.5]       # bunched message counts like the real run; mean is about 20.7
+    for i, f in enumerate(seq):
+      d = g.update(ok(model_fps=f), t + i)
+    self.assertTrue(d.allowed)
+
+  def test_missed_model_frames_trip(self):
+    g = G.Governor(LIM)
+    _, t = run(g, 10, 0)
+    d = None
+    for i in range(8):
+      d = g.update(ok(model_gaps=2), t + i)
+    self.assertFalse(d.allowed)
+    self.assertIn('missed', g.last_trip)
 
   def test_hold_then_recover_with_margin(self):
     g = G.Governor(LIM)

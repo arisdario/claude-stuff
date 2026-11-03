@@ -9,7 +9,9 @@ import json
 
 REQUIRED = ('others_cpu_limit_pct', 'own_cpu_limit_core_pct', 'temp_limit_c', 'mem_avail_min_mb')
 DEFAULTS = {
-  'model_fps_min': 19.0,        # the driving model runs at 20 Hz; below this the detector stops
+  'model_fps_min': 19.0,        # the driving model runs at 20 Hz; the MEAN over fps_window_s below this = stop (single seconds jitter: messages arrive in bunches)
+  'fps_window_s': 5.0,
+  'model_gaps_max': 3,          # missed model frame ids within the window; more = stop
   'sustain_s': 3.0,             # a limit must be exceeded this long (instant for thermal status / hard temperature)
   'hold_s': 60.0,               # stay off at least this long after a trip
   'recover_s': 30.0,            # then everything must be healthy this long (with the margins) before it comes back
@@ -53,6 +55,8 @@ class Governor(object):
     self.trips = []
     self.latched = False
     self.fps_bad_since = None
+    self.fps_hist = []           # (time, model_fps, model_gaps)
+    self.last_trip = ''          # reason of the most recent trip
 
   # ---- individual checks, each returns '' when fine, else the reason
   def _hard(self, s, margin=False):
@@ -85,12 +89,20 @@ class Governor(object):
       return 'memory available %s MB' % ('?' if m is None else '%.0f' % m)
     return ''
 
-  def _fps(self, s):
+  def _fps(self, s, now):
     f = s.get('model_fps')
     if f is None:
       return 'driving model frame rate unknown'
-    if f < self.L['model_fps_min']:
-      return 'driving model at %.1f fps' % f
+    L = self.L
+    self.fps_hist = [h for h in self.fps_hist if now - h[0] <= L['fps_window_s']] + [(now, f, s.get('model_gaps') or 0)]
+    if now - self.fps_hist[0][0] < L['fps_window_s'] - 1.5:          # not enough history yet: do not judge on one jittery second
+      return ''
+    mean = sum(h[1] for h in self.fps_hist) / len(self.fps_hist)
+    gaps = sum(h[2] for h in self.fps_hist)
+    if mean < L['model_fps_min']:
+      return 'driving model at %.1f fps (mean of %.0f s)' % (mean, L['fps_window_s'])
+    if gaps > L['model_gaps_max']:
+      return 'driving model missed %d frames in %.0f s' % (gaps, L['fps_window_s'])
     return ''
 
   def update(self, s, now, switch_on=True, switch_off=False):
@@ -105,11 +117,11 @@ class Governor(object):
     hard = self._hard(s)
     if hard:
       return self._trip(now, hard)
-    fps = self._fps(s)
+    fps = self._fps(s, now)
     if fps:                                   # a falling model frame rate is the one thing that must never happen: needs 2 samples in a row
       if self.fps_bad_since is None:
         self.fps_bad_since = now
-      if now - self.fps_bad_since >= 2.0 or 'unknown' in fps and now - self.fps_bad_since >= L['sustain_s']:
+      if 'unknown' not in fps or now - self.fps_bad_since >= L['sustain_s']:
         return self._trip(now, fps)
       return self._deny(now, 'checking ' + fps, keep_streak=False)
     self.fps_bad_since = None
@@ -152,8 +164,10 @@ class Governor(object):
     self.hold_until = now + self.L['hold_s']
     self.bad_since = None
     self.fps_bad_since = None
+    self.fps_hist = []
     self.good_since = None
     if len(self.trips) > self.L['max_trips_per_hour']:
       self.latched = True
     self.allowed, self.reason = False, 'tripped: ' + reason
+    self.last_trip = reason
     return Decision(False, self.reason)

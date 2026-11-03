@@ -148,8 +148,14 @@ def read_battery_c(root='/sys/class/power_supply/battery'):
 class Sampler(object):
   """sample() every >= 1 s. First call only primes the counters and returns None."""
 
-  def __init__(self, proc='/proc', sysroot='/sys', own_pid=None):
+  def __init__(self, proc='/proc', sysroot='/sys', own_pid=None, proc_every=1):
     self.proc, self.sys = proc, sysroot
+    self.proc_every = max(1, int(proc_every))      # scan the process list only every N samples (a full scan costs real CPU on the EON)
+    self.n = 0
+    self.labels = {}                               # pid -> label, read once
+    self.kthreads = set()                          # pids with an empty cmdline (kernel threads): never looked at again
+    self.scan_prev = None
+    self.per, self.own = {}, 0.0
     self.own_pid = own_pid if own_pid is not None else os.getpid()
     self.prev = None
 
@@ -163,36 +169,52 @@ class Sampler(object):
   def _procs(self):
     out = {}
     for d in glob.glob(os.path.join(self.proc, '[0-9]*')):
-      pid = os.path.basename(d)
+      try:
+        pid = int(os.path.basename(d))
+      except ValueError:
+        continue
+      if pid in self.kthreads:
+        continue
       st = self._read(os.path.join(d, 'stat'))
       comm, ticks = parse_pid_stat(st) if st else (None, None)
       if comm is None:
         continue
-      out[int(pid)] = (proc_label(self._read(os.path.join(d, 'cmdline')), comm), ticks)
+      if pid not in self.labels:
+        cmd = self._read(os.path.join(d, 'cmdline'))
+        if not cmd:
+          self.kthreads.add(pid)
+          continue
+        self.labels[pid] = proc_label(cmd, comm)
+      out[pid] = (self.labels[pid], ticks)
     return out
 
   def sample(self, now=None):
     now = time.time() if now is None else now
     total, cores = parse_proc_stat(self._read(os.path.join(self.proc, 'stat')))
-    cur = {'t': now, 'total': total, 'cores': cores, 'procs': self._procs()}
+    self.n += 1
+    cur = {'t': now, 'total': total, 'cores': cores}
     prev, self.prev = self.prev, cur
+    if self.proc_every == 1 or self.n % self.proc_every == 1:      # a process scan (the expensive part); the first sample always scans
+      snap = {'t': now, 'procs': self._procs()}
+      old = self.scan_prev
+      if old is not None and now > old['t']:
+        per, own = {}, 0.0
+        for pid, (label, ticks) in snap['procs'].items():
+          if pid in old['procs'] and old['procs'][pid][1] <= ticks:
+            p = 100.0 * (ticks - old['procs'][pid][1]) / (CLK_TCK * (now - old['t']))      # percent of ONE core, averaged since the previous scan
+            per[label] = per.get(label, 0.0) + p
+            if pid == self.own_pid:
+              own = p
+        self.per, self.own = per, own
+      self.scan_prev = snap
     if prev is None or now <= prev['t']:
       return None
-    dt = now - prev['t']
     ncore = max(1, len(cores))
-    per = {}
-    own = 0.0
-    for pid, (label, ticks) in cur['procs'].items():
-      if pid in prev['procs'] and prev['procs'][pid][1] <= ticks:
-        p = 100.0 * (ticks - prev['procs'][pid][1]) / (CLK_TCK * dt)       # percent of ONE core
-        per[label] = per.get(label, 0.0) + p
-        if pid == self.own_pid:
-          own = p
     mem = parse_meminfo(self._read(os.path.join(self.proc, 'meminfo')))
     temps = read_thermal(os.path.join(self.sys, 'class/thermal'))
     gpu_busy, gpu_mhz = read_gpu(os.path.join(self.sys, 'class/kgsl/kgsl-3d0'))
     s = {
-      't': now, 'dt': dt,
+      't': now, 'dt': now - prev['t'],
       'cpu_total_pct': pct(prev['total'], cur['total']),
       'cpu_core_pct': [pct(prev['cores'].get(i), cur['cores'].get(i)) for i in sorted(cur['cores'])],
       'cpu_mhz': read_cpu_mhz(os.path.join(self.sys, 'devices/system/cpu')),
@@ -200,11 +222,11 @@ class Sampler(object):
       'temps': temps, 'temp_max_c': max(temps.values()) if temps else None,
       'gpu_busy_pct': gpu_busy, 'gpu_mhz': gpu_mhz,
       'batt_c': read_battery_c(os.path.join(self.sys, 'class/power_supply/battery')),
-      'procs': per, 'self_cpu_core_pct': own, 'ncores': ncore,
+      'procs': dict(self.per), 'self_cpu_core_pct': self.own, 'ncores': ncore,
     }
     # the rest of the system, in percent of the whole CPU, without this process
     if s['cpu_total_pct'] is not None:
-      s['others_cpu_pct'] = max(0.0, s['cpu_total_pct'] - own / ncore)
+      s['others_cpu_pct'] = max(0.0, s['cpu_total_pct'] - self.own / ncore)
     else:
       s['others_cpu_pct'] = None
     return s

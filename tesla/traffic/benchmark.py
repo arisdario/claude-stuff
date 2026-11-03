@@ -114,7 +114,7 @@ COLS_FIXED = ['t', 'label', 'cpu_total_pct', 'others_cpu_pct', 'self_cpu_core_pc
 
 def run(a):
   os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-  smp, cer = S.Sampler(), CerealProbe(not a.no_cereal)
+  smp, cer = S.Sampler(proc_every=a.proc_every), CerealProbe(not a.no_cereal)
   print('cereal: %s' % ('on (model/frame/thermal)' if cer.ok else 'off (%s) - model fps and thermal status will be empty' % getattr(cer, 'err', '?')))
   smp.sample()
   cer.poll(1.0)
@@ -208,14 +208,21 @@ def summarize(rows, own_budget=40.0):
     res['warnings'].append('no driving-model frame rate recorded (cereal not available): the governor cannot protect the model without it')
   if 'temp_max_c' not in res['metrics']:
     res['warnings'].append('no temperature readings')
+  if 'cpu_total_pct' in res['metrics']:
+    idle = [100.0 - x for x in col('cpu_total_pct') if x is not None]
+    ncores = max(1, sum(1 for k in (rows[0] if rows else {}) if k.startswith('core')))
+    need_all = own_budget / ncores + 10.0                  # the detector's budget plus a 10-point safety margin, in percent of ALL cores
+    res['headroom'] = {'idle_pct_p5': q(idle, 5), 'idle_pct_p50': q(idle, 50), 'idle_pct_p95': q(idle, 95), 'ncores': ncores,
+                       'idle_needed_pct': round(need_all, 1), 'fraction_of_time_enough_idle': round(sum(1 for x in idle if x >= need_all) / len(idle), 3)}
   if 'others_cpu_pct' in res['metrics']:
     m = res['metrics']
+    ncores = res.get('headroom', {}).get('ncores', 4)
     res['suggested_limits'] = {
-      'others_cpu_limit_pct': round(m['others_cpu_pct']['p99'] + 5.0, 1),
+      'others_cpu_limit_pct': round(min(m['others_cpu_pct']['p99'] + 5.0, 100.0 - own_budget / ncores - 10.0), 1),
       'own_cpu_limit_core_pct': own_budget,
       'temp_limit_c': round(m['temp_max_c']['p99'] + 3.0, 1) if 'temp_max_c' in m else None,
       'mem_avail_min_mb': round(max(50.0, m['mem_avail_mb']['min'] - 100.0), 0) if 'mem_avail_mb' in m else None,
-      '_from': 'baseline run, detector OFF: rest-of-system cpu p99 + 5 points; temperature p99 + 3 C; free RAM min - 100 MB. Review before use.',
+      '_from': 'baseline run, detector OFF: rest-of-system cpu p99 + 5 points, never above 100 minus the detector budget minus 10; temperature p99 + 3 C; free RAM min - 100 MB. Review before use.',
     }
   return res
 
@@ -228,6 +235,10 @@ def print_summary(res):
   print('\nper process (percent of ONE core):')
   for k, m in res['processes_pct_of_one_core'].items():
     print('  %-28s mean %6.1f  p95 %6.1f  max %6.1f  (in %d samples)' % (k, m['mean_when_seen'], m['p95'], m['max'], m['seen_in_samples']))
+  h = res.get('headroom')
+  if h:
+    print('\nHEADROOM: idle CPU p5/p50/p95 = %.1f / %.1f / %.1f %% of all %d cores; the detector needs %.1f %% idle; that much was free %.0f %% of the time' % (
+      h['idle_pct_p5'], h['idle_pct_p50'], h['idle_pct_p95'], h['ncores'], h['idle_needed_pct'], 100.0 * h['fraction_of_time_enough_idle']))
   print('\ndriving-model frame-id gaps: %s   thermal status not green: %s' % (res['model_frame_gaps_total'], res['thermal_status_not_green_samples']))
   for w in res['warnings']:
     print('WARNING:', w)
@@ -242,7 +253,8 @@ def main():
   r = sub.add_parser('run')
   r.add_argument('--out', required=True)
   r.add_argument('--label', default='')
-  r.add_argument('--interval', type=float, default=1.0)
+  r.add_argument('--interval', type=float, default=2.0)
+  r.add_argument('--proc-every', type=int, default=10, help='scan the process list only every N samples (a scan costs real CPU on the EON)')
   r.add_argument('--duration', type=float, default=0)
   r.add_argument('--no-cereal', action='store_true', help='do not subscribe to openpilot message queues (no model fps / thermal status). Use if the "evicting all subscribers" warning appears')
   s = sub.add_parser('summary')
@@ -256,6 +268,8 @@ def main():
   elif a.cmd == 'run':
     if a.interval < 1.0:
       sys.exit('interval below 1 s makes the benchmark itself a load; use 1 or more')
+    if a.interval > 5.0:
+      sys.exit('interval above 5 s is too coarse for the model frame-rate check')
     run(a)
   elif a.cmd == 'summary':
     rows = load(a.csv)
