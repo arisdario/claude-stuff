@@ -135,3 +135,13 @@ vertex spacing, so some bends may be under-reported (this is the likely reason t
 - EON-screen alerts use openpilot events: `interface.py` `create_event('steerUnavailable', [ET.NO_ENTRY, ET.WARNING])` etc. -> controlsd -> alert definitions in openpilot's `alerts.py` (NOT in this repo, so the exact
   yellow/white styling could not be verified here).
 - `obstacle_warn.py` / `radar_interface.py:132` computes `obstacle_level` but NOTHING in this repo reads it: that warning is not displayed anywhere yet.
+
+## Update 9 - what openpilotkr/openpilot (github.com/openpilotkr/openpilot, cloned read-only at /home/user/openpilotkr/openpilot, commit 3ff6dc6) already does
+- OSM curve slowdown there = `selfdrive/mapd` (the move-fast "mapd"): every 1 Hz it queries OSM around the car (Overpass online, or a local osm3s server at /data/osm if installed), `lib/Route.py` follows the road AHEAD
+  with no destination (picks the continuation by bearing at forks), `lib/NodesData.py` fits a spline through the OSM nodes (data "enhanced" with a node every 15 m where nodes are >= 50 m apart), evaluates curvature every 5 m,
+  makes a turn-speed section where curvature >= 0.002 1/m (R < 500 m), splits sections by sign and by curvature peak, limit = sqrt(2.3 m/s^2 / curvature). Published as `liveMapData.turnSpeedLimit` (+ ...Ahead lists).
+- The consumer is HYUNDAI-only: `selfdrive/car/hyundai/navicontrol.py` interpolates the limit through user tables (OCurvSpeedC/T, VCurvSpeedC/T), picks Vision/OSM/both via CurvDecelOption (OSM only when the camera model
+  does not already see the curve: osm_wait_timer) and then spams the cruise buttons to change the set speed. Not applicable to Tesla: PCC sets speed directly.
+- I ran mapd's NodesData curvature code unchanged (scipy) on our two Bucharest<->Fundulea routes: 37 and 30 turn-speed sections vs CurveCue engine 10 / 11 and our old detector 15 / 12: it fragments real bends into many
+  sections (e.g. the A2 on-ramp loop at km 14.2-14.6 -> 9 sections) and reports junction corners with R of 2-10 m. Noisier than CurveCue's engine for announcing; its value is the road-following (Route.py) and the data pipeline.
+- Needs internet (Overpass) or a local OSM server; cereal there has liveMapData.turnSpeedLimit* fields that the 0.7.5 Tesla cereal does not.
