@@ -46,3 +46,21 @@ NOT re-run: the benchmark (`BENCHMARK.md` is from commit dd77b97; the matcher/sn
 4. Fix the report label bug; rebuild/audit Predeal graph.
 5. Openpilot integration, incremental: (a) read-only process publishing a `navState` message (planning result only) fed by existing GPS; (b) on-EON replay of logged drives;
    (c) display/voice only. No path from nav to car control; keep `/data/tesla_csa_off`, CSA shadow-only and mapcurve/PCC untouched. Large DBs/PBFs/logs stay out of git.
+
+
+## Update (supersedes the GPS-reroute section above where they differ)
+- **Matcher reference = `745d287`.** I tried a further matcher change (tracker re-anchoring + outlier-proof ambiguity evidence, commit `d30f32f`, kept ONLY on branch
+  `matcher-resync-experiment`) and ran the full benchmark against `745d287` (4410 runs each, same seeds). Clear class: identical. Ambiguous class: false recalc 2% -> 0% but
+  detection 64% -> 49% and confident wrong-road recalc 2% -> 3%: no overall improvement, so it was reverted on `offline-nav` (matcher.py and test_nav_deviation.py are exactly `745d287`).
+  The "second reroute ~11.8 km" is therefore NOT fixed on this branch; cause (documented): the connectivity-based tracker locks onto a road 1-10 m beside the route, then two outlier
+  fixes (16.9 m, 24.5 m) trigger a recalculation from the parallel road. The two real-route validations were stopped (not completed) when the matcher was reverted; re-run with
+  `run_logged.sh` if needed. No further matcher work until asked.
+- **Focus is now curve-ahead announcement** (advisory only, no control path):
+  `tesla/nav/curveahead.py` (find_curves = curvature along the CONFIRMED route's geometry, 800 m horizon, v = sqrt(1.85/kappa), curve if v < 108 km/h and >= 20 m long;
+  `CurveAnnouncer` = each curve announced once with a stable id, distance-to-start updated every fix, dropped when passed, never announced while road confidence is not 'high';
+  `CurveAhead` wraps the existing Navigator for position/confidence), `tesla/nav/curve_replay.py` (replay + report), `tesla/tests/test_nav_curveahead.py`.
+- Replay results (Bucharest-Fundulea graph, 5 m GPS noise, 25 m/s): both directions every real curve announced exactly once (32/32 and 18/18), 0 duplicates, 0 spurious, 0 false slowdowns,
+  distance never grows while approaching. Road match with the reference matcher: median progress error 3.3 m, p95 ~10 m, 0 high-confidence fixes with progress wrong by > 40 m
+  (6 runs: 2 directions x 15/25/33 m/s); ~10% of fixes are low-confidence (no speed advised). Reports: `tesla/nav/validation/curve/`.
+- Not done / next: replay against a REAL logged drive (user's map_*.jsonl) to compare announcements with what the car actually did; decide how the message is transported
+  (cereal) - separate step, still advisory only; approach-speed/braking fields exist in `advise()` but are not part of the announcement by request.
