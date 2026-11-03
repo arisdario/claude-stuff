@@ -149,9 +149,12 @@ static int pick_mode_manually(uvc_device_handle_t *devh, uvc_stream_ctrl_t *ctrl
           ctrl->bFrameIndex = fr->bFrameIndex;
           ctrl->dwFrameInterval = *iv;
           ctrl->bInterfaceNumber = 1;
-          *neg = uvc_probe_stream_ctrl(devh, ctrl);
+          uint8_t ask_f = ctrl->bFormatIndex, ask_fr = ctrl->bFrameIndex; uint32_t ask_iv = ctrl->dwFrameInterval;
+          *neg = uvc_probe_stream_ctrl(devh, ctrl);       // ctrl now holds the camera's ANSWER (GET_CUR after SET_CUR)
           if (*neg == UVC_SUCCESS) return want;
           fprintf(stderr, "  negotiating %s %dx%d @ %d fps: %s (%d)\n", want ? "MJPEG" : "YUYV", w, h, fps, uvc_strerror(*neg), (int)*neg);
+          fprintf(stderr, "    asked : format %u frame %u interval %u\n    camera: format %u frame %u interval %u  max payload %u bytes  max frame %u bytes\n",
+                  ask_f, ask_fr, ask_iv, ctrl->bFormatIndex, ctrl->bFrameIndex, ctrl->dwFrameInterval, ctrl->dwMaxPayloadTransferSize, ctrl->dwMaxVideoFrameSize);
         }
       }
     }
@@ -160,6 +163,7 @@ static int pick_mode_manually(uvc_device_handle_t *devh, uvc_stream_ctrl_t *ctrl
 }
 
 int main(int argc, char **argv) {
+  printf("uvctest built %s %s (libuvc payload-check patch: present in this source)\n", __DATE__, __TIME__);
   int vid = 0, pid = 0, w = 640, h = 480, fps = 30, secs = 10;
   int a = 1;
   if (argc > a && strchr(argv[a], ':')) { sscanf(argv[a], "%x:%x", &vid, &pid); a++; }
