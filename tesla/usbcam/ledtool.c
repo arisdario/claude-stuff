@@ -1,6 +1,7 @@
 /* ledtool - look at / set the status LED of a Logitech C920 through its Logitech extension unit, using libuvc.
  *
  *   ./ledtool                list the camera's extension units and read the "LED1 Mode" control (READ ONLY)
+ *   ./ledtool scan           READ ONLY: dump every extension-unit control's length and current value (to find the LED one)
  *   ./ledtool set 0          write LED1 Mode = 0 (off).  1 = on, 2 = blink, 3 = auto (what the camera does by default)
  *
  * What it does and does not touch: it only ever reads/writes ONE control (selector 10 of the Logitech extension unit,
@@ -37,6 +38,20 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 16; i++) printf("%02x%s", u->guidExtensionCode[i], (i == 3 || i == 5 || i == 7 || i == 9) ? "-" : "");
     int lg = is_logitech_xu(u->guidExtensionCode); printf("%s\n", lg ? "   <- Logitech extension unit" : "");
     if (lg) found_unit = u->bUnitID;
+  }
+  if (argc >= 2 && !strcmp(argv[1], "scan")) {      /* READ ONLY: for every extension unit and selector 1..30 print the control length and its current value */
+    for (u = uvc_get_extension_units(devh); u; u = u->next) {
+      printf("--- unit %u\n", u->bUnitID);
+      for (int sel = 1; sel <= 30; sel++) {
+        int l = uvc_get_ctrl_len(devh, u->bUnitID, sel);
+        if (l <= 0 || l > 16) continue;
+        uint8_t buf[16] = {0}; int r = uvc_get_ctrl(devh, u->bUnitID, sel, buf, l, UVC_GET_CUR);
+        printf("  selector %2d  len %2d  cur ", sel, l);
+        if (r < 0) printf("(read error %d)", r); else for (int i = 0; i < l; i++) printf("%02x ", buf[i]);
+        printf("\n");
+      }
+    }
+    goto out;
   }
   if (found_unit < 0) { printf("no Logitech extension unit with the expected GUID: not touching anything.\n"); goto out; }
   int len = uvc_get_ctrl_len(devh, found_unit, LED_SELECTOR);
