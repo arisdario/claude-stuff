@@ -72,7 +72,7 @@ def replay(graph, route, dest, speed=25.0, noise=5.0, seed=1, decel=C.DECEL, a_l
 def report(a, b, route, truth, first, st, speed, decel):
     L = ['# Curve-ahead replay: %s -> %s' % (a, b), '',
          'route %.2f km, replay speed %.0f m/s (%.0f km/h), GPS noise 5 m, A_LAT %.2f m/s^2, DECEL %.2f m/s^2, horizon %.0f m. Advisory only.' % (route.distance_m / 1000.0, speed, speed * 3.6, C.A_LAT, decel, C.HORIZON_M), '',
-         '%d real curves of severity >= moderate (radius < 200 m; curve speed < %.0f km/h, >= %d samples) in the route geometry; announced with high confidence: **%d**.' % (len(truth), C.CURVE_MAX_MS * 3.6, C.MIN_CURVE_SAMPLES, len(first)), '',
+         '%d curves of severity >= moderate found by the CurveCue engine in the route geometry; announced with high confidence: **%d**.' % (len(truth), len(first)), '',
          '| # | at km | radius m | curve km/h | announced at (m before) | approach km/h then | slow-down must start (m before) | start slowing in (m) | early enough? |', '|---|---|---|---|---|---|---|---|---|']
     ok = 0
     for i, c in enumerate(truth):

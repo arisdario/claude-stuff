@@ -81,3 +81,16 @@ DECEL (1.0 m/s^2, configurable). It falls smoothly toward the curve speed, is No
 except a hairpin 218 m (Bucuresti->Fundulea) / 619 m (Fundulea->Bucuresti at 33 m/s) after the route START, where the replay starts at cruise speed with too little distance (start-up artefact).
 Per-fix output: `python3 -m tesla.nav.curve_replay ... --csv advisory.csv` (sample in tesla/nav/validation/curve/). Nothing consumes it yet: no cereal message, no controller.
 Next (separate, needs a decision): publish this dict as a message; any consumer that turns target_speed into acceleration limits is a vehicle-control change and must go through the PCC/CSA safety review.
+
+## Update 4 - ONE curve-detection engine: CurveCue's (supersedes our own detector described in Updates 1-3)
+Per the user's instruction our own curvature/curve detector was REMOVED from `curveahead.py`. Detection is now `tesla/nav/curvecall_engine.py`: a statement-by-statement Python port of CurveCue's
+`web-demo/engine.js` (MIT, attribution in the file header; Python because the EON has no JVM/node). Ported: 5 m interpolation, Menger radius + direction, spike rejection, 5-point rolling average,
+500 m threshold segmentation with 50 m gap merge, severity/direction/modifiers, advisory speed. NOT ported: compound/S-bend detection, lean angle, narration.
+Proof of equivalence: `tesla/tests/test_curvecall_engine.py` compares the port with the ORIGINAL engine.js run under node (`tesla/tests/data/`: engine.js copy, run_golden.mjs, routes, golden outputs)
+on Bucharest<->Fundulea: identical curves (indices, severity, direction, modifiers, advisory speed; radius/distance to 1e-5).
+`curveahead.py` is now only glue: run the engine once per route (cached), read the curves ahead of the matched progress (800 m horizon), announce each once (stable id, distance updates), and
+turn them into `target_speed()` (sqrt(v_curve^2 + 2*DECEL*d), CurveCue's braking relation). Speed uses a_lat = 1.85 m/s^2 (the repo's mapcurve value, = 0.19 g); CurveCue's own default is 0.35 g
+(1.9x higher a_lat, ~1.4x higher speeds) - OPEN DECISION: pass lateral_g to match CurveCue or keep mapcurve's comfort value.
+Comparison on Bucharest<->Fundulea (>= moderate): CurveCue engine finds 9 / 8 curves, our old detector found 15 / 12 - every CurveCue curve was also in ours; ours added 5 / 4 more (tight bends, e.g. an
+18 m-radius turn 150 m from the start) because CurveCue averages over ~25 m and merges nearby curves. Neither is verified against ground truth; that needs a real drive log.
+Replay with the CurveCue engine (25 and 33 m/s, 5 m GPS noise, existing matcher): each curve announced once, 0 false, 0 curves entered above curve speed at 25 m/s (1 at 33 m/s: a hairpin shortly after the route start), max braking 1.00 m/s^2.

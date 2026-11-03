@@ -7,39 +7,22 @@ Two separate jobs:
 If the road is not confidently identified (tracker contested / on another road / off route / GPS poor) the output has confidence 'low' or 'none' and NO advised
 speed: it reports low confidence rather than guessing an unrelated road.
 
-Maths (same constants as speedplot / mapcurve):  v_curve = sqrt(A_LAT / |kappa|);  v_approach(d) = sqrt(v_curve^2 + 2 * DECEL * d)  = the highest speed you may have
+Curve detection is CurveCue's engine (curvecall_engine.py, a port verified against the original). Maths used here (same constants as speedplot / mapcurve):  v_curve = sqrt(A_LAT / |kappa|);  v_approach(d) = sqrt(v_curve^2 + 2 * DECEL * d)  = the highest speed you may have
 d metres before the curve and still reach v_curve at DECEL;  slowing must begin when  d <= (v^2 - v_curve^2) / (2 * DECEL)."""
 import math
 
 try:
-    from . import geo
+    from . import geo, curvecall_engine as ENG
     from .matcher import Navigator
 except ImportError:
     import geo
+    import curvecall_engine as ENG
     from matcher import Navigator
 
 A_LAT = 1.85            # m/s^2 lateral acceleration used for the curve speed (same as mapcurve A_Y)
 DECEL = 1.0             # m/s^2 assumed comfortable deceleration (configurable)
 HORIZON_M = 800.0       # look-ahead along the route
-STEP_M = 10.0
-SPAN_M = 30.0           # Menger curvature baseline (+-)
 V_FLOOR = 8.94          # m/s, same floor as mapcurve
-CURVE_MAX_MS = 30.0     # only bends whose curve speed is below this (108 km/h, R < ~490 m) count as curves
-MIN_CURVE_SAMPLES = 2   # a curve must persist >= this many consecutive samples (20 m): a single-vertex kink is not a bend
-
-
-def _sample(points, cum, s0, s1, step=STEP_M):
-    out, j, s = [], 0, s0
-    total = cum[-1]
-    while s <= s1 + 1e-6:
-        c = min(max(s, 0.0), total)
-        while j < len(cum) - 2 and cum[j + 1] < c:
-            j += 1
-        seg = max(cum[j + 1] - cum[j], 1e-9)
-        f = min(max((c - cum[j]) / seg, 0.0), 1.0)
-        out.append((s, points[j][0] + f * (points[j + 1][0] - points[j][0]), points[j][1] + f * (points[j + 1][1] - points[j][1])))
-        s += step
-    return out
 
 
 # severity bands by curve radius: the same bands CurveCue uses (github.com/mhathiyari/curve-call, MIT licence): gentle > 200 m, moderate 100-200, firm 50-100, sharp 25-50, hairpin < 25
@@ -59,46 +42,32 @@ def narration(sev, direction, speed_ms, unit='kmh'):
     return '%s %s ahead, slow to %d' % ('Hairpin' if sev == 'hairpin' else sev.capitalize(), direction, int(round(speed_ms * 3.6 / 5.0)) * 5)
 
 
-def curvatures(samples, span_m=SPAN_M, with_sign=False):
-    """kappa (1/m) per sample (Menger over +-span, 3-point median filter against single-vertex noise); 0 where the baseline does not fit"""
-    k = max(1, int(round(span_m / STEP_M)))
-    raw = [0.0] * len(samples)
-    sgn = [0.0] * len(samples)
-    for i in range(k, len(samples) - k):
-        a, b, c = samples[i - k], samples[i], samples[i + k]
-        ab, bc, ca = geo.hav(a[1], a[2], b[1], b[2]), geo.hav(b[1], b[2], c[1], c[2]), geo.hav(c[1], c[2], a[1], a[2])
-        mlat = 111320.0
-        mlon = mlat * math.cos(math.radians(b[1]))
-        ax, ay, cx, cy = (a[2] - b[2]) * mlon, (a[1] - b[1]) * mlat, (c[2] - b[2]) * mlon, (c[1] - b[1]) * mlat
-        cross = ax * cy - ay * cx                    # (a-b) x (c-b): > 0 means the road bends to the RIGHT travelling a -> b -> c (east/north axes)
-        raw[i] = 2.0 * abs(cross) / max(ab * bc * ca, 1e-9)
-        sgn[i] = cross
-    filt = [sorted(raw[max(0, i - 1):i + 2])[len(raw[max(0, i - 1):i + 2]) // 2] for i in range(len(raw))]
-    return (filt, sgn) if with_sign else filt
+_CACHE = {}
+
+
+def _analysis(points, lateral_g):
+    """CurveCue's engine run ONCE over the whole route polyline (cached per route); every fix then just reads the curves ahead of the car from it"""
+    key = (id(points), len(points), round(lateral_g, 6))
+    hit = _CACHE.get(key)
+    if hit is None or hit[0] is not points:
+        _CACHE.clear()
+        hit = (points, ENG.analyze_route([(p[0], p[1]) for p in points], lateral_g=lateral_g))
+        _CACHE[key] = hit
+    return hit[1]
 
 
 def find_curves(points, cum, s_now, horizon_m=HORIZON_M, a_lat=A_LAT):
-    """curves in (s_now, s_now + horizon]: [{'dist_m', 'radius_m', 'v_curve'}], nearest first. Geometry only - no position noise involved."""
-    s_from = math.floor((s_now - SPAN_M) / STEP_M) * STEP_M            # sample grid anchored at multiples of STEP_M along the route: curvature at a given place is the same at every fix
-    samples = _sample(points, cum, s_from, min(s_now + horizon_m + SPAN_M, cum[-1]))
-    if len(samples) < 5:
-        return []
-    kap, sgn = curvatures(samples, with_sign=True)
-    vc = [max(V_FLOOR, min(255.0, math.sqrt(a_lat / x))) if x > 1e-6 else 255.0 for x in kap]
-    out, i, n = [], 0, len(samples)
-    while i < n:
-        if vc[i] < CURVE_MAX_MS and samples[i][0] > s_now - 1e-6 and samples[i][0] <= s_now + horizon_m:
-            j = i
-            while j + 1 < n and vc[j + 1] < CURVE_MAX_MS:
-                j += 1
-            if j - i + 1 >= MIN_CURVE_SAMPLES:
-                b = min(range(i, j + 1), key=lambda q: vc[q])
-                rad = 1.0 / max(kap[b], 1e-9)
-                dirn = 'right' if sgn[b] > 0 else 'left'
-                out.append({'dist_m': samples[b][0] - s_now, 'radius_m': rad, 'severity': severity(rad), 'direction': dirn, 'text': narration(severity(rad), dirn, vc[b]), 'v_curve': vc[b], 'start_m': samples[i][0] - s_now, 'end_m': samples[j][0] - s_now})
-            i = j + 1
-        else:
-            i += 1
+    """curves ahead on the route polyline in (s_now, s_now + horizon]: [{'dist_m' (to where the bend STARTS; <= 0 = inside it), 'start_m', 'end_m', 'radius_m', 'v_curve', 'severity',
+    'direction', 'text'}], nearest first. ALL detection is CurveCue's engine (curvecall_engine.py); this function only filters by distance and converts the speed with a_lat."""
+    out = []
+    for c in _analysis(points, a_lat / ENG.GRAVITY):
+        d0, d1 = c['distance_from_start'] - s_now, c['end_distance'] - s_now
+        if d1 < 0.0 or d0 > horizon_m:
+            continue
+        rad = c['min_radius']
+        vc = max(V_FLOOR, min(255.0, math.sqrt(a_lat * rad)))
+        sev, dirn = c['severity'].lower(), c['direction'].lower()
+        out.append({'dist_m': d0, 'start_m': d0, 'end_m': d1, 'radius_m': rad, 'v_curve': vc, 'severity': sev, 'direction': dirn, 'text': narration(sev, dirn, vc)})
     return out
 
 

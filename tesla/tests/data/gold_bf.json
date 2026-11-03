@@ -1,0 +1,159 @@
+{
+ "stats": {
+  "totalCurves": 10,
+  "totalDistance": 41191.38164353762,
+  "curvesByType": {
+   "SHARP": 2,
+   "MODERATE": 4,
+   "FIRM": 2,
+   "HAIRPIN": 1,
+   "GENTLE": 1
+  },
+  "interpolatedPointCount": 8241
+ },
+ "curves": [
+  {
+   "distanceFromStart": 412.7795456909685,
+   "severity": "SHARP",
+   "direction": "RIGHT",
+   "minRadius": 28.5024613829455,
+   "advisorySpeedMs": null,
+   "advisorySpeedKmh": 35,
+   "startIndex": 83,
+   "endIndex": 103,
+   "modifiers": [
+    "OPENING"
+   ],
+   "compoundType": null,
+   "compound": null
+  },
+  {
+   "distanceFromStart": 1102.6126562920444,
+   "severity": "SHARP",
+   "direction": "RIGHT",
+   "minRadius": 30.158361256256047,
+   "advisorySpeedMs": null,
+   "advisorySpeedKmh": 35,
+   "startIndex": 221,
+   "endIndex": 233,
+   "modifiers": [
+    "TIGHTENING"
+   ],
+   "compoundType": null,
+   "compound": null
+  },
+  {
+   "distanceFromStart": 1362.3419708937322,
+   "severity": "MODERATE",
+   "direction": "LEFT",
+   "minRadius": 165.75628151687812,
+   "advisorySpeedMs": null,
+   "advisorySpeedKmh": null,
+   "startIndex": 273,
+   "endIndex": 273,
+   "modifiers": [],
+   "compoundType": null,
+   "compound": null
+  },
+  {
+   "distanceFromStart": 1671.9274676980574,
+   "severity": "MODERATE",
+   "direction": "LEFT",
+   "minRadius": 151.95464387557521,
+   "advisorySpeedMs": null,
+   "advisorySpeedKmh": null,
+   "startIndex": 335,
+   "endIndex": 345,
+   "modifiers": [
+    "TIGHTENING"
+   ],
+   "compoundType": null,
+   "compound": null
+  },
+  {
+   "distanceFromStart": 2296.8888686324917,
+   "severity": "MODERATE",
+   "direction": "RIGHT",
+   "minRadius": 198.76218720236935,
+   "advisorySpeedMs": null,
+   "advisorySpeedKmh": null,
+   "startIndex": 460,
+   "endIndex": 470,
+   "modifiers": [
+    "OPENING"
+   ],
+   "compoundType": null,
+   "compound": null
+  },
+  {
+   "distanceFromStart": 12861.477237949888,
+   "severity": "FIRM",
+   "direction": "RIGHT",
+   "minRadius": 94.60000339275935,
+   "advisorySpeedMs": null,
+   "advisorySpeedKmh": 60,
+   "startIndex": 2573,
+   "endIndex": 2582,
+   "modifiers": [
+    "OPENING"
+   ],
+   "compoundType": null,
+   "compound": null
+  },
+  {
+   "distanceFromStart": 14246.402690819636,
+   "severity": "HAIRPIN",
+   "direction": "RIGHT",
+   "minRadius": 10.023461236687748,
+   "advisorySpeedMs": null,
+   "advisorySpeedKmh": 20,
+   "startIndex": 2850,
+   "endIndex": 2912,
+   "modifiers": [
+    "LONG",
+    "OPENING"
+   ],
+   "compoundType": null,
+   "compound": null
+  },
+  {
+   "distanceFromStart": 38090.594182375025,
+   "severity": "GENTLE",
+   "direction": "LEFT",
+   "minRadius": 396.08079776884216,
+   "advisorySpeedMs": null,
+   "advisorySpeedKmh": null,
+   "startIndex": 7619,
+   "endIndex": 7620,
+   "modifiers": [],
+   "compoundType": null,
+   "compound": null
+  },
+  {
+   "distanceFromStart": 38295.56006303103,
+   "severity": "FIRM",
+   "direction": "RIGHT",
+   "minRadius": 78.68417700399544,
+   "advisorySpeedMs": null,
+   "advisorySpeedKmh": 55,
+   "startIndex": 7660,
+   "endIndex": 7669,
+   "modifiers": [],
+   "compoundType": null,
+   "compound": null
+  },
+  {
+   "distanceFromStart": 40682.365354238995,
+   "severity": "MODERATE",
+   "direction": "RIGHT",
+   "minRadius": 175.47185856248885,
+   "advisorySpeedMs": null,
+   "advisorySpeedKmh": null,
+   "startIndex": 8138,
+   "endIndex": 8138,
+   "modifiers": [],
+   "compoundType": null,
+   "compound": null
+  }
+ ]
+}
