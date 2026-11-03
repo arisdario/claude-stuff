@@ -13,16 +13,19 @@ Axes while designing: x = width, y = forward (0 = back of the case), z = up, len
 """
 import math, numpy as np, trimesh
 
+import sys
+BARE = len(sys.argv) > 1 and sys.argv[1] == 'bare'   # python3 c920_case.py bare  -> case for the bare board (82 x 22 x 17 mm)
+SUFFIX = '_bare' if BARE else ''
 # ---- camera (MEASURE yours with calipers and edit) ----
-CAM_W, CAM_H, CAM_D = 94.0, 29.0, 24.0     # C920 body without clip: width, height, depth
-LENS_DX, LENS_DZ = 0.0, 0.0                # lens offset from the body centre
-LENS_HOLE = 28.0                           # hole in the front wall around the lens ring
+CAM_W, CAM_H, CAM_D = (82.0, 22.0, 17.0) if BARE else (94.0, 29.0, 24.0)   # width, height, depth (bare: depth includes the lens)
+LENS_DX, LENS_DZ = 0.0, 0.0                # lens offset from the body centre (ASSUMED centred - measure it)
+LENS_HOLE = 18.0 if BARE else 28.0         # hole in the front wall around the lens barrel/ring
 # ---- case ----
 CLR = 0.6                                  # clearance per side around the camera
 WALL = 2.6
 LIP = 3.0                                  # lid plug depth
 FOAM = 1.2                                 # room for a thin foam pad behind the camera
-HOOD_L, HOOD_W, HOOD_H = 18.0, 58.0, 36.0  # hood length, inner width, inner height at the lens (clear of the 70x43 deg view)
+HOOD_L, HOOD_W, HOOD_H = (15.0, 46.0, 30.0) if BARE else (18.0, 58.0, 36.0)  # hood length, inner width, inner height at the lens (clear of the 70x43 deg view)
 WS_ANGLE = 33.0                            # windshield surface angle from horizontal (Model S is very raked: measure yours)
 EAR_W, EAR_T, SCREW_D = 10.0, 12.0, 2.6    # screw ears (M3 x 12 self-tapping), hole in the body; 3.4 in the lid
 CABLE_X, CABLE_W, CABLE_H = 0.0, 8.0, 9.0  # cable slot in the lid (bottom)
@@ -84,5 +87,5 @@ out = {}
 for name, m in (('body', body), ('lid', lid)):
     m = m.copy(); m.apply_transform(R); m.apply_translation(-m.bounds[0] * [0, 0, 0] - [0, 0, m.bounds[0][2]])
     out[name] = m
-    m.export('c920_case_%s.stl' % name)
+    m.export('c920_case%s_%s.stl' % (SUFFIX, name))
     print(name, 'watertight', m.is_watertight, 'size mm', np.round(m.extents, 1), 'volume cm3', round(m.volume / 1000, 1))
