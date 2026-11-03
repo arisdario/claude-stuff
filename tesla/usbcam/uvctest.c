@@ -192,6 +192,20 @@ int main(int argc, char **argv) {
   printf("exposure priority off (keeps the frame rate in the dark): %s\n", r == UVC_SUCCESS ? "OK" : uvc_strerror(r));
   r = uvc_set_focus_auto(devh, 0);
   printf("autofocus off: %s\n", r == UVC_SUCCESS ? "OK" : uvc_strerror(r));
+  {
+    // where the lens sits once autofocus is off. On a C920 the focus value runs 0 (infinity) .. 250 (closest); a road camera wants 0.  Set it with:  UVC_FOCUS=0 ./uvctest ...
+    uint16_t cur = 0, mn = 0, mx = 0;
+    if (uvc_get_focus_abs(devh, &cur, UVC_GET_CUR) == UVC_SUCCESS && uvc_get_focus_abs(devh, &mn, UVC_GET_MIN) == UVC_SUCCESS && uvc_get_focus_abs(devh, &mx, UVC_GET_MAX) == UVC_SUCCESS)
+      printf("focus position now: %u (range %u = infinity .. %u = closest)\n", cur, mn, mx);
+    else
+      printf("focus position: could not read\n");
+    const char *want = getenv("UVC_FOCUS");
+    if (want && *want) {
+      r = uvc_set_focus_abs(devh, (uint16_t)atoi(want));
+      printf("focus set to %d: %s\n", atoi(want), r == UVC_SUCCESS ? "OK" : uvc_strerror(r));
+      if (uvc_get_focus_abs(devh, &cur, UVC_GET_CUR) == UVC_SUCCESS) printf("focus position after: %u\n", cur);
+    }
+  }
 
   enum uvc_frame_format fmts[] = {UVC_FRAME_FORMAT_MJPEG, UVC_FRAME_FORMAT_YUYV};
   const char *names[] = {"MJPEG", "YUYV"};
