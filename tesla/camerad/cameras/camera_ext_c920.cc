@@ -35,6 +35,7 @@ extern volatile sig_atomic_t do_exit;
 #define PAD_Y 77
 #define SOURCE_FILE "/data/camera_source"
 #define FOCUS_FILE "/data/camera_focus"
+#define FLIP_FILE "/data/camera_flip"   // 1 = camera mounted upside down: the picture is rotated 180 degrees
 
 // ---------------------------------------------------------------------------------------- pure helpers
 void ext_c920_pack_bgr(const uint8_t *rgb, int src_w, int src_h, uint8_t *dst, int dst_stride, int dst_w, int dst_h, int x0, int y0) {
@@ -114,6 +115,7 @@ Ext g;
 pthread_t g_thread;
 volatile int g_stop = 0, g_started = 0;
 volatile unsigned long g_frames = 0;
+volatile int g_flip = 0;
 volatile int64_t g_last_frame_ns = 0;
 CameraState *g_rear = NULL;
 VisionBuf *g_bufs = NULL;
@@ -160,10 +162,28 @@ bool decode_jpeg(const uint8_t *data, size_t len, uint8_t *rgb) {
   return true;
 }
 
+// live view: the camera's own MJPEG frame (full 1280x720, no re-encode) is published for radarweb's /video page, ~10 fps
+void publish_live(const uint8_t *data, size_t len) {
+  static int64_t last = 0;
+  int64_t t = now_ns();
+  if (t - last < 90000000LL) return;
+  last = t;
+  FILE *fp = fopen("/dev/shm/c920_live.tmp", "wb");
+  if (!fp) return;
+  size_t w = fwrite(data, 1, len, fp);
+  fclose(fp);
+  if (w == len) rename("/dev/shm/c920_live.tmp", "/dev/shm/c920_live.jpg");
+}
+
 void on_frame(uvc_frame_t *f, void *) {
   if (f->frame_format != UVC_FRAME_FORMAT_MJPEG) return;
+  publish_live((const uint8_t *)f->data, f->data_bytes);
   if (!g_rgb) return;
   if (!decode_jpeg((const uint8_t *)f->data, f->data_bytes, g_rgb)) return;     // a corrupt frame is skipped
+  if (g_flip) {                                                                 // 180 degrees = reverse the pixel order
+    uint8_t *a = g_rgb, *z = g_rgb + (size_t)SRC_W * SRC_H * 3 - 3;
+    for (; a < z; a += 3, z -= 3) { for (int k = 0; k < 3; k++) { uint8_t t = a[k]; a[k] = z[k]; z[k] = t; } }
+  }
   g_last_frame_ns = now_ns();
   g_frames++;
 #ifndef EXT_C920_TEST
@@ -209,11 +229,13 @@ void *capture_thread(void *) {
   g_dispatch = true;
   while (!g_stop && !do_exit) {
     if (!ext_open()) { fprintf(stderr, "external camera: not available, retrying\n"); sleep(1); continue; }
+    g_flip = read_int_file(FLIP_FILE, 0) ? 1 : 0;
     fprintf(stderr, "ROAD CAMERA: external C920 streaming %dx%d MJPEG @ %d fps\n", SRC_W, SRC_H, SRC_FPS);
     int last_focus = read_int_file(FOCUS_FILE, 0), tick = 0;
     while (!g_stop && !do_exit && (now_ns() - g_last_frame_ns) < 3000000000LL) {
       usleep(100000);
-      if (++tick % 10 == 0) {                                   // once a second: a focus change made in the radarweb camera page (writes /data/camera_focus) is applied live
+      if (++tick % 10 == 0) {
+        g_flip = read_int_file(FLIP_FILE, 0) ? 1 : 0;                                   // once a second: a focus change made in the radarweb camera page (writes /data/camera_focus) is applied live
         int f = read_int_file(FOCUS_FILE, 0);
         if (f < 0) f = 0;
         if (f > 250) f = 250;

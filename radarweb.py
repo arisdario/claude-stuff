@@ -1516,8 +1516,25 @@ def _to_jpeg(buf, maxw=720, q=60):
     ok, j = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), q])
     return j.tobytes() if ok else None
 
+LIVE_JPG = '/dev/shm/c920_live.jpg'    # written by camerad (external C920): the camera's own full-size MJPEG frames
+def _live_fresh():
+    try: return time.time() - os.stat(LIVE_JPG).st_mtime < 2.0
+    except OSError: return False
+
 def cam_worker(cam):
     V = VID[cam]
+    if cam == 'road' and _live_fresh():                # direct camera feed, no screenshots, no VisionIPC needed
+        V['err'] = ''; V['mode'] = 'live'; V['ct'] = 'image/jpeg'; lastm = 0
+        while time.time() - V['want'] < 10:
+            try:
+                m = os.stat(LIVE_JPG).st_mtime
+                if m != lastm:
+                    lastm = m; V['jpg'] = open(LIVE_JPG, 'rb').read(); V['n'] += 1; V['err'] = ''
+                elif time.time() - m > 3: V['err'] = 'no frames from the C920 (camerad stopped?)'
+            except Exception as e:
+                V['err'] = 'live frame error: %s' % e
+            time.sleep(.03)
+        V['run'] = False; return
     try:
         import numpy, cv2
     except ImportError:
@@ -2031,7 +2048,7 @@ img{max-width:100vw;max-height:100vh;object-fit:contain;background:#000}
 </style></head><body><div id=wrap><img id=im alt=""></div><div id=msg>connecting to the camera…</div>
 <div id=tabs><a href="?cam=road" id=t_road>road</a><a href="?cam=driver" id=t_driver>driver</a><a href="?cam=wide" id=t_wide>wide</a></div>
 <div id=rec><button id=rb>REC</button><span id=rs></span><div id=rf></div><div style="margin-top:10px"><button id=cb class=sec>Reset calibration</button></div><div id=cs></div></div>
-<div id=fx style="display:none;position:fixed;left:10px;bottom:8px;background:rgba(28,33,40,.9);padding:8px 12px;border-radius:12px;font-size:14px">Focus (C920) <input id=fr type=range min=0 max=250 step=5 value=0 style="width:240px;vertical-align:middle"> <b id=fv>0</b> <span id=fs style="opacity:.8"></span><div style="opacity:.7;font-size:12px">0 = far (the road) .. 250 = near</div></div>
+<div id=fx style="display:none;position:fixed;left:10px;bottom:8px;background:rgba(28,33,40,.9);padding:8px 12px;border-radius:12px;font-size:14px">Focus (C920) <input id=fr type=range min=0 max=250 step=5 value=0 style="width:240px;vertical-align:middle"> <b id=fv>0</b> <label style="margin-left:10px"><input id=fl type=checkbox> upside down</label> <span id=fs style="opacity:.8"></span><div style="opacity:.7;font-size:12px">0 = far (the road) .. 250 = near</div></div>
 <details id=nav><summary>☰</summary><div><a href="/">road view</a><a href="/top">top-down view</a><a href="/near">near view</a></div></details>
 <script>
 var cam=(/cam=(\w+)/.exec(location.search)||[0,'road'])[1],im=document.getElementById('im'),msg=document.getElementById('msg');
@@ -2049,8 +2066,9 @@ function cal(){fetch('/api/recal').then(function(r){return r.json()}).then(funct
 document.getElementById('cb').onclick=function(){if(!confirm('Reset the camera calibration?\n\nopenpilot will forget the camera angle and relearn it while you drive. Only works while the car is stopped and openpilot is not engaged.'))return;
  fetch('/api/recal',{method:'POST',headers:{'X-Recal':'1'}}).then(function(r){return r.json()}).then(function(d){document.getElementById('cs').textContent=d.msg}).catch(function(e){document.getElementById('cs').textContent='request failed'})};
 cal();setInterval(cal,1500);
-var fr=document.getElementById('fr'),fx=document.getElementById('fx'),ft=0;
-function fget(){fetch('/api/camfocus').then(function(r){return r.json()}).then(function(d){if(cam!=='road'||!d.external){fx.style.display='none';return}fx.style.display='block';fr.value=d.focus;document.getElementById('fv').textContent=d.focus}).catch(function(){})}
+var fr=document.getElementById('fr'),fx=document.getElementById('fx'),fl=document.getElementById('fl'),ft=0;
+function fget(){fetch('/api/camfocus').then(function(r){return r.json()}).then(function(d){if(cam!=='road'||!d.external){fx.style.display='none';return}fx.style.display='block';fr.value=d.focus;fl.checked=!!d.flip;im.style.transform=d.flip?'rotate(180deg)':'';document.getElementById('fv').textContent=d.focus}).catch(function(){})}
+fl.onchange=function(){im.style.transform=fl.checked?'rotate(180deg)':'';fetch('/api/camfocus',{method:'POST',headers:{'X-Cam':'1'},body:'flip='+(fl.checked?1:0)}).then(function(r){return r.json()}).then(function(d){document.getElementById('fs').textContent=d.msg||''}).catch(function(){})};
 fr.oninput=function(){document.getElementById('fv').textContent=fr.value;clearTimeout(ft);ft=setTimeout(function(){fetch('/api/camfocus',{method:'POST',headers:{'X-Cam':'1'},body:String(fr.value)}).then(function(r){return r.json()}).then(function(d){document.getElementById('fs').textContent=d.msg||''}).catch(function(){})},250)};
 fget();
 start();
@@ -2063,10 +2081,19 @@ def camfocus_get():
     except Exception: ext = False
     try: f = int(open('/data/camera_focus').read().strip() or 0)
     except Exception: f = 0
-    return {'external': ext, 'focus': max(0, min(250, f))}
+    try: fl = int(open('/data/camera_flip').read().strip() or 0)
+    except Exception: fl = 0
+    return {'external': ext, 'focus': max(0, min(250, f)), 'flip': 1 if fl else 0}
 
 
 def camfocus_set(txt):
+    if txt.startswith('flip='):      # upside-down mounting: camerad rotates the picture 180 degrees (applied within a second)
+        v = 1 if txt[5:6] == '1' else 0
+        try:
+            with open('/data/camera_flip.tmp', 'w') as f_: f_.write('%d\n' % v)
+            os.replace('/data/camera_flip.tmp', '/data/camera_flip')
+        except Exception as e: return {'ok': False, 'msg': 'could not save: %s' % e}
+        return {'ok': True, 'flip': v, 'msg': 'upside down %s' % ('ON' if v else 'off')}
     try: v = max(0, min(250, int(float(txt))))
     except Exception: return {'ok': False, 'msg': 'not a number'}
     try:
