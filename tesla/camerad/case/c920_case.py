@@ -15,7 +15,14 @@ import math, numpy as np, trimesh
 
 import sys
 BARE = len(sys.argv) > 1 and sys.argv[1] == 'bare'   # python3 c920_case.py bare  -> case for the bare board (82 x 22 x 17 mm)
-SUFFIX = '_bare' if BARE else ''
+SEALED = 'sealed' in sys.argv      # hood runs all the way to the windshield and is closed by the glass (lens fully enclosed)
+SUFFIX = ('_bare' if BARE else '') + ('_sealed' if SEALED else '')
+HA, VA = 33.0, 22.0
+for a in sys.argv:
+    if a.startswith('ha='): HA = float(a[3:])
+    if a.startswith('va='): VA = float(a[3:])
+SUFFIX += '' if (HA, VA) == (33.0, 22.0) else '_%d_%d' % (HA, VA)
+#               # SEALED: half view angles the hood must clear (the model uses +-32.7 x +-21.5 deg)
 # ---- camera (MEASURE yours with calipers and edit) ----
 CAM_W, CAM_H, CAM_D = (82.0, 22.0, 17.0) if BARE else (94.0, 29.0, 24.0)   # width, height, depth (bare: depth includes the lens)
 LENS_DX, LENS_DZ = 0.0, 0.0                # lens offset from the body centre (ASSUMED centred - measure it)
@@ -37,6 +44,8 @@ YF0 = CD + WALL                            # front face of the box
 YF = YF0 + HOOD_L                          # end of the hood
 HT = 2.4                                   # hood wall
 zg_front = HOOD_H / 2 + HT                 # glass height at the hood end
+if SEALED:
+    YF = YF0; zg_front = oH / 2 + 0.8       # the glass plane passes just above the box front; the hood is cut by it
 t = math.tan(math.radians(WS_ANGLE))
 zg = lambda y: zg_front + t * (YF - y)     # glass plane: higher towards the driver
 
@@ -62,17 +71,35 @@ def diff(a, *m): return trimesh.boolean.difference([a] + list(m), engine='manifo
 
 # ---------------- body ----------------
 ex = oW / 2 + EAR_W
-body = union(
-    box(-oW / 2, oW / 2, 0, YF0, -oH / 2, oH / 2),
-    box(-HOOD_W / 2 - HT, HOOD_W / 2 + HT, YF0 - 0.1, YF, -HOOD_H / 2 - HT, HOOD_H / 2 + HT),
-    wedge(-oW / 2, oW / 2, 0, YF0, oH / 2 - 1),
-    wedge(-HOOD_W / 2 - HT, HOOD_W / 2 + HT, YF0 - 0.1, YF, HOOD_H / 2 + HT - 1),
-    box(oW / 2 - 1, ex, 0, EAR_T, -6, 6), box(-ex, -oW / 2 + 1, 0, EAR_T, -6, 6))
+def frustum(y0, hw0, hh0, y1, hw1, hh1):
+    pts = [(sx * (hw0 if a else hw1), y, sz * (hh0 if a else hh1)) for a, y in ((1, y0), (0, y1)) for sx in (-1, 1) for sz in (-1, 1)]
+    return trimesh.convex.convex_hull(np.array(pts))
+if not SEALED:
+    body = union(
+        box(-oW / 2, oW / 2, 0, YF0, -oH / 2, oH / 2),
+        box(-HOOD_W / 2 - HT, HOOD_W / 2 + HT, YF0 - 0.1, YF, -HOOD_H / 2 - HT, HOOD_H / 2 + HT),
+        wedge(-oW / 2, oW / 2, 0, YF0, oH / 2 - 1),
+        wedge(-HOOD_W / 2 - HT, HOOD_W / 2 + HT, YF0 - 0.1, YF, HOOD_H / 2 + HT - 1),
+        box(oW / 2 - 1, ex, 0, EAR_T, -6, 6), box(-ex, -oW / 2 + 1, 0, EAR_T, -6, 6))
+    hood_in = box(-HOOD_W / 2, HOOD_W / 2, YF0 - 0.01, YF + 1, -HOOD_H / 2, HOOD_H / 2)
+else:
+    a0 = LENS_HOLE / 2 + 0.5
+    tH, tV = math.tan(math.radians(HA)), math.tan(math.radians(VA))
+    S = (zg_front + a0 + HT) / (t - tV) + 5         # length at which the glass meets the lower edge of the hood
+    body = union(
+        box(-oW / 2, oW / 2, 0, YF0, -oH / 2, oH / 2),
+        wedge(-oW / 2, oW / 2, 0, YF0, oH / 2 - 1),
+        frustum(YF0 - 0.1, a0 + HT, a0 + HT, YF0 + S, a0 + HT + S * tH, a0 + HT + S * tV),
+        box(oW / 2 - 1, ex, 0, EAR_T, -6, 6), box(-ex, -oW / 2 + 1, 0, EAR_T, -6, 6))
+    hood_in = frustum(YF0 - 0.01, a0, a0, YF0 + S + 1, a0 + (S + 1) * tH, a0 + (S + 1) * tV)
+    below = trimesh.convex.convex_hull(np.array([(x, y, z) for x in (-300, 300) for (y, z) in ((-5, -300), (YF0 + S + 20, -300), (-5, zg(-5)), (YF0 + S + 20, zg(YF0 + S + 20)))]))
+    body = trimesh.boolean.intersection([body, below], engine='manifold')
 body = diff(body,
     box(-cW / 2, cW / 2, -1, CD, -cH / 2, cH / 2),
     cyl_y(LENS_HOLE / 2, CD - 1, YF0 + 1, LENS_DX, LENS_DZ),
-    box(-HOOD_W / 2, HOOD_W / 2, YF0 - 0.01, YF + 1, -HOOD_H / 2, HOOD_H / 2),
+    hood_in,
     cyl_y(SCREW_D / 2, -1, EAR_T - 1.5, oW / 2 + EAR_W / 2 + 0.5, 0), cyl_y(SCREW_D / 2, -1, EAR_T - 1.5, -oW / 2 - EAR_W / 2 - 0.5, 0))
+if SEALED: body = trimesh.boolean.intersection([body, below], engine='manifold')   # the glass plane also opens the hood's inside
 
 # ---------------- lid (plate behind the body + plug into the cavity) ----------------
 lid = union(box(-ex, ex, -3, 0, -oH / 2, oH / 2),
