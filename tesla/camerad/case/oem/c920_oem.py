@@ -93,12 +93,26 @@ bore = cyl_y(BORE_R, PD - 0.5, YF0 + BEZ_L + 1, 0, 0)
 grooves = [trimesh.creation.annulus(r_min=BEZ_R - 3.0 - 2.4 * i - 0.9, r_max=BEZ_R - 3.0 - 2.4 * i, height=0.8) for i in range(3)]
 for g in grooves:
     g.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, [1, 0, 0])); g.apply_translation([0, YF0 + BEZ_L - 0.3, 0])
-YP, ZPV, LEV = 4.0, ZT + 8.0, 10.0          # pitch pivot (Y, Z) on the lug, lever arm of the adjuster screw
-lug = box(PXC - 8, PXC + 8, 0.5, YP + LEV + 4.5, ZT - 2, ZPV + 6)
-body_h = union(shell, bezel, lug)
+# GoPro-standard 2-prong foot (mates with the usual 3-prong base glued to the windshield, M5 bolt + nut = the pitch hinge).
+# Dimensions are the common GoPro ones from memory - print gopro_fit_test.stl first and adjust GP_CLR if too tight/loose.
+GP_T, GP_GAP, GP_R, GP_HOLE, GP_H = 3.0, 3.3, 7.0, 5.4, 9.0     # prong thickness, gap between the 2 prongs (= 3-prong centre prong + clearance), tip radius, bolt hole, hole height
+for a in sys.argv[1:]:
+    if a.startswith('gpclr='): GP_GAP = 3.0 + float(a[6:])
+YP, ZPV = YF0 / 2.0, ZT + GP_H
+def gp_foot(zbase):
+    from shapely.geometry import Polygon
+    prof = unary_union([sbox(YP - GP_R, zbase, YP + GP_R, zbase + GP_H + 1), Point(YP, zbase + GP_H).buffer(GP_R, 32)]).difference(Point(YP, zbase + GP_H).buffer(GP_HOLE / 2, 24))
+    out = []
+    for sx in (-1, 1):
+        m = trimesh.creation.extrude_polygon(prof, GP_T)
+        m.vertices = m.vertices[:, [2, 0, 1]]; m.faces = m.faces[:, ::-1]; m.fix_normals()
+        m.apply_translation([PXC + sx * (GP_GAP / 2 + GP_T / 2) - GP_T / 2, 0, 0]); out.append(m)
+    out.append(box(PXC - GP_GAP / 2 - GP_T - 1, PXC + GP_GAP / 2 + GP_T + 1, YP - GP_R, YP + GP_R, zbase - 0.5, zbase + 2.0))
+    return union(*out)
+foot = gp_foot(ZT - 2.0)
+body_h = union(shell, bezel, foot)
 sc = [(sx * (PW / 2 + 2.5), PZC + sz * (PH / 2 + 2.5)) for sx in (-1, 1) for sz in (-1, 1)]    # lid screws in the wall corners
 holes = [cyl_y(1.2, -1, 11, PXC + x, z) for x, z in sc]
-holes += [cyl_x(2.1, PXC - 10, PXC + 10, YP, ZPV), cyl_x(2.1, PXC - 10, PXC + 10, YP + LEV, ZPV)]
 vents = [box(PXC + x - 0.8, PXC + x + 0.8, 6, 24, ZT - WALL - 1, ZT + 1) for x in np.arange(-30, 31, 4.0)]   # slots on top, as on a dashcam
 winc = box(-WIN_W / 2 - 0.4, WIN_W / 2 + 0.4, PD - 0.5, YF0 + 1, -WIN_H / 2 - 0.4, WIN_H / 2 + 0.4)
 housing = diff(body_h, pocket, winc, bore, *holes, *vents, *grooves)
@@ -109,19 +123,7 @@ lid = union(trimesh.creation.box(extents=[2 * OW - 2, 3, 2 * OH - 2], transform=
             box(PXC - PW / 2 + 1.0, PXC + PW / 2 - 1.0, 0, 1.6, PZC - PH / 2 + 1.0, PZC + PH / 2 - 1.0))
 lid = diff(lid, *[cyl_y(1.7, -4, 3, PXC + x, z) for x, z in sc], box(PXC + CAB_DX - 4.5, PXC + CAB_DX + 4.5, -4, 3, PZC - OH - 1, PZC - CAB_DZ + 4.5))   # slot open to the bottom edge so the soldered cable can be dropped in
 
-# ------------------------------------------------ bracket: small glass pad + two cheeks either side of the lug (pitch pivot + arc slot)
-PADT, CHW = 5.0, 3.0
-pad_y0, pad_y1 = -2.0, 21.0
-pad = trimesh.convex.convex_hull(np.array([(x, y, z) for x in (PXC - 28, PXC + 28) for (y, z) in ((pad_y0, zg(pad_y0) - PADT), (pad_y1, zg(pad_y1) - PADT), (pad_y0, zg(pad_y0)), (pad_y1, zg(pad_y1)))]))
-def cheek(side):
-    from shapely.geometry import Polygon
-    poly = Polygon([(pad_y0, ZPV - 7), (pad_y1, ZPV - 7), (pad_y1, zg(pad_y1) - PADT + 0.5), (pad_y0, zg(pad_y0) - PADT + 0.5)])
-    arc = LineString([(YP + LEV * math.cos(math.radians(a)), ZPV + LEV * math.sin(math.radians(a))) for a in np.linspace(-9, 9, 19)]).buffer(2.3)
-    poly = poly.difference(arc).difference(Point(YP, ZPV).buffer(2.3))
-    m = trimesh.creation.extrude_polygon(poly, CHW)
-    m.vertices = m.vertices[:, [2, 0, 1]]; m.faces = m.faces[:, ::-1]; m.fix_normals()
-    m.apply_translation([PXC + (8.3 if side > 0 else -8.3 - CHW), 0, 0]); return m
-cheeks = [cheek(1), cheek(-1)]
+cheeks = []; pad = None
 
 # ------------------------------------------------ checks with the REAL cartridge meshes
 def placed(m, yoff):                   # cartridge frame -> car frame: X = x_c, Y = z_c + yoff, Z = -(y_c) : a pure rotation
@@ -135,14 +137,14 @@ for nm, c in zip(('cartridge body', 'cartridge cover'), cart):
         v = float('nan')
     print('interference housing / %s: %.2f mm3' % (nm, v))
 cone = frustum(PD, 0.1, 0.1, YF0 + BEZ_L, (BEZ_L + FW) * tH + 0.1, (BEZ_L + FW) * tV + 0.1)
-print('pad / housing interference mm3: %.2f, cheeks / housing: %.2f' % (inter(housing, pad).volume, sum(inter(housing, c).volume for c in cheeks)))
 print('view-cone clearance (should be ~0 mm3):', round(inter(housing, cone).volume, 2))
 
 # ------------------------------------------------ export in print orientation (back down; pad flat is not needed)
 R90 = trimesh.transformations.rotation_matrix(math.pi / 2, [1, 0, 0])
-for name, m in (('housing', housing), ('rear_lid', lid), ('bracket_pad', pad), ('cheek_R', cheeks[0]), ('cheek_L', cheeks[1])):
+test = union(foot_t := gp_foot(2.0), box(PXC - 12, PXC + 12, YP - 12, YP + 12, 0, 2.0))
+for name, m in (('housing', housing), ('rear_lid', lid), ('gopro_fit_test', test)):
     m = m.copy(); m.apply_transform(R90); m.apply_translation([0, 0, -m.bounds[0][2]]); m.apply_translation([-m.centroid[0], 0, 0])
-    m.export('oem_%s.stl' % name)
+    m.export(('oem_%s.stl' % name) if name != 'gopro_fit_test' else 'gopro_fit_test.stl')
     print('%-12s watertight %s  size %s mm  volume %.1f cm3' % (name, m.is_watertight, np.round(m.extents, 1), m.volume / 1000))
 
 # ------------------------------------------------ containment proof: the real cartridge lies entirely inside the pocket
