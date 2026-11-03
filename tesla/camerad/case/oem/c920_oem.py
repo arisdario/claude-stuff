@@ -15,7 +15,7 @@ from shapely.geometry import box as sbox, Point, LineString
 from shapely.ops import unary_union
 
 SRC = sys.argv[1] if len(sys.argv) > 1 and '=' not in sys.argv[1] else '.'
-P = dict(ws=33.0, ha=28.0, va=18.0)
+P = dict(ws=33.0, ha=26.0, va=16.0)
 for a in sys.argv[1:]:
     if '=' in a: k, v = a.split('='); P[k] = float(v)
 WS, HA, VA = P['ws'], P['ha'], P['va']
@@ -85,11 +85,16 @@ R = 9.0
 S = (ZG0 + a0z + HT) / (t - tV) + 4         # hood length: the glass plane closes the hood
 shell = hull(slab(0, 0.1, OW, PZC - OH, zg(0), R), slab(YF0 - 0.1, YF0, OW, PZC - OH, zg(YF0), R))
 shell = shell.copy(); shell.apply_translation([PXC, 0, 0])
-hood_out = frustum(YF0 - 0.2, a0x + HT, a0z + HT, YF0 + S, a0x + HT + S * tH, a0z + HT + S * tV)
+def rr_frustum(y0, hw0, hh0, y1, hw1, hh1, r0, r1, inset=0.0):    # frustum with rounded corners (hull of two rounded slabs)
+    def sl(y, hw, hh, r):
+        hw, hh, r = hw - inset, hh - inset, max(r - inset, 0.5)
+        return slab(y, y + 0.05, hw, -hh, hh, min(r, hw - .1, hh - .1))
+    return hull(sl(y0, hw0, hh0, r0), sl(y1 - 0.05, hw1, hh1, r1))
+hood_out = rr_frustum(YF0 - 0.2, a0x + HT, a0z + HT, YF0 + S, a0x + HT + S * tH, a0z + HT + S * tV, 6.0, 16.0)
 below = trimesh.convex.convex_hull(np.array([(x, y, z) for x in (-300, 300) for (y, z) in ((-5, -300), (YF0 + S + 30, -300), (-5, zg(-5)), (YF0 + S + 30, zg(YF0 + S + 30)))]))
 pocket = box(PXC - PW / 2, PXC + PW / 2, -1, PD, PZC - PH / 2, PZC + PH / 2)
 winc = box(-WIN_W / 2 - 0.4, WIN_W / 2 + 0.4, PD - 0.5, YF0 + 1, -WIN_H / 2 - 0.4, WIN_H / 2 + 0.4)
-hood_in = frustum(YF0 - 0.01, a0x, a0z, YF0 + S + 2, a0x + (S + 2) * tH, a0z + (S + 2) * tV)
+hood_in = rr_frustum(YF0 - 0.01, a0x, a0z, YF0 + S + 2, a0x + (S + 2) * tH, a0z + (S + 2) * tV, 4.0, 14.0)
 YP, ZP, ZA = 8.0, OH - 7, -(OH - 7)       # pitch pivot and adjuster bosses on both sides (Z measured from the pocket centre)
 bosses = []
 for sx in (-1, 1):
