@@ -153,7 +153,7 @@ def simulate_follow(points, cum, v_cruise, decel=DECEL, accel=1.0, min_severity=
         nv = max(v - decel * dt, want) if want < v else min(v + accel * dt, want)
         max_dec = max(max_dec, (v - nv) / dt)
         for a in r['active']:
-            pending[a['id']] = (s + a['distance_m'], a['speed_ms'])
+            pending.setdefault(a['id'], (s + a['distance_m'], a['speed_ms']))        # where the bend starts, recorded when first announced (distance_m is clipped to 0 once inside it)
             if a['distance_m'] <= 1.0 and a['id'] not in entries:
                 entries[a['id']] = (s, a['speed_ms'], nv)
         v = nv

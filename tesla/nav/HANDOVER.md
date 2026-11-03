@@ -94,3 +94,11 @@ turn them into `target_speed()` (sqrt(v_curve^2 + 2*DECEL*d), CurveCue's braking
 Comparison on Bucharest<->Fundulea (>= moderate): CurveCue engine finds 9 / 8 curves, our old detector found 15 / 12 - every CurveCue curve was also in ours; ours added 5 / 4 more (tight bends, e.g. an
 18 m-radius turn 150 m from the start) because CurveCue averages over ~25 m and merges nearby curves. Neither is verified against ground truth; that needs a real drive log.
 Replay with the CurveCue engine (25 and 33 m/s, 5 m GPS noise, existing matcher): each curve announced once, 0 false, 0 curves entered above curve speed at 25 m/s (1 at 33 m/s: a hairpin shortly after the route start), max braking 1.00 m/s^2.
+
+## Update 5 - the "hairpin entered too fast at 33 m/s" (investigated, no behaviour change)
+Cause: replay start-up, NOT announcement timing. At 33 m/s the first bend on Bucharest->Fundulea (CurveCue: sharp, R = 29 m, curve speed 8.9 m/s) starts 413 m after the first fix; slowing 33 -> 8.9 m/s
+at DECEL 1.0 needs 505 m. It is announced at the very first fix (inside the 800 m horizon), the target speed brakes at the full 1.0 m/s^2 from then on, and the car reaches the bend at 15.5 m/s - the
+best physically possible (sqrt(33^2 - 2*413) = 16.2 m/s). Every other bend is entered at or below curve speed at 15, 25 and 33 m/s on both routes. Only `simulate_follow`'s reporting was changed (it
+printed a bend's END as its start); tests added: `TestLateEntryIsOnlyPhysicallyUnavoidable` (any late entry must be a bend closer than its braking distance, and braking must have been the physical maximum).
+Limit worth knowing: with an 800 m horizon and 1.0 m/s^2 the advisory can only be early enough for entry speeds up to ~40 m/s (146 km/h) at the slowest curve speed (8.9 m/s).
+Settings unchanged: CurveCue engine, a_lat 1.85 m/s^2 (not 0.35 g), advisory only, no new detector.
