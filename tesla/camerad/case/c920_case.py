@@ -70,7 +70,7 @@ def diff(a, *m): return trimesh.boolean.difference([a] + list(m), engine='manifo
 
 
 # ---------------- body ----------------
-ex = oW / 2 + EAR_W
+SX, SZ = oW / 2 - 8, (oH / 2 + zg(0)) / 2     # lid screws: into the solid wedge above the camera, no ears
 def frustum(y0, hw0, hh0, y1, hw1, hh1):
     pts = [(sx * (hw0 if a else hw1), y, sz * (hh0 if a else hh1)) for a, y in ((1, y0), (0, y1)) for sx in (-1, 1) for sz in (-1, 1)]
     return trimesh.convex.convex_hull(np.array(pts))
@@ -79,8 +79,7 @@ if not SEALED:
         box(-oW / 2, oW / 2, 0, YF0, -oH / 2, oH / 2),
         box(-HOOD_W / 2 - HT, HOOD_W / 2 + HT, YF0 - 0.1, YF, -HOOD_H / 2 - HT, HOOD_H / 2 + HT),
         wedge(-oW / 2, oW / 2, 0, YF0, oH / 2 - 1),
-        wedge(-HOOD_W / 2 - HT, HOOD_W / 2 + HT, YF0 - 0.1, YF, HOOD_H / 2 + HT - 1),
-        box(oW / 2 - 1, ex, 0, EAR_T, -6, 6), box(-ex, -oW / 2 + 1, 0, EAR_T, -6, 6))
+        wedge(-HOOD_W / 2 - HT, HOOD_W / 2 + HT, YF0 - 0.1, YF, HOOD_H / 2 + HT - 1))
     hood_in = box(-HOOD_W / 2, HOOD_W / 2, YF0 - 0.01, YF + 1, -HOOD_H / 2, HOOD_H / 2)
 else:
     a0 = LENS_HOLE / 2 + 0.5
@@ -89,8 +88,7 @@ else:
     body = union(
         box(-oW / 2, oW / 2, 0, YF0, -oH / 2, oH / 2),
         wedge(-oW / 2, oW / 2, 0, YF0, oH / 2 - 1),
-        frustum(YF0 - 0.1, a0 + HT, a0 + HT, YF0 + S, a0 + HT + S * tH, a0 + HT + S * tV),
-        box(oW / 2 - 1, ex, 0, EAR_T, -6, 6), box(-ex, -oW / 2 + 1, 0, EAR_T, -6, 6))
+        frustum(YF0 - 0.1, a0 + HT, a0 + HT, YF0 + S, a0 + HT + S * tH, a0 + HT + S * tV))
     hood_in = frustum(YF0 - 0.01, a0, a0, YF0 + S + 1, a0 + (S + 1) * tH, a0 + (S + 1) * tV)
     below = trimesh.convex.convex_hull(np.array([(x, y, z) for x in (-300, 300) for (y, z) in ((-5, -300), (YF0 + S + 20, -300), (-5, zg(-5)), (YF0 + S + 20, zg(YF0 + S + 20)))]))
     body = trimesh.boolean.intersection([body, below], engine='manifold')
@@ -98,14 +96,14 @@ body = diff(body,
     box(-cW / 2, cW / 2, -1, CD, -cH / 2, cH / 2),
     cyl_y(LENS_HOLE / 2, CD - 1, YF0 + 1, LENS_DX, LENS_DZ),
     hood_in,
-    cyl_y(SCREW_D / 2, -1, EAR_T - 1.5, oW / 2 + EAR_W / 2 + 0.5, 0), cyl_y(SCREW_D / 2, -1, EAR_T - 1.5, -oW / 2 - EAR_W / 2 - 0.5, 0))
+    cyl_y(SCREW_D / 2, -1, EAR_T, SX, SZ), cyl_y(SCREW_D / 2, -1, EAR_T, -SX, SZ))
 if SEALED: body = trimesh.boolean.intersection([body, below], engine='manifold')   # the glass plane also opens the hood's inside
 
 # ---------------- lid (plate behind the body + plug into the cavity) ----------------
-lid = union(box(-ex, ex, -3, 0, -oH / 2, oH / 2),
+lid = union(box(-oW / 2, oW / 2, -3, 0, -oH / 2, zg(0) - 0.3),   # whole rear plate, like an OEM rear cover
             box(-cW / 2 + 0.3, cW / 2 - 0.3, -0.01, LIP, -cH / 2 + 0.3, cH / 2 - 0.3))
 lid = diff(lid,
-    cyl_y(1.7, -4, 1, oW / 2 + EAR_W / 2 + 0.5, 0), cyl_y(1.7, -4, 1, -oW / 2 - EAR_W / 2 - 0.5, 0),
+    cyl_y(1.7, -4, 1, SX, SZ), cyl_y(1.7, -4, 1, -SX, SZ),
     box(CABLE_X - CABLE_W / 2, CABLE_X + CABLE_W / 2, -4, LIP + 1, -oH / 2 - 1, -oH / 2 + WALL + CABLE_H))
 
 # print orientation: back of the case (y = 0) on the bed
