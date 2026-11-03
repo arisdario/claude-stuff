@@ -40,6 +40,11 @@ route 39.05 km, replay speed 25 m/s (90 km/h), GPS noise 5 m, A_LAT 1.85 m/s^2, 
 
 by severity: 0 gentle, 6 moderate, 2 firm, 4 sharp, 0 hairpin
 
+## Following the advisory target speed (clean-geometry simulation, cruise 25 m/s)
+
+curves entered: 12; entered above curve speed (+0.75 m/s): **0**; max braking used: **1.00 m/s^2** (limit 1.00); lowest speed reached 8.9 m/s (32 km/h)
+
+
 announced early enough to slow at 1.0 m/s^2: **12 / 12**
 false slowdowns (advisory pointing at a curve that is not in the route geometry): **0 of 1562 fixes** []
 road match: progress error median 3.3 m, p95 9.8 m, max 102.5 m; high-confidence fixes 1413, of which progress wrong by > 40 m (wrong forward geometry): **0**; recalculations during replay: 0

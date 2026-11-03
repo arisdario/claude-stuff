@@ -79,5 +79,29 @@ class TestAnnouncer(unittest.TestCase):
         self.assertEqual((new_events, dists), (0, []))
 
 
+class TestTargetSpeed(unittest.TestCase):
+    def test_target_is_the_braking_envelope_and_shrinks_as_the_curve_approaches(self):
+        vc = 12.0
+        tg = [C.target_speed([{'distance_m': d, 'speed_ms': vc}])[0] for d in (500.0, 300.0, 100.0, 0.0)]
+        self.assertEqual(tg, sorted(tg, reverse=True))
+        self.assertAlmostEqual(tg[-1], vc)
+        self.assertAlmostEqual(tg[0], math.sqrt(vc * vc + 2 * C.DECEL * 500.0))
+        self.assertEqual(C.target_speed([]), (None, None))
+
+    def test_following_the_target_reaches_every_curve_at_curve_speed_with_gentle_braking(self):
+        pts, cum = line_with_arc(60.0, turn_deg=90.0)
+        r = C.simulate_follow(pts, cum, 30.0)
+        self.assertEqual(len(r['entries']), 1)
+        start, vc, v_entry = r['entries'][0]
+        self.assertLessEqual(v_entry, vc + 0.75)
+        self.assertLessEqual(r['max_decel'], C.DECEL + 1e-6)
+        self.assertGreater(r['min_speed'], 0.9 * vc)               # does not brake far below what the curve needs (no false slowdown)
+
+    def test_no_slowdown_on_a_straight_road(self):
+        pts, cum = line_with_arc(150.0, turn_deg=0.0)
+        r = C.simulate_follow(pts, cum, 30.0)
+        self.assertEqual((r['entries'], r['min_speed']), ([], 30.0))
+
+
 if __name__ == '__main__':
     unittest.main()

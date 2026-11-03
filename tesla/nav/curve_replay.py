@@ -28,6 +28,7 @@ def replay(graph, route, dest, speed=25.0, noise=5.0, seed=1, decel=C.DECEL, a_l
     ca = C.CurveAhead(graph, dest, a_lat=a_lat, decel=decel, min_severity=min_severity)
     ca.start(route.points[0][0], route.points[0][1], None)
     first, false_fix, adv_fix, n, lowconf = {}, [], 0, 0, 0
+    rows_csv = []
     ann, dist_hist = {}, {}
     errs, bad_hi, hi, reroutes0 = [], 0, 0, 0
     fx = V.fixes_along(route.points, speed=speed, noise_m=noise, seed=seed)
@@ -45,6 +46,8 @@ def replay(graph, route, dest, speed=25.0, noise=5.0, seed=1, decel=C.DECEL, a_l
                 bad_hi += e > MATCH_M
         if msg['confidence'] != 'high':
             lowconf += 1
+        ad = msg['advisory']
+        rows_csv.append((round(f[0], 1), None if msg['route_progress_m'] is None else round(msg['route_progress_m']), ad['confidence'], ad['target_speed_ms'], ad['slow_down'], ad['curve_distance_m'], ad['curve_speed_ms'], ad['curve_radius_m'], ad['curve_severity']))
         if msg['route_progress_m'] is None:
             continue
         for a in msg['announce']['active']:
@@ -63,7 +66,7 @@ def replay(graph, route, dest, speed=25.0, noise=5.0, seed=1, decel=C.DECEL, a_l
                 false_fix.append((round(msg['route_progress_m']), round(s_abs)))
     return truth, first, {'fixes': n, 'advisory_fixes': adv_fix, 'false_slowdown_fixes': len(false_fix), 'false_examples': false_fix[:5], 'low_confidence_fixes': lowconf,
                           'progress_err_median_m': sorted(errs)[len(errs) // 2] if errs else None, 'progress_err_p95_m': sorted(errs)[int(len(errs) * 0.95)] if errs else None, 'progress_err_max_m': max(errs) if errs else None,
-                          'announcements': ann, 'dist_hist': dist_hist, 'high_conf_fixes': hi, 'high_conf_wrong_progress': bad_hi, 'reroutes': ca.nav.reroutes}
+                          'csv': rows_csv, 'follow': C.simulate_follow(route.points, route.cum, speed, decel, min_severity=min_severity), 'announcements': ann, 'dist_hist': dist_hist, 'high_conf_fixes': hi, 'high_conf_wrong_progress': bad_hi, 'reroutes': ca.nav.reroutes}
 
 
 def report(a, b, route, truth, first, st, speed, decel):
@@ -99,6 +102,10 @@ def report(a, b, route, truth, first, st, speed, decel):
     for a in ann.values():
         bysev[a['severity']] = bysev.get(a['severity'], 0) + 1
     L += ['', 'by severity: ' + ', '.join('%d %s' % (bysev.get(k, 0), k) for k in ('gentle', 'moderate', 'firm', 'sharp', 'hairpin'))]
+    fo = st['follow']
+    late = [e for e in fo['entries'] if e[2] > e[1] + 0.75]
+    L += ['', '## Following the advisory target speed (clean-geometry simulation, cruise %.0f m/s)' % speed, '',
+          'curves entered: %d; entered above curve speed (+0.75 m/s): **%d**; max braking used: **%.2f m/s^2** (limit %.2f); lowest speed reached %.1f m/s (%.0f km/h)' % (len(fo['entries']), len(late), fo['max_decel'], decel, fo['min_speed'], fo['min_speed'] * 3.6), '']
     L += ['', 'announced early enough to slow at %.1f m/s^2: **%d / %d**' % (decel, ok, len(truth)),
           'false slowdowns (advisory pointing at a curve that is not in the route geometry): **%d of %d fixes** %s' % (st['false_slowdown_fixes'], st['fixes'], st['false_examples']),
           'road match: progress error median %s m, p95 %s m, max %s m; high-confidence fixes %d, of which progress wrong by > %.0f m (wrong forward geometry): **%d**; recalculations during replay: %d' % tuple(
@@ -116,6 +123,7 @@ def main(argv=None):
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--min-severity', default=C.DEFAULT_MIN_SEVERITY, choices=C.SEVERITY_ORDER)
     ap.add_argument('--out')
+    ap.add_argument('--csv', help='write the per-fix advisory (t, progress, confidence, target_speed_ms, slow_down, curve_distance_m, curve_speed_ms, curve_radius_m, severity)')
     a = ap.parse_args(argv)
     g = Graph(a.graph)
     s, d = V.resolve(g, a.route[0]), V.resolve(g, a.route[1])
@@ -123,6 +131,8 @@ def main(argv=None):
     truth, first, st = replay(g, route, (d[0], d[1]), a.speed, 5.0, a.seed, a.decel, C.A_LAT, a.min_severity)
     text, ok = report(a.route[0], a.route[1], route, truth, first, st, a.speed, a.decel)
     print(text)
+    if a.csv:
+        open(a.csv, 'w').write('t,progress_m,confidence,target_speed_ms,slow_down,curve_distance_m,curve_speed_ms,curve_radius_m,severity\n' + '\n'.join(','.join('' if x is None else str(x) for x in r) for r in st['csv']))
     if a.out:
         open(a.out, 'w').write(text)
     return 0

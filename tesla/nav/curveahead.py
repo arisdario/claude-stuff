@@ -157,6 +157,42 @@ class CurveAnnouncer(object):
         return {'new': new, 'passed': passed, 'active': out}
 
 
+def target_speed(active, decel=DECEL):
+    """THE advisory number: the speed the car should not exceed RIGHT NOW so that it can reach every announced curve's entry at that curve's speed using only `decel`.
+    active = announcer 'active' list (distance_m = distance to where the bend starts, 0 = inside it; speed_ms = curve speed). v_target = min over curves of
+    sqrt(v_curve^2 + 2 * decel * distance). It is an upper bound that falls smoothly as a curve approaches; far from any curve it is large (no constraint).
+    Returns (target_ms or None, the limiting curve or None)."""
+    best, who = None, None
+    for a in active:
+        if a['distance_m'] is None:
+            continue
+        v = math.sqrt(a['speed_ms'] ** 2 + 2.0 * decel * max(0.0, a['distance_m']))
+        if best is None or v < best:
+            best, who = v, a
+    return best, who
+
+
+def simulate_follow(points, cum, v_cruise, decel=DECEL, accel=1.0, min_severity=DEFAULT_MIN_SEVERITY, dt=0.5, a_lat=A_LAT):
+    """Open-loop check on clean geometry (no GPS): a car that cruises at v_cruise and obeys target_speed() with at most `decel` of braking. Returns
+    {'entries': [(bend start m, curve speed, speed at entry)], 'max_decel': ..., 'min_speed': ...}. Advisory maths only - nothing here drives a car."""
+    ann, s, v = CurveAnnouncer(min_severity), 0.0, v_cruise
+    entries, max_dec, vmin, pending = {}, 0.0, v, {}
+    while s < cum[-1] - 1.0:
+        r = ann.update(s, 'high', find_curves(points, cum, s, HORIZON_M, a_lat))
+        tgt, _who = target_speed(r['active'], decel)
+        want = v_cruise if tgt is None else min(v_cruise, tgt)
+        nv = max(v - decel * dt, want) if want < v else min(v + accel * dt, want)
+        max_dec = max(max_dec, (v - nv) / dt)
+        for a in r['active']:
+            pending[a['id']] = (s + a['distance_m'], a['speed_ms'])
+            if a['distance_m'] <= 1.0 and a['id'] not in entries:
+                entries[a['id']] = (s, a['speed_ms'], nv)
+        v = nv
+        vmin = min(vmin, v)
+        s += v * dt
+    return {'entries': [(pending[k][0], e[1], e[2]) for k, e in sorted(entries.items())], 'max_decel': max_dec, 'min_speed': vmin, 'announced': len(pending)}
+
+
 class CurveAhead(object):
     """Wraps a Navigator only to know WHERE on the route the car is and HOW SURE that is. update() returns the advisory dict (see publish())."""
     def __init__(self, graph, destination, a_lat=A_LAT, decel=DECEL, horizon_m=HORIZON_M, navigator=None, min_severity=DEFAULT_MIN_SEVERITY):
@@ -184,6 +220,11 @@ class CurveAhead(object):
         rows, adv, bind = advise(curves, speed or 0.0, self.decel)
         msg = self.publish(t, conf, prog, rows, adv if conf == 'high' else None, bind, st.status)
         msg['announce'] = self.announcer.update(prog, conf, curves)
+        tgt, who = target_speed(msg['announce']['active'], self.decel) if conf == 'high' else (None, None)
+        v = speed or 0.0
+        msg['advisory'] = {'confidence': conf, 'target_speed_ms': tgt, 'slow_down': tgt is not None and v > tgt + 0.5,
+                           'curve_distance_m': None if who is None else who['distance_m'], 'curve_speed_ms': None if who is None else who['speed_ms'],
+                           'curve_radius_m': None if who is None else who['radius_m'], 'curve_severity': None if who is None else who['severity']}
         return msg
 
     @staticmethod

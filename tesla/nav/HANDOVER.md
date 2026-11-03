@@ -72,3 +72,12 @@ sharp 25-50, hairpin < 25), direction, spoken text ("Sharp left ahead, slow to 3
 Result on our graph (offline, existing matcher, 25 m/s, 5 m noise): Bucuresti->Fundulea **15 curves announced (6 moderate, 4 firm, 4 sharp, 1 hairpin)**, Fundulea->Bucuresti 12; each once,
 0 duplicates, distances only shrink. Routes differ from the demo's (theirs 39.6 km, ours 41.2 km via the A2), so the counts agree but are not the same curves.
 Not adopted yet (CurveCue has them): compound/S-bend merging, 'tightening' modifier, companion mode without a destination (walk forward along the road at forks), trigger-distance timing.
+
+## Update 3 - advisory target speed (still advisory only)
+`CurveAhead.update()` now returns `msg['advisory']` = {confidence, target_speed_ms, slow_down, curve_distance_m, curve_speed_ms, curve_radius_m, curve_severity}.
+`target_speed()` = min over announced curves of sqrt(v_curve^2 + 2*DECEL*distance_to_bend_start): the highest speed the car may have now and still reach each bend at its curve speed using only
+DECEL (1.0 m/s^2, configurable). It falls smoothly toward the curve speed, is None when no curve is ahead or road confidence is not 'high', and `slow_down` = current speed > target.
+`simulate_follow()` checks it on clean geometry: a car cruising at 25 or 33 m/s and obeying the target never brakes harder than DECEL and reaches every bend at <= curve speed + 0.75 m/s,
+except a hairpin 218 m (Bucuresti->Fundulea) / 619 m (Fundulea->Bucuresti at 33 m/s) after the route START, where the replay starts at cruise speed with too little distance (start-up artefact).
+Per-fix output: `python3 -m tesla.nav.curve_replay ... --csv advisory.csv` (sample in tesla/nav/validation/curve/). Nothing consumes it yet: no cereal message, no controller.
+Next (separate, needs a decision): publish this dict as a message; any consumer that turns target_speed into acceleration limits is a vehicle-control change and must go through the PCC/CSA safety review.
