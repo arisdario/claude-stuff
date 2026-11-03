@@ -94,8 +94,8 @@ grooves = [trimesh.creation.annulus(r_min=BEZ_R - 3.0 - 2.4 * i - 0.9, r_max=BEZ
 for g in grooves:
     g.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, [1, 0, 0])); g.apply_translation([0, YF0 + BEZ_L - 0.3, 0])
 # GoPro-standard 2-prong foot (mates with the usual 3-prong base glued to the windshield, M5 bolt + nut = the pitch hinge).
-# Dimensions are the common GoPro ones from memory - print gopro_fit_test.stl first and adjust GP_CLR if too tight/loose.
-GP_T, GP_GAP, GP_R, GP_HOLE, GP_H = 3.0, 3.3, 7.0, 5.4, 9.0     # prong thickness, gap between the 2 prongs (= 3-prong centre prong + clearance), tip radius, bolt hole, hole height
+# Dimensions measured from a GoPro mount that already prints and fits (C920_GoPro_Mount.stl); gpclr=0.2 adds clearance if needed.
+GP_T, GP_GAP, GP_R, GP_HOLE, GP_H = 3.0, 3.0, 7.4, 5.2, 7.9     # MEASURED from the user's C920_GoPro_Mount.stl: prong 3.0 thick, 3.0 gap, 14.8 deep (tip radius 7.4), 5.2 bolt hole, hole centre 6.9 above the base
 for a in sys.argv[1:]:
     if a.startswith('gpclr='): GP_GAP = 3.0 + float(a[6:])
 YP, ZPV = YF0 / 2.0, ZT + GP_H
@@ -109,7 +109,7 @@ def gp_foot(zbase):
         m.apply_translation([PXC + sx * (GP_GAP / 2 + GP_T / 2) - GP_T / 2, 0, 0]); out.append(m)
     out.append(box(PXC - GP_GAP / 2 - GP_T - 1, PXC + GP_GAP / 2 + GP_T + 1, YP - GP_R, YP + GP_R, zbase - 0.5, zbase + 2.0))
     return union(*out)
-foot = gp_foot(ZT - 2.0)
+foot = gp_foot(ZT - 1.0)
 body_h = union(shell, bezel, foot)
 sc = [(sx * (PW / 2 + 2.5), PZC + sz * (PH / 2 + 2.5)) for sx in (-1, 1) for sz in (-1, 1)]    # lid screws in the wall corners
 holes = [cyl_y(1.2, -1, 11, PXC + x, z) for x, z in sc]
