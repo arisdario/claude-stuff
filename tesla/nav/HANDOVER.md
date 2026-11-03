@@ -179,3 +179,16 @@ Simulation only: a constant-speed car obeying target_speed(); no real car / open
   curve to the gate; the real integration passes all active curves.
 - DRIVE PLAN: drive Pitesti -> Ramnicu Valcea with radarweb logging on (it does by default); use the MCU navigation for a while; upload the /data/maplog/map_*.jsonl. Then: `python3 -m tesla.nav.real_drive_validate` (driven route, announcements vs
   what you did) and the three-detector comparison (`tesla/tools/detector_compare.py`) on a winding road.
+
+## Update 13 - corrections after replaying the COMPLETE logs (Archive.zip: map_20261101_174038 / 175314 / 182458 / 182944 + 213836)
+- The first archive I extracted had truncated copies; the complete logs (radartrip.trip on the .jsonl) give 1757 / 10986 fixes. `real_drive_validate.py` now reads .jsonl directly.
+- BUG FOUND IN MY REPLAY HARNESS (not in curveahead.py): after a long standstill the first moving fix multiplied speed by the whole parked time since the last GPS change and threw the car 100 km down the route. Progress is now
+  dead-reckoned fix by fix. All earlier real-drive numbers that used the harness were re-run.
+- CORRECTED three-detector scores (`tesla/nav/validation/curve/three_detectors_real_drive.md`): drive 1 (A2): 6 scored curves, 4 slowed: OWN and MAPD recall 4/4, precision 4/6; CurveCue recall 1/4.
+  Drive 2 (DN3, Fundulea->Bucuresti): 10 scored, 6 slowed: OWN and MAPD recall 6/6, precision 6/9; CurveCue recall 4/6, precision 4/6. Combined: OWN recall 10/10, precision 10/15 (67%); CurveCue recall 5/10.
+  The earlier statement "5 of 5, 0 false" (Update 10) is RETRACTED: it came from the buggy harness. The conclusion that OWN finds more real slow-downs than CurveCue stands; 5 of its 15 announced curves were ones where the driver did not slow
+  (already slow in a village/junction, or the curve is not a real bend). Null baseline: the 'driver slowed' rule fires at 14-21% of random places.
+- RETRACTED prediction: `predicted_bucuresti_pantelimon_branesti_fundulea.md` used the village CENTRES as waypoints, so the route detoured through Pantelimon and Branesti streets; only 4 of its 28 bends are on the road the driver uses
+  (24 were 25 m - 700 m from the DN3 trace). Replaced by `predicted_dn3_bucuresti_fundulea.md` = the DN3 trace of the Fundulea->Bucuresti log, reversed.
+- The Nov 1 logs already contain the country road: map_20261101_182944 = Fundulea -> Bucuresti, 27.1 km of DN3 (rebuilt road within 7 m median / 22 m max of the trace), max 90 km/h, with an 85 min stop at 6 km from Fundulea and a 3 h stop at the end.
+- No MCU navigation ids (0x3c8, 0x68) in any of these logs.

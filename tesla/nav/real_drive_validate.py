@@ -18,7 +18,13 @@ except ImportError:
 
 
 def load(trip):
-    p = json.load(open(trip))['points']
+    if trip.endswith('.jsonl'):                        # a raw radarweb log: parse it with the project's own trip builder (radartrip.py at the repo root)
+        import os
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+        import radartrip
+        p = radartrip.trip(trip)['points']
+    else:
+        p = json.load(open(trip))['points']
     return [dict(t=x[0], lat=x[1], lon=x[2], v=x[3] / 3.6, acc=x[7]) for x in p]
 
 
@@ -59,6 +65,9 @@ def driven_route(graph, fx, leg_m=1500.0):
     return route, worst, bad
 
 
+DR_BACK_TOL_M = 50.0
+
+
 def _project(route, lat, lon, lo_m, hi_m):
     """progress of the nearest point of the route polyline within [lo_m, hi_m] -> (progress_m, distance_m)"""
     best = (1e18, None)
@@ -77,18 +86,18 @@ def run(graph, fx, a_lat=C.A_LAT, decel=C.DECEL, route=None):
     """Replay with the DRIVEN route fixed (so the matcher/rerouting is not part of this test): progress = projection of each NEW GPS position onto the route (monotone), dead-reckoned
     with the car's speed between GPS updates (this log only refreshes the position every ~14 s). Confidence is 'high' when the position lies within 15 m of the route."""
     ann, rows, anns = C.CurveAnnouncer(), [], {}
-    last_prog, last_t, last_pos, conf = 0.0, fx[0]['t'], None, 'high'
+    prog, last_t, last_pos, conf = 0.0, fx[0]['t'], None, 'high'
     for f in fx:
+        prog = min(route.distance_m, prog + f['v'] * max(0.0, f['t'] - last_t))          # dead reckoning: add the distance driven since the PREVIOUS FIX (never since the last GPS change)
+        last_t = f['t']
         if (f['lat'], f['lon']) != last_pos:
-            prog, dist = _project(route, f['lat'], f['lon'], last_prog - 60.0, last_prog + 1500.0)
-            if prog is not None:
+            last_pos = (f['lat'], f['lon'])
+            proj, dist = _project(route, f['lat'], f['lon'], prog - 400.0, prog + 400.0)
+            if proj is not None:
                 conf = 'high' if dist <= 15.0 else 'low'
-                if conf == 'high':
-                    last_prog = max(last_prog, prog)       # (never behind the last dead-reckoned progress either, see below)
-            last_pos, last_t, base = (f['lat'], f['lon']), f['t'], last_prog
-        else:
-            base = last_prog
-        prog = min(route.distance_m, max(base + f['v'] * (f['t'] - last_t), rows[-1][2] if rows else 0.0))      # monotone: a stale position must not move the car backwards
+                if conf == 'high' and proj >= prog - DR_BACK_TOL_M:
+                    prog = max(prog, proj) if proj > prog else prog       # a position slightly behind the estimate must not move the car backwards
+                    prog = proj if proj > prog - 1e-9 else prog
         curves = C.find_curves(route.points, route.cum, prog, C.HORIZON_M, a_lat)
         r = ann.update(prog, conf, curves)
         tgt, _w = C.target_speed(r['active'], decel) if conf == 'high' else (None, None)
