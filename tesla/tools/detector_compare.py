@@ -1,4 +1,4 @@
-"""  python3 tesla/nav/detector_compare.py unused bf.sqlite trip.json [path to a clone of openpilotkr/openpilot]
+"""  python3 tesla/tools/detector_compare.py unused bf.sqlite trip.json [path to a clone of openpilotkr/openpilot]
 Run three detectors on the same road geometry and score them (and their combinations) against what the driver did.
   OLD   = our own 30 m-baseline Menger detector (tesla/nav/own_detector.py), v = sqrt(1.85/k)
   CC    = CurveCue engine port (tesla/nav/curvecall_engine.py)

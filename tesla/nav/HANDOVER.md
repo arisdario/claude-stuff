@@ -147,7 +147,7 @@ vertex spacing, so some bends may be under-reported (this is the likely reason t
 - Needs internet (Overpass) or a local OSM server; cereal there has liveMapData.turnSpeedLimit* fields that the 0.7.5 Tesla cereal does not.
 
 ## Update 10 - the three detectors combined and scored on the REAL drive; our own detector restored as PRIMARY
-Detectors: OWN (tesla/nav/own_detector.py, restored from c98e2db), CC (CurveCue engine port), MAPD (openpilotkr mapd spline curvature, unmodified, scipy). Script: `tesla/nav/detector_compare.py`, output
+Detectors: OWN (tesla/nav/own_detector.py, restored from c98e2db), CC (CurveCue engine port), MAPD (openpilotkr mapd spline curvature, unmodified, scipy). Script: `tesla/tools/detector_compare.py` (outside tesla/nav on purpose: it imports openpilotkr selfdrive code, which the nav-isolation test forbids inside the package), output
 `tesla/nav/validation/curve/three_detectors_real_drive.md`. Driven route (33.1 km, rebuilt from the GPS trace), curves with R < 200 m, scored against what the driver did (rule fixed in advance: speed drop >= 12 km/h
 between 400..100 m before and the slowest point -30..+120 m, or slowest point within 10 km/h of the curve speed). 6 clusters, 5 with speed data, all 5 slowed:
 OWN 5/5, MAPD 5/5, CurveCue 1/5 (it misses the short sharp bends: km 0.4 R32, 27.5, 27.65, 30.3 - the driver went 54->20, 91->76, 91->67, 56->30 km/h). No detector announced a curve the driver ignored.
