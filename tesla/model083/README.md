@@ -118,6 +118,9 @@ cd /data/openpilot && PYTHONPATH=/data/openpilot python3 /data/claude-stuff/tesl
 
 Ctrl+C in the bench script switches ignition off again; then `reboot` to go back to normal. The script refuses to
 run if a panda is connected or boardd is running. Nothing reaches a car: without boardd there is no CAN at all.
+**Speed on the bench (`bench_can_replay.py`):** replays a logged CAN capture (the old `tesla_can_bridge.log`, a real drive: vehicle speed 0 to about 66 mph) into the local `can` channel, so `controlsd` and the UI get speed
+instead of waiting for CAN. It is a rewrite (the original bridge code was lost) and has NOT been run on an EON yet. Check the log first with `--dry`; the pace is a setting (`--fps`, the log has no timestamps). It never opens a CAN
+interface and refuses to run with a panda on USB or boardd running. Copy the log to the EON (e.g. `/data/tesla_can_bridge.log`; do not commit it to git).
 On the bench `controlsd` waits for CAN that never comes and the UI may show "unavailable"-type alerts: expected.
 
 **Calibration on the bench:** by default `bench_started.py` switches calibration to *straight ahead* for the test
