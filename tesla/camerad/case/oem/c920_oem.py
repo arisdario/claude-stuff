@@ -110,7 +110,26 @@ def gp_foot(zbase):
     out.append(box(PXC - GP_GAP / 2 - GP_T - 1, PXC + GP_GAP / 2 + GP_T + 1, YP - GP_R, YP + GP_R, zbase - 0.5, zbase + 2.0))
     return union(*out)
 foot = gp_foot(ZT - 1.0)
-body_h = union(shell, bezel, foot)
+# light shield ("apron"), like the flocked trapezoid of a factory ADAS camera: a flat tray under/in front of the lens that widens away
+# from it and slopes DOWN steeper than the lowest view line, so it never blocks the picture. Cover it with black flocking/felt.
+APRON_L, APRON_DEG, APRON_SIDE = 60.0, 28.0, 4.0
+for a in sys.argv[1:]:
+    if a.startswith('apron='): APRON_L = float(a[6:])
+    if a.startswith('apron_deg='): APRON_DEG = float(a[10:])
+apron = None
+if APRON_L > 0:
+    from shapely.geometry import Polygon
+    w0 = BORE_R + 4.0; w1 = w0 + APRON_L * math.tan(math.radians(40.0)) / math.cos(math.radians(APRON_DEG))
+    outer = Polygon([(-w0, -3.0), (w0, -3.0), (w1, APRON_L), (-w1, APRON_L)]); inner = outer.buffer(-2.4)
+    plate = trimesh.creation.extrude_polygon(outer, 2.4)
+    rim = trimesh.creation.extrude_polygon(outer.difference(inner), APRON_SIDE); rim.apply_translation([0, 0, 2.4])
+    ap = union(plate, rim)                                   # local frame: x across, y along the slope, z = thickness/up
+    ap.vertices = ap.vertices[:, [0, 1, 2]]
+    pivot = np.array([0.0, YF0 + BEZ_L - 3.0, -(BORE_R + 3.0)])
+    ap.apply_transform(trimesh.transformations.rotation_matrix(-math.radians(APRON_DEG), [1, 0, 0]))   # tilt down towards the front
+    ap.apply_translation(pivot)
+    apron = ap
+body_h = union(shell, bezel, foot, *( [apron] if apron is not None else [] ))
 sc = [(sx * (PW / 2 + 2.5), PZC + sz * (PH / 2 + 2.5)) for sx in (-1, 1) for sz in (-1, 1)]    # lid screws in the wall corners
 holes = [cyl_y(1.2, -1, 11, PXC + x, z) for x, z in sc]
 vents = [box(PXC + x - 0.8, PXC + x + 0.8, 6, 24, ZT - WALL - 1, ZT + 1) for x in np.arange(-30, 31, 4.0)]   # slots on top, as on a dashcam
@@ -136,8 +155,11 @@ for nm, c in zip(('cartridge body', 'cartridge cover'), cart):
     except Exception as e:
         v = float('nan')
     print('interference housing / %s: %.2f mm3' % (nm, v))
-cone = frustum(PD, 0.1, 0.1, YF0 + BEZ_L, (BEZ_L + FW) * tH + 0.1, (BEZ_L + FW) * tV + 0.1)
-print('view-cone clearance (should be ~0 mm3):', round(inter(housing, cone).volume, 2))
+tHc, tVc = math.tan(math.radians(33.0)), math.tan(math.radians(22.0))     # the model's real view (+-32.7 x +-21.5 deg) with a little margin
+coneL = YF0 + BEZ_L + (APRON_L if APRON_L > 0 else 0) + 20
+cone = frustum(PD, 0.1, 0.1, coneL, (coneL - PD) * tHc + 0.1, (coneL - PD) * tVc + 0.1)
+cone = trimesh.boolean.difference([cone, bore], engine='manifold') if False else cone
+print('view-cone clearance (should be ~0 mm3; the bezel ring itself is outside the cone):', round(inter(housing, cone).volume, 2))
 
 # ------------------------------------------------ export in print orientation (back down; pad flat is not needed)
 R90 = trimesh.transformations.rotation_matrix(math.pi / 2, [1, 0, 0])
