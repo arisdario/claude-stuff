@@ -112,10 +112,11 @@ def gp_foot(zbase):
 foot = gp_foot(ZT - 1.0)
 # light shield ("apron"), like the flocked trapezoid of a factory ADAS camera: a flat tray under/in front of the lens that widens away
 # from it and slopes DOWN steeper than the lowest view line, so it never blocks the picture. Cover it with black flocking/felt.
-APRON_L, APRON_DEG, APRON_SIDE = 60.0, 28.0, 4.0
+APRON_L, APRON_DEG, APRON_SIDE = 60.0, 28.0, 6.0    # side lip: 6 mm is the most that stays out of the view (9 mm already clips it)
 for a in sys.argv[1:]:
     if a.startswith('apron='): APRON_L = float(a[6:])
     if a.startswith('apron_deg='): APRON_DEG = float(a[10:])
+    if a.startswith('apron_side='): APRON_SIDE = float(a[11:])
 apron = None
 if APRON_L > 0:
     from shapely.geometry import Polygon
