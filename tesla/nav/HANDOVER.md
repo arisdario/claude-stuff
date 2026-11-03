@@ -127,3 +127,11 @@ FINDING (CurveCue engine, not modified): the engine resamples the route at 5 m a
 on a straight chord (infinite radius) and swamps the average: a real R = 99 m arc built from 10 m chords came out as R = 8010 m and no curve at all; with vertices <= 5 m apart it is detected correctly. Real OSM geometry has irregular
 vertex spacing, so some bends may be under-reported (this is the likely reason the engine finds fewer curves than our old 30 m-baseline detector on the same routes). Mitigation available WITHOUT changing the engine: pass a larger
 `spacing` (the engine option exists) or densify route geometry; not done - needs a decision and a comparison against real bends.
+
+## Update 8 - how warnings reach the driver today (traced, read-only; no code changed)
+- Lane departure warning -> the car's INSTRUMENT CLUSTER, not the EON screen: `carcontroller.py:838` `_should_ldw` (enable_ldw config, v >= 16 m/s, no blinker, numb period after blinker) -> `:754-766` ldwStatus 1-4 from
+  lane probability + lane offset (LDW_WARNING_1 0.9 m, LDW_WARNING_2 0.5 m) -> `:632-638` `teslacan.create_fake_DAS_warning` (`teslacan.py:210-232`, CAN 0x554, byte 3 = ldwStatus) -> panda `do_fake_DAS` (safety_tesla.h,
+  NOT in this repo; per tesla/CLUSTER.md) -> fake DAS messages the cluster draws. 0x554 has no spare field for a curve advisory: using the cluster means a new/extended CAN message + panda firmware change.
+- EON-screen alerts use openpilot events: `interface.py` `create_event('steerUnavailable', [ET.NO_ENTRY, ET.WARNING])` etc. -> controlsd -> alert definitions in openpilot's `alerts.py` (NOT in this repo, so the exact
+  yellow/white styling could not be verified here).
+- `obstacle_warn.py` / `radar_interface.py:132` computes `obstacle_level` but NOTHING in this repo reads it: that warning is not displayed anywhere yet.
