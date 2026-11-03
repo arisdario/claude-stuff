@@ -76,6 +76,20 @@ static void usb_diag(uvc_device_handle_t *devh) {
   r = libusb_control_transfer(h, 0xA1, 0x87, 0x01 << 8, 1, b, 26, 1000);         // UVC GET_DEF, VS_PROBE_CONTROL
   printf("UVC GET_DEF  probe (interface 1) : %s\n", r >= 0 ? "OK" : libusb_error_name(r));
   if (r > 0) hexdump(b, r);
+  // the negotiation libuvc does before streaming starts: SET_CUR on the probe control (a WRITE request), here for YUY2 640x480 @ 30 fps (format 1, frame 1, interval 333333 x 100 ns)
+  {
+    unsigned char sb[26], gb[26];
+    memset(sb, 0, sizeof(sb));
+    sb[0] = 1; sb[1] = 0;                  // bmHint = dwFrameInterval is fixed
+    sb[2] = 1; sb[3] = 1;                  // bFormatIndex 1 (YUY2), bFrameIndex 1 (640x480)
+    sb[4] = 333333 & 0xff; sb[5] = (333333 >> 8) & 0xff; sb[6] = (333333 >> 16) & 0xff; sb[7] = 0;
+    r = libusb_control_transfer(h, 0x21, 0x01, 0x01 << 8, 1, sb, 26, 1000);       // UVC SET_CUR, VS_PROBE_CONTROL
+    printf("UVC SET_CUR  probe (WRITE)       : %s\n", r >= 0 ? "OK" : libusb_error_name(r));
+    memset(gb, 0, sizeof(gb));
+    r = libusb_control_transfer(h, 0xA1, 0x81, 0x01 << 8, 1, gb, 26, 1000);       // read back
+    printf("UVC GET_CUR  probe after SET_CUR : %s\n", r >= 0 ? "OK" : libusb_error_name(r));
+    if (r > 0) { hexdump(gb, r); printf("      camera chose: format %d frame %d interval %u max payload %u bytes\n", gb[2], gb[3], gb[4] | (gb[5] << 8) | (gb[6] << 16), gb[22] | (gb[23] << 8) | (gb[24] << 16)); }
+  }
   r = libusb_control_transfer(h, 0xA1, 0x81, 0x02 << 8, 0, b, 1, 1000);          // UVC GET_CUR, VC_REQUEST_ERROR_CODE
   printf("UVC GET_CUR  error code (if 0)   : %s", r >= 0 ? "OK" : libusb_error_name(r));
   if (r > 0) printf("  (last request error code %d)", b[0]);
@@ -135,11 +149,17 @@ int main(int argc, char **argv) {
   const char *names[] = {"MJPEG", "YUYV"};
   int k;
   memset(&ctrl, 0, sizeof(ctrl));
-  for (k = 0; k < 2; k++)
-    if (uvc_get_stream_ctrl_format_size(devh, &ctrl, fmts[k], w, h, fps) == UVC_SUCCESS) break;
+  uvc_error_t rr[2] = {UVC_ERROR_INVALID_MODE, UVC_ERROR_INVALID_MODE};
+  for (k = 0; k < 2; k++) {
+    rr[k] = uvc_get_stream_ctrl_format_size(devh, &ctrl, fmts[k], w, h, fps);
+    if (rr[k] == UVC_SUCCESS) break;
+  }
   if (k == 2) {
-    fprintf(stderr, "\nno MJPEG or YUYV mode at %dx%d @ %d fps - pick one from the list above:\n"
-                    "  ./uvctest %04x:%04x WIDTH HEIGHT FPS\n", w, h, fps, vid, pid);
+    // INVALID_MODE = the camera does not list that mode; anything else = the mode IS listed but the negotiation with the camera failed
+    for (int j = 0; j < 2; j++)
+      fprintf(stderr, "\n%s %dx%d @ %d fps: %s (%d)%s", names[j], w, h, fps, uvc_strerror(rr[j]), (int)rr[j],
+              rr[j] == UVC_ERROR_INVALID_MODE ? "  <- mode not listed" : "  <- listed, but the NEGOTIATION with the camera failed");
+    fprintf(stderr, "\nif the mode is listed: try  ./uvctest %04x:%04x WIDTH HEIGHT FPS  with another size from the list above\n", vid, pid);
     uvc_close(devh); uvc_unref_device(dev); uvc_exit(ctx); return 4;
   }
   expect_bytes = fmts[k] == UVC_FRAME_FORMAT_YUYV ? (size_t)w * h * 2 : 0;
