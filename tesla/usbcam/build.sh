@@ -21,4 +21,6 @@ $CC $FLAGS $SRC $LIB -lusb-1.0 -lpthread -o uvctest 2>build.log || $CC $FLAGS $S
 # uvcview: live view in a browser, for aiming the camera
 SRCV=$(echo "$SRC" | sed 's#uvctest.c#uvcview.c#')
 $CC $FLAGS $SRCV $LIB -lusb-1.0 -lpthread -o uvcview 2>build_view.log || $CC $FLAGS $SRCV $LIB -lusb-1.0 -o uvcview 2>>build_view.log || { cat build_view.log; exit 1; }
-echo "built: $(pwd)/uvctest and $(pwd)/uvcview"
+SRCL=$(echo "$SRC" | sed 's#uvctest.c#ledtool.c#')
+$CC $FLAGS $SRCL $LIB -lusb-1.0 -lpthread -o ledtool 2>build_led.log || $CC $FLAGS $SRCL $LIB -lusb-1.0 -o ledtool 2>>build_led.log || { cat build_led.log; exit 1; }
+echo "built: $(pwd)/uvctest, $(pwd)/uvcview and $(pwd)/ledtool"
