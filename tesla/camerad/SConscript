@@ -3,8 +3,11 @@ Import('env', 'arch', 'messaging', 'common', 'gpucommon', 'visionipc', 'cereal',
 libs = ['m', 'pthread', common, 'jpeg', 'json', cereal, 'OpenCL', messaging, 'czmq', 'zmq', 'capnp', 'kj', 'capnp_c', visionipc, gpucommon]
 
 if arch == "aarch64":
-  libs += ['gsl', 'CB', 'adreno_utils', 'EGL', 'GLESv3', 'cutils', 'ui']
-  cameras = ['cameras/camera_qcom.c']
+  libs += ['gsl', 'CB', 'adreno_utils', 'EGL', 'GLESv3', 'cutils', 'ui', 'usb-1.0']
+  # the phone's cameras (camera_qcom.c) plus the OPTIONAL external C920 road camera (camera_ext_c920.cc + the vendored libuvc): chosen at run time by /data/camera_source, default = the phone's camera
+  cameras = ['cameras/camera_qcom.c', 'cameras/camera_ext_c920.cc'] + ['libuvc/src/' + f for f in ['ctrl.c', 'ctrl-gen.c', 'device.c', 'diag.c', 'frame.c', 'init.c', 'misc.c', 'stream.c']]
+  env = env.Clone()
+  env.Append(CPPPATH = ['#selfdrive/camerad/libuvc/include', '/data/data/com.termux/files/usr/include/libusb-1.0', '/usr/include/libusb-1.0'])
 elif arch == "larch64":
   libs += []
   cameras = ['cameras/camera_qcom2.c']

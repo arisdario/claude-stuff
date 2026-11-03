@@ -29,6 +29,7 @@
 #include "sensor_i2c.h"
 
 #include "camera_qcom.h"
+#include "camera_ext_c920.h"
 
 
 // enable this to run the camera at 60fps and sample every third frame
@@ -45,6 +46,9 @@ typedef struct CameraMsg {
 } CameraMsg;
 
 extern volatile sig_atomic_t do_exit;
+
+// External road camera (Logitech C920, see camera_ext_c920.cc). 0 = the phone's rear camera, exactly as before. Set in cameras_init only when /data/camera_source says "external" AND the C920 streams.
+static int g_ext = 0;
 
 CameraInfo cameras_supported[CAMERA_ID_MAX] = {
   [CAMERA_ID_IMX298] = {
@@ -100,6 +104,7 @@ CameraInfo cameras_supported[CAMERA_ID_MAX] = {
 
 static void camera_release_buffer(void* cookie, int buf_idx) {
   CameraState *s = cookie;
+  if (g_ext && s->camera_num == 0) return;   // external rear camera: there is no ISP buffer to hand back
   // printf("camera_release_buffer %d\n", buf_idx);
   s->ss[0].qbuf_info[buf_idx].dirty_buf = 1;
   ioctl(s->isp_fd, VIDIOC_MSM_ISP_ENQUEUE_BUF, &s->ss[0].qbuf_info[buf_idx]);
@@ -350,6 +355,18 @@ void cameras_init(DualCameraState *s) {
 
   s->rear.device = s->device;
   s->front.device = s->device;
+
+  // external road camera: only when asked for AND it works right now; any failure leaves the phone's rear camera in use
+  g_ext = 0;
+  if (ext_c920_wanted()) {
+    if (ext_c920_present() && ext_c920_selftest(4000)) {
+      g_ext = 1;
+      ext_c920_configure(&s->rear);
+      LOG("*** ROAD CAMERA: external C920 (phone rear camera not used) ***");
+    } else {
+      LOGE("*** external road camera requested but the C920 is missing or gives no frames: using the phone's rear camera ***");
+    }
+  }
 }
 
 static void set_exposure(CameraState *s, float exposure_frac, float gain_frac) {
@@ -425,6 +442,7 @@ static void do_autoexposure(CameraState *s, float grey_frac) {
 }
 
 void camera_autoexposure(CameraState *s, float grey_frac) {
+  if (g_ext && s->camera_num == 0) return;   // the C920 does its own exposure
   CameraMsg msg = {
     .type = CAMERA_MSG_AUTOEXPOSE,
     .camera_num = s->camera_num,
@@ -1851,10 +1869,14 @@ void cameras_open(DualCameraState *s, VisionBuf *camera_bufs_rear, VisionBuf *ca
   camera_open(&s->front, false);
 
   LOG("*** open rear ***");
+  if (g_ext) {
+    LOG("rear = external C920: no phone sensor is opened");
+  } else {
   s->rear.ss[0].bufs = camera_bufs_rear;
   s->rear.ss[1].bufs = camera_bufs_focus;
   s->rear.ss[2].bufs = camera_bufs_stats;
   camera_open(&s->rear, true);
+  }
 
   if (getenv("CAMERA_TEST")) {
     cameras_close(s);
@@ -1875,6 +1897,10 @@ void cameras_open(DualCameraState *s, VisionBuf *camera_bufs_rear, VisionBuf *ca
   err = ioctl(s->ispif_fd, VIDIOC_MSM_ISPIF_CFG, &ispif_cfg_data);
   LOG("ispif setup: %d", err);
 
+  if (g_ext) {                 // only the front camera goes through the ISPIF
+    ispif_params.entries[0] = ispif_params.entries[1];
+    ispif_params.num = 1;
+  }
   memset(&ispif_cfg_data, 0, sizeof(ispif_cfg_data));
   ispif_cfg_data.cfg_type = ISPIF_CFG;
   ispif_cfg_data.params = ispif_params;
@@ -1887,7 +1913,11 @@ void cameras_open(DualCameraState *s, VisionBuf *camera_bufs_rear, VisionBuf *ca
   LOG("ispif start_frame_boundary: %d", err);
 
   front_start(&s->front);
-  rear_start(&s->rear);
+  if (g_ext) {
+    ext_c920_start(&s->rear, camera_bufs_rear);
+  } else {
+    rear_start(&s->rear);
+  }
 }
 
 
@@ -2109,7 +2139,7 @@ void cameras_run(DualCameraState *s) {
   while (!do_exit) {
     struct pollfd fds[2] = {{0}};
 
-    fds[0].fd = cameras[0]->isp_fd;
+    fds[0].fd = g_ext ? -1 : cameras[0]->isp_fd;   // poll() ignores a negative fd
     fds[0].events = POLLPRI;
 
     fds[1].fd = cameras[1]->isp_fd;
@@ -2209,6 +2239,11 @@ void cameras_run(DualCameraState *s) {
 }
 
 void cameras_close(DualCameraState *s) {
-  camera_close(&s->rear);
+  if (g_ext) {
+    ext_c920_stop();
+    tbuffer_stop(&s->rear.camera_tb);
+  } else {
+    camera_close(&s->rear);
+  }
   camera_close(&s->front);
 }
