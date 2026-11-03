@@ -80,60 +80,47 @@ def frustum(y0, hw0, hh0, y1, hw1, hh1, x0=0.0, z0=0.0):
 
 # lens axis = pocket-centre + window offset: the cartridge is placed so that the lens window centre sits on the lens axis (X = 0, Z = 0)
 PXC, PZC = -WIN_DX, WIN_DZ                 # pocket centre relative to the lens axis
-# ------------------------------------------------ housing
+# ------------------------------------------------ housing: compact dashcam-style block (rounded, bezel ring around the lens, top vents)
+# it HANGS from the bracket (it does not have to touch the glass): the lens sits a few cm behind the windshield like a normal dashcam
 R = 9.0
-S = (ZG0 + a0z + HT) / (t - tV) + 4         # hood length: the glass plane closes the hood
-shell = hull(slab(0, 0.1, OW, PZC - OH, zg(0), R), slab(YF0 - 0.1, YF0, OW, PZC - OH, zg(YF0), R))
+BEZ_R, BEZ_L, BORE_R = 18.0, 7.0, max(math.hypot(WIN_W, WIN_H) / 2 + 1.0, 11.0)   # bezel ring, its length, bore (round, covers the square lens window)
+ZT = PZC + OH                                       # top of the block
+shell = hull(slab(0, 0.1, OW, PZC - OH, ZT, R), slab(YF0 - 0.1, YF0, OW - 2.0, PZC - OH + 1.0, ZT - 1.0, R - 1.5))   # slight taper to the front
 shell = shell.copy(); shell.apply_translation([PXC, 0, 0])
-def rr_frustum(y0, hw0, hh0, y1, hw1, hh1, r0, r1, inset=0.0):    # frustum with rounded corners (hull of two rounded slabs)
-    def sl(y, hw, hh, r):
-        hw, hh, r = hw - inset, hh - inset, max(r - inset, 0.5)
-        return slab(y, y + 0.05, hw, -hh, hh, min(r, hw - .1, hh - .1))
-    return hull(sl(y0, hw0, hh0, r0), sl(y1 - 0.05, hw1, hh1, r1))
-hood_out = rr_frustum(YF0 - 0.2, a0x + HT, a0z + HT, YF0 + S, a0x + HT + S * tH, a0z + HT + S * tV, 6.0, 16.0)
-below = trimesh.convex.convex_hull(np.array([(x, y, z) for x in (-300, 300) for (y, z) in ((-5, -300), (YF0 + S + 30, -300), (-5, zg(-5)), (YF0 + S + 30, zg(YF0 + S + 30)))]))
+bezel = cyl_y(BEZ_R, YF0 - 1.0, YF0 + BEZ_L, 0, 0)
 pocket = box(PXC - PW / 2, PXC + PW / 2, -1, PD, PZC - PH / 2, PZC + PH / 2)
-winc = box(-WIN_W / 2 - 0.4, WIN_W / 2 + 0.4, PD - 0.5, YF0 + 1, -WIN_H / 2 - 0.4, WIN_H / 2 + 0.4)
-hood_in = rr_frustum(YF0 - 0.01, a0x, a0z, YF0 + S + 2, a0x + (S + 2) * tH, a0z + (S + 2) * tV, 4.0, 14.0)
-YP, ZP, ZA = 8.0, OH - 7, -(OH - 7)       # pitch pivot and adjuster bosses on both sides (Z measured from the pocket centre)
-bosses = []
-for sx in (-1, 1):
-    for zz in (ZP, ZA):
-        bosses.append(cyl_x(6.5, 0, 6.0, YP, PZC + zz).copy())
-        bosses[-1].apply_translation([PXC + sx * (OW - 0.2 + (3.0 if sx > 0 else -3.0)) , 0, 0]) if False else None
-body_h = union(shell, hood_out)
-for sx in (-1, 1):
-    for zz in (ZP, ZA):
-        body_h = union(body_h, cyl_x(6.5, PXC + sx * (OW - 1), PXC + sx * (OW + 4.0), YP, PZC + zz))
-body_h = inter(body_h, below)
+bore = cyl_y(BORE_R, PD - 0.5, YF0 + BEZ_L + 1, 0, 0)
+grooves = [trimesh.creation.annulus(r_min=BEZ_R - 3.0 - 2.4 * i - 0.9, r_max=BEZ_R - 3.0 - 2.4 * i, height=0.8) for i in range(3)]
+for g in grooves:
+    g.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, [1, 0, 0])); g.apply_translation([0, YF0 + BEZ_L - 0.3, 0])
+YP, ZPV, LEV = 4.0, ZT + 8.0, 10.0          # pitch pivot (Y, Z) on the lug, lever arm of the adjuster screw
+lug = box(PXC - 8, PXC + 8, 0.5, YP + LEV + 4.5, ZT - 2, ZPV + 6)
+body_h = union(shell, bezel, lug)
 sc = [(sx * (PW / 2 + 2.5), PZC + sz * (PH / 2 + 2.5)) for sx in (-1, 1) for sz in (-1, 1)]    # lid screws in the wall corners
 holes = [cyl_y(1.2, -1, 11, PXC + x, z) for x, z in sc]
-holes += [cyl_x(2.1, PXC + sx * (OW - 6), PXC + sx * (OW + 5), YP, PZC + zz) for sx in (-1, 1) for zz in (ZP, ZA)]
-vents = [box(PXC + x - 1.0, PXC + x + 1.0, 4, PD - 3, PZC - OH - 1, PZC - PH / 2 + 0.3) for x in np.arange(-34, 35, 6.0)]   # slots in the underside wall: dust cannot fall in
-housing = diff(body_h, pocket, winc, hood_in, *holes, *vents)
-housing = inter(housing, below)
+holes += [cyl_x(2.1, PXC - 10, PXC + 10, YP, ZPV), cyl_x(2.1, PXC - 10, PXC + 10, YP + LEV, ZPV)]
+vents = [box(PXC + x - 0.8, PXC + x + 0.8, 6, 24, ZT - WALL - 1, ZT + 1) for x in np.arange(-30, 31, 4.0)]   # slots on top, as on a dashcam
+winc = box(-WIN_W / 2 - 0.4, WIN_W / 2 + 0.4, PD - 0.5, YF0 + 1, -WIN_H / 2 - 0.4, WIN_H / 2 + 0.4)
+housing = diff(body_h, pocket, winc, bore, *holes, *vents, *grooves)
+S = 0.0; zg = lambda y: ZT + 22.0 + t * (YF0 - y)    # glass plane (for the bracket pad): 22 mm above the top of the block at its front edge
 
 # ------------------------------------------------ rear lid (closes the pocket; cable hole where the real cartridge has it)
 lid = union(trimesh.creation.box(extents=[2 * OW - 2, 3, 2 * OH - 2], transform=trimesh.transformations.translation_matrix([PXC, -1.5, PZC])),
             box(PXC - PW / 2 + 1.0, PXC + PW / 2 - 1.0, 0, 1.6, PZC - PH / 2 + 1.0, PZC + PH / 2 - 1.0))
 lid = diff(lid, *[cyl_y(1.7, -4, 3, PXC + x, z) for x, z in sc], box(PXC + CAB_DX - 4.5, PXC + CAB_DX + 4.5, -4, 3, PZC - OH - 1, PZC - CAB_DZ + 4.5))   # slot open to the bottom edge so the soldered cable can be dropped in
 
-# ------------------------------------------------ bracket: glass pad + two cheeks with pitch arc slots
-PADT = GAP - 2.0     # 2 mm of air between pad and housing so the housing can pitch
-pad_y0, pad_y1 = -6.0, YF0 - 4.0
-CHW = 4.0
-pad_pts = [(x, y, z) for x in (PXC - OW - 4 - CHW, PXC + OW + 4 + CHW) for (y, z) in ((pad_y0, zg(pad_y0) + 2), (pad_y1, zg(pad_y1) + 2), (pad_y0, zg(pad_y0) + GAP), (pad_y1, zg(pad_y1) + GAP))]
-pad = trimesh.convex.convex_hull(np.array(pad_pts))
+# ------------------------------------------------ bracket: small glass pad + two cheeks either side of the lug (pitch pivot + arc slot)
+PADT, CHW = 5.0, 3.0
+pad_y0, pad_y1 = -2.0, 21.0
+pad = trimesh.convex.convex_hull(np.array([(x, y, z) for x in (PXC - 28, PXC + 28) for (y, z) in ((pad_y0, zg(pad_y0) - PADT), (pad_y1, zg(pad_y1) - PADT), (pad_y0, zg(pad_y0)), (pad_y1, zg(pad_y1)))]))
 def cheek(side):
-    # 2-D (Y,Z): arm from the pad down to the pivot, pivot hole, arc slot about the pivot for the adjuster boss
     from shapely.geometry import Polygon
-    poly = Polygon([(pad_y0, PZC + ZA - 9), (pad_y1, PZC + ZA - 9), (pad_y1, zg(pad_y1) + GAP), (pad_y0, zg(pad_y0) + GAP)])
-    arc = LineString([(YP + (PZC + ZP - (PZC + ZA)) * math.sin(math.radians(a)), PZC + ZP - (PZC + ZP - (PZC + ZA)) * math.cos(math.radians(a))) for a in np.linspace(-9, 9, 19)]).buffer(2.3)
-    poly = poly.difference(arc).difference(Point(YP, PZC + ZP).buffer(2.3))
+    poly = Polygon([(pad_y0, ZPV - 7), (pad_y1, ZPV - 7), (pad_y1, zg(pad_y1) - PADT + 0.5), (pad_y0, zg(pad_y0) - PADT + 0.5)])
+    arc = LineString([(YP + LEV * math.cos(math.radians(a)), ZPV + LEV * math.sin(math.radians(a))) for a in np.linspace(-9, 9, 19)]).buffer(2.3)
+    poly = poly.difference(arc).difference(Point(YP, ZPV).buffer(2.3))
     m = trimesh.creation.extrude_polygon(poly, CHW)
-    m.vertices = m.vertices[:, [2, 0, 1]]; m.faces = m.faces[:, ::-1]; m.fix_normals()     # (y,z,e)->(x=e,y,z)
-    x0 = PXC + (OW + 4.2 if side > 0 else -OW - 4.2 - CHW)
-    m.apply_translation([x0, 0, 0]); return m
+    m.vertices = m.vertices[:, [2, 0, 1]]; m.faces = m.faces[:, ::-1]; m.fix_normals()
+    m.apply_translation([PXC + (8.3 if side > 0 else -8.3 - CHW), 0, 0]); return m
 cheeks = [cheek(1), cheek(-1)]
 
 # ------------------------------------------------ checks with the REAL cartridge meshes
@@ -147,8 +134,8 @@ for nm, c in zip(('cartridge body', 'cartridge cover'), cart):
     except Exception as e:
         v = float('nan')
     print('interference housing / %s: %.2f mm3' % (nm, v))
-cone = frustum(PD, 0.1, 0.1, YF0 + S, (S + FW) * tH + 0.1, (S + FW) * tV + 0.1)
-print('pad / housing interference mm3: %.2f' % inter(housing, pad).volume)
+cone = frustum(PD, 0.1, 0.1, YF0 + BEZ_L, (BEZ_L + FW) * tH + 0.1, (BEZ_L + FW) * tV + 0.1)
+print('pad / housing interference mm3: %.2f, cheeks / housing: %.2f' % (inter(housing, pad).volume, sum(inter(housing, c).volume for c in cheeks)))
 print('view-cone clearance (should be ~0 mm3):', round(inter(housing, cone).volume, 2))
 
 # ------------------------------------------------ export in print orientation (back down; pad flat is not needed)
