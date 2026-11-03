@@ -7,7 +7,7 @@ space over raw USB — the same way `boardd` talks to the panda (libusb). `uvcte
 
 It is a **standalone program**: it does not touch openpilot, camerad or the panda.
 
-- `libuvc/` — libuvc v0.0.7 (commit 68d07a0), BSD licence (`libuvc/LICENSE.txt`), built without libjpeg
+- `libuvc/` — libuvc v0.0.7 (commit 68d07a0), BSD licence (`libuvc/LICENSE.txt`), built without libjpeg. ONE LOCAL PATCH in `src/stream.c` (`_uvc_stream_params_negotiated`): the payload-size equality check is dropped, because it made a C920 fail every mode with "Invalid mode" (-51)
 - `uvctest.c` — the test
 - `build.sh` — builds it on the EON with the phone's own compiler (termux clang + libusb, as boardd uses)
 

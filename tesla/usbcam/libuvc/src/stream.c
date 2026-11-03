@@ -595,9 +595,11 @@ uvc_error_t uvc_get_still_ctrl_format_size(
 static int _uvc_stream_params_negotiated(
   uvc_stream_ctrl_t *required,
   uvc_stream_ctrl_t *actual) {
+    /* LOCAL PATCH (tesla/usbcam): upstream also required dwMaxPayloadTransferSize to be equal before and after the probe. A Logitech C920 reports the payload size of the
+     * mode it actually selected (e.g. 2688 bytes for YUY2 640x480@30) which differs from the value read earlier, so EVERY mode was rejected as "Invalid mode" (-51) although the camera
+     * accepted it. The UVC spec lets the device fill in the payload size; what must match is the format and frame we asked for. */
     return required->bFormatIndex == actual->bFormatIndex &&
-    required->bFrameIndex == actual->bFrameIndex &&
-    required->dwMaxPayloadTransferSize == actual->dwMaxPayloadTransferSize;
+    required->bFrameIndex == actual->bFrameIndex;
 }
 
 /** @internal
