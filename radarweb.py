@@ -1523,6 +1523,15 @@ def _live_fresh():
 
 def cam_worker(cam):
     V = VID[cam]
+    try: cam_worker2(cam, V)
+    except Exception as e:                      # never stay on "starting..." forever
+        V['err'] = 'camera view failed: %s' % e; V['run'] = False
+
+def cam_worker2(cam, V):
+    if cam == 'road' and camfocus_get()['external']:
+        for _ in range(40):                     # camerad (external C920) writes the live feed; give it a few seconds
+            if _live_fresh(): break
+            V['err'] = 'waiting for the C920 live feed (camerad must be the rebuilt one: run install_external_camera.sh --yes, then reboot)'; time.sleep(.25)
     if cam == 'road' and _live_fresh():                # direct camera feed, no screenshots, no VisionIPC needed
         V['err'] = ''; V['mode'] = 'live'; V['ct'] = 'image/jpeg'; lastm = 0
         while time.time() - V['want'] < 10:
