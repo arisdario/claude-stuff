@@ -115,6 +115,50 @@ static void save_frame(uvc_frame_t *f) {
   if (rgb) uvc_free_frame(rgb);
 }
 
+// libuvc's own mode matching (uvc_get_stream_ctrl_format_size) answered "invalid mode" on the EON although the descriptors it printed list the mode. Show what it sees, and pick the mode ourselves
+// from the same parsed descriptors (format GUID + width + height + frame interval), then let libuvc negotiate it with the camera (uvc_probe_stream_ctrl).
+static void show_candidates(uvc_device_handle_t *devh, int w, int h) {
+  const uvc_format_desc_t *f;
+  fprintf(stderr, "\nwhat libuvc parsed for %dx%d:\n", w, h);
+  for (f = uvc_get_format_descs(devh); f; f = f->next) {
+    const uvc_frame_desc_t *fr;
+    for (fr = f->frame_descs; fr; fr = fr->next) {
+      if (fr->wWidth != w || fr->wHeight != h) continue;
+      fprintf(stderr, "  format #%d guid %02x%02x%02x%02x.. frame #%d intervals(x100ns):", f->bFormatIndex, f->guidFormat[0], f->guidFormat[1], f->guidFormat[2], f->guidFormat[3], fr->bFrameIndex);
+      if (fr->intervals) { const uint32_t *iv; for (iv = fr->intervals; *iv; iv++) fprintf(stderr, " %u", *iv); }
+      else fprintf(stderr, " (continuous %u..%u step %u)", fr->dwMinFrameInterval, fr->dwMaxFrameInterval, fr->dwFrameIntervalStep);
+      fprintf(stderr, "\n");
+    }
+  }
+}
+
+// returns 0 = YUYV, 1 = MJPEG (chosen), -1 = none; fills ctrl and negotiates
+static int pick_mode_manually(uvc_device_handle_t *devh, uvc_stream_ctrl_t *ctrl, int w, int h, int fps, uvc_error_t *neg) {
+  const uvc_format_desc_t *f;
+  for (int want = 1; want >= 0; want--) {                         // MJPEG first (smaller on the bus), then YUYV
+    for (f = uvc_get_format_descs(devh); f; f = f->next) {
+      int is_mjpeg = !memcmp(f->guidFormat, "MJPG", 4), is_yuyv = !memcmp(f->guidFormat, "YUY2", 4);
+      if ((want == 1 && !is_mjpeg) || (want == 0 && !is_yuyv)) continue;
+      for (const uvc_frame_desc_t *fr = f->frame_descs; fr; fr = fr->next) {
+        if (fr->wWidth != w || fr->wHeight != h || !fr->intervals) continue;
+        for (const uint32_t *iv = fr->intervals; *iv; iv++) {
+          if (10000000u / *iv != (unsigned)fps) continue;
+          memset(ctrl, 0, sizeof(*ctrl));
+          ctrl->bmHint = 1;
+          ctrl->bFormatIndex = f->bFormatIndex;
+          ctrl->bFrameIndex = fr->bFrameIndex;
+          ctrl->dwFrameInterval = *iv;
+          ctrl->bInterfaceNumber = 1;
+          *neg = uvc_probe_stream_ctrl(devh, ctrl);
+          if (*neg == UVC_SUCCESS) return want;
+          fprintf(stderr, "  negotiating %s %dx%d @ %d fps: %s (%d)\n", want ? "MJPEG" : "YUYV", w, h, fps, uvc_strerror(*neg), (int)*neg);
+        }
+      }
+    }
+  }
+  return -1;
+}
+
 int main(int argc, char **argv) {
   int vid = 0, pid = 0, w = 640, h = 480, fps = 30, secs = 10;
   int a = 1;
@@ -159,7 +203,16 @@ int main(int argc, char **argv) {
     for (int j = 0; j < 2; j++)
       fprintf(stderr, "\n%s %dx%d @ %d fps: %s (%d)%s", names[j], w, h, fps, uvc_strerror(rr[j]), (int)rr[j],
               rr[j] == UVC_ERROR_INVALID_MODE ? "  <- mode not listed" : "  <- listed, but the NEGOTIATION with the camera failed");
-    fprintf(stderr, "\nif the mode is listed: try  ./uvctest %04x:%04x WIDTH HEIGHT FPS  with another size from the list above\n", vid, pid);
+    show_candidates(devh, w, h);
+    uvc_error_t neg = UVC_SUCCESS;
+    int m = pick_mode_manually(devh, &ctrl, w, h, fps, &neg);
+    if (m >= 0) {
+      fprintf(stderr, "\nlibuvc's matching failed but picking the mode from the parsed descriptors WORKED: %s %dx%d @ %d fps\n", m ? "MJPEG" : "YUYV", w, h, fps);
+      k = m ? 0 : 1;                                             // fmts[0] = MJPEG, fmts[1] = YUYV: carry on to the streaming test below
+    }
+  }
+  if (k == 2) {
+    fprintf(stderr, "\nstill no usable mode: try  ./uvctest %04x:%04x WIDTH HEIGHT FPS  with another size from the list above\n", vid, pid);
     uvc_close(devh); uvc_unref_device(dev); uvc_exit(ctx); return 4;
   }
   expect_bytes = fmts[k] == UVC_FRAME_FORMAT_YUYV ? (size_t)w * h * 2 : 0;
