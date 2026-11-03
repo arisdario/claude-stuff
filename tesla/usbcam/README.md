@@ -46,3 +46,7 @@ Logitech C920 (046d:082d, label V-U0028), plugged straight into the EON, car par
 Not yet tested: a long run (10 min: `./uvctest 046d:082d 1280 720 30 600`), panda + camera + power through a hub on the step-down supply, the picture itself (focus/exposure/mount), and anything on the openpilot side.
 
 **10-minute run (EON on the 12 V step-down, no panda, camera straight into the EON):** `UVC_FOCUS=0 ./uvctest 046d:082d 1280 720 30 600` -> 18,001 frames in 600.0 s = **30.0 fps**, average frame 185,180 bytes (~44 Mbit/s), VERDICT OK. No restart or dropout.
+
+## Recording a clip for the model (offline, on a PC - nothing touches openpilot)
+`UVC_FOCUS=0 UVC_SAVE=clip.mjpg UVC_SAVE_SECS=25 ./uvctest 046d:082d 1280 720 30 25` writes the camera's raw MJPEG frames (about 5 MB/s: keep the seconds short, disk is limited). Copy `clip.mjpg` to a PC and run
+`sh clip_to_eon.sh clip.mjpg fcamera_c920.hevc`, then `tesla/model083/tools/replay083.py` (needs the model file and ffmpeg) to see the path and lanes the driving model draws on the C920's picture. The geometry conversion is explained at the top of `clip_to_eon.sh`.

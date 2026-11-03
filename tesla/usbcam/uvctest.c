@@ -30,6 +30,8 @@ static double now_s(void) {
 }
 
 // libuvc calls this on its own thread for every frame received
+static FILE *clip = NULL;              // UVC_SAVE=file.mjpg : the raw MJPEG frames, one after another (ffmpeg -f mjpeg -i file.mjpg ...)
+static double clip_secs = 20.0;        // UVC_SAVE_SECS (default 20 s = about 100 MB at 1280x720): the file stops growing after this
 static void on_frame(uvc_frame_t *f, void *user) {
   (void)user;
   double t = now_s();
@@ -37,6 +39,7 @@ static void on_frame(uvc_frame_t *f, void *user) {
   if (frames == 0) t_first = t;
   t_last = t; frames++; bytes += (long)f->data_bytes;
   if (expect_bytes && f->data_bytes != expect_bytes) short_frames++;
+  if (clip && f->frame_format == UVC_FRAME_FORMAT_MJPEG && frames > 5 && t - t_first <= clip_secs + 0.5) fwrite(f->data, 1, f->data_bytes, clip);
   if (frames == 10 && keep == NULL) {     // skip the first frames (exposure still settling)
     keep = uvc_allocate_frame(0);
     if (keep && uvc_duplicate_frame(f, keep) != UVC_SUCCESS) { uvc_free_frame(keep); keep = NULL; }
@@ -237,6 +240,12 @@ int main(int argc, char **argv) {
 
   printf("\n=== streaming %s %dx%d @ %d fps for %d s ===\n", names[k], w, h, fps, secs);
   uvc_print_stream_ctrl(&ctrl, stdout);
+  {
+    const char *sv = getenv("UVC_SAVE"), *ss = getenv("UVC_SAVE_SECS");
+    if (ss && atof(ss) > 0) clip_secs = atof(ss);
+    if (sv && *sv && k == 0) { clip = fopen(sv, "wb"); printf("recording the MJPEG frames to %s for the first %.0f s\n", sv, clip_secs); }
+    else if (sv && *sv) printf("UVC_SAVE needs an MJPEG mode (this run uses YUYV): not recording\n");
+  }
   if ((r = uvc_start_streaming(devh, &ctrl, on_frame, NULL, 0)) < 0) {
     uvc_perror(r, "uvc_start_streaming - USB bandwidth, or the camera refused the mode");
     uvc_close(devh); uvc_unref_device(dev); uvc_exit(ctx); return 5;
@@ -247,6 +256,7 @@ int main(int argc, char **argv) {
     printf("  %2d s: %d frames\n", i, n); fflush(stdout);
   }
   uvc_stop_streaming(devh);
+  if (clip) { long sz = ftell(clip); fclose(clip); clip = NULL; printf("recording closed (%ld bytes)\n", sz); }
 
   double span = t_last - t_first, got = (frames > 1 && span > 0) ? (frames - 1) / span : 0;
   printf("\n=== result ===\n");
