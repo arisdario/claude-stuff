@@ -2031,6 +2031,7 @@ img{max-width:100vw;max-height:100vh;object-fit:contain;background:#000}
 </style></head><body><div id=wrap><img id=im alt=""></div><div id=msg>connecting to the camera…</div>
 <div id=tabs><a href="?cam=road" id=t_road>road</a><a href="?cam=driver" id=t_driver>driver</a><a href="?cam=wide" id=t_wide>wide</a></div>
 <div id=rec><button id=rb>REC</button><span id=rs></span><div id=rf></div><div style="margin-top:10px"><button id=cb class=sec>Reset calibration</button></div><div id=cs></div></div>
+<div id=fx style="display:none;position:fixed;left:10px;bottom:8px;background:rgba(28,33,40,.9);padding:8px 12px;border-radius:12px;font-size:14px">Focus (C920) <input id=fr type=range min=0 max=250 step=5 value=0 style="width:240px;vertical-align:middle"> <b id=fv>0</b> <span id=fs style="opacity:.8"></span><div style="opacity:.7;font-size:12px">0 = far (the road) .. 250 = near</div></div>
 <details id=nav><summary>☰</summary><div><a href="/">road view</a><a href="/top">top-down view</a><a href="/near">near view</a></div></details>
 <script>
 var cam=(/cam=(\w+)/.exec(location.search)||[0,'road'])[1],im=document.getElementById('im'),msg=document.getElementById('msg');
@@ -2048,8 +2049,31 @@ function cal(){fetch('/api/recal').then(function(r){return r.json()}).then(funct
 document.getElementById('cb').onclick=function(){if(!confirm('Reset the camera calibration?\n\nopenpilot will forget the camera angle and relearn it while you drive. Only works while the car is stopped and openpilot is not engaged.'))return;
  fetch('/api/recal',{method:'POST',headers:{'X-Recal':'1'}}).then(function(r){return r.json()}).then(function(d){document.getElementById('cs').textContent=d.msg}).catch(function(e){document.getElementById('cs').textContent='request failed'})};
 cal();setInterval(cal,1500);
+var fr=document.getElementById('fr'),fx=document.getElementById('fx'),ft=0;
+function fget(){fetch('/api/camfocus').then(function(r){return r.json()}).then(function(d){if(cam!=='road'||!d.external){fx.style.display='none';return}fx.style.display='block';fr.value=d.focus;document.getElementById('fv').textContent=d.focus}).catch(function(){})}
+fr.oninput=function(){document.getElementById('fv').textContent=fr.value;clearTimeout(ft);ft=setTimeout(function(){fetch('/api/camfocus',{method:'POST',headers:{'X-Cam':'1'},body:String(fr.value)}).then(function(r){return r.json()}).then(function(d){document.getElementById('fs').textContent=d.msg||''}).catch(function(){})},250)};
+fget();
 start();
 </script></body></html>"""
+
+
+def camfocus_get():
+    # the external C920 road camera (tesla/camerad): selected in /data/camera_source, focus in /data/camera_focus (0 = infinity .. 250 = closest)
+    try: ext = open('/data/camera_source').read().strip().startswith('external')
+    except Exception: ext = False
+    try: f = int(open('/data/camera_focus').read().strip() or 0)
+    except Exception: f = 0
+    return {'external': ext, 'focus': max(0, min(250, f))}
+
+
+def camfocus_set(txt):
+    try: v = max(0, min(250, int(float(txt))))
+    except Exception: return {'ok': False, 'msg': 'not a number'}
+    try:
+        with open('/data/camera_focus.tmp', 'w') as f_: f_.write('%d\n' % v)
+        os.replace('/data/camera_focus.tmp', '/data/camera_focus')
+    except Exception as e: return {'ok': False, 'msg': 'could not save: %s' % e}
+    return {'ok': True, 'focus': v, 'msg': 'focus %d (applied within a second)' % v}
 
 
 def uds_parked():
@@ -2291,6 +2315,8 @@ class H(BaseHTTPRequestHandler):
                     time.sleep(0.04)
                     if not V['run'] and not V['jpg']: time.sleep(1.0); cam_want(cam)
             except Exception: pass
+        elif self.path.split('?')[0] == '/api/camfocus':
+            self._json(camfocus_get())
         elif self.path.split('?')[0] == '/api/rec':
             import re as _re
             m_ = _re.search(r'cmd=(\w+)', self.path); b = json.dumps(rec_cmd(m_.group(1)) if m_ and m_.group(1) in ('start', 'stop') else rec_status()).encode()
@@ -2343,7 +2369,11 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self._authed(): return
-        if self.path.split('?')[0] == '/api/recal' and self.headers.get('X-Recal') == '1':
+        if self.path.split('?')[0] == '/api/camfocus' and self.headers.get('X-Cam') == '1':
+            try: n_ = int(self.headers.get('Content-Length', '0') or '0'); txt_ = self.rfile.read(min(n_, 16)).decode('utf8', 'replace')
+            except Exception: txt_ = ''
+            self._json(camfocus_set(txt_))
+        elif self.path.split('?')[0] == '/api/recal' and self.headers.get('X-Recal') == '1':
             b = json.dumps(recal_start()).encode(); self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
         elif self.path.split('?')[0] == '/api/label':
             # LABELBTN: body is the raw label text (plain text, not JSON - keeps the client's fetch() tiny).

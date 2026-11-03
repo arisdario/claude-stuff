@@ -210,7 +210,20 @@ void *capture_thread(void *) {
   while (!g_stop && !do_exit) {
     if (!ext_open()) { fprintf(stderr, "external camera: not available, retrying\n"); sleep(1); continue; }
     fprintf(stderr, "ROAD CAMERA: external C920 streaming %dx%d MJPEG @ %d fps\n", SRC_W, SRC_H, SRC_FPS);
-    while (!g_stop && !do_exit && (now_ns() - g_last_frame_ns) < 3000000000LL) usleep(100000);
+    int last_focus = read_int_file(FOCUS_FILE, 0), tick = 0;
+    while (!g_stop && !do_exit && (now_ns() - g_last_frame_ns) < 3000000000LL) {
+      usleep(100000);
+      if (++tick % 10 == 0) {                                   // once a second: a focus change made in the radarweb camera page (writes /data/camera_focus) is applied live
+        int f = read_int_file(FOCUS_FILE, 0);
+        if (f < 0) f = 0;
+        if (f > 250) f = 250;
+        if (f != last_focus && g.devh) {
+          uvc_set_focus_abs(g.devh, (uint16_t)f);
+          last_focus = f;
+          fprintf(stderr, "external camera: focus -> %d\n", f);
+        }
+      }
+    }
     if (!g_stop && !do_exit) fprintf(stderr, "external camera: no frames for 3 s, restarting the camera\n");
     ext_close();
   }
