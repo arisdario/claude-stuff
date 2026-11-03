@@ -55,3 +55,8 @@ Not yet tested: a long run (10 min: `./uvctest 046d:082d 1280 720 30 600`), pand
 `sh tesla/usbcam/build.sh` also builds `uvcview`. On the EON (camera plugged in): `UVC_FOCUS=100 ./uvcview 046d:082d 1280 720 30 8090`, then open `http://<EON ip>:8090/` on a laptop or phone on the same network:
 the live picture with a red centre cross, a green box = the part the EON model uses (middle 1164 of 1280 px), and a focus slider (0 = infinity, for the road; about 100-150 for a screen 35 cm away). No password: use only while aiming, then Ctrl+C.
 Find the EON's address with `ip addr show wlan0` (or `ifconfig wlan0`). Tested here only with a fake picture source (page, snapshot, stream, focus request); not yet with the camera.
+
+## C920 picture through the driving model (offline, 3 Nov 2026)
+10 s clip of a monitor playing an EON-recorded drive, C920 1280x720 MJPEG, focus 100, converted with `clip_to_eon.sh` (crop to 1164 wide, centred on a black 874-row canvas, no scaling) and run through `replay083.py` (0.8.3 model) on a PC:
+vanishing point estimated from the picture (582, 523): lane probability median L 0.97 / R 0.98, lane width 3.09 m, path +0.21 m, lead p 0.28; with the neutral vanishing point (582, 437): 0.99 / 1.00, width 2.49 m.
+So the model finds the lanes with high confidence on the C920's picture. Not a road test: the scene is a screen, the camera was aimed ~6 deg too high (road vanishing point at ~62% of the frame), and the C920 is not connected to openpilot's camera pipeline.
