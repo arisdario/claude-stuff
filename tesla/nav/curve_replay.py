@@ -17,12 +17,15 @@ except ImportError:
 MATCH_M = 40.0
 
 
-def replay(graph, route, dest, speed=25.0, noise=5.0, seed=1, decel=C.DECEL, a_lat=C.A_LAT):
-    truth = C.find_curves(route.points, route.cum, 0.0, route.cum[-1], a_lat)
+def replay(graph, route, dest, speed=25.0, noise=5.0, seed=1, decel=C.DECEL, a_lat=C.A_LAT, min_severity=C.DEFAULT_MIN_SEVERITY):
+    truth_all = C.find_curves(route.points, route.cum, 0.0, route.cum[-1], a_lat)
+    for c in truth_all:
+        c['s0'], c['s1'] = c['start_m'], c['end_m']
+    truth = [c for c in truth_all if C.SEVERITY_ORDER.index(c['severity']) >= C.SEVERITY_ORDER.index(min_severity)]
     for c in truth:
         c['s'] = c['dist_m']
         c['s0'], c['s1'] = c['start_m'], c['end_m']
-    ca = C.CurveAhead(graph, dest, a_lat=a_lat, decel=decel)
+    ca = C.CurveAhead(graph, dest, a_lat=a_lat, decel=decel, min_severity=min_severity)
     ca.start(route.points[0][0], route.points[0][1], None)
     first, false_fix, adv_fix, n, lowconf = {}, [], 0, 0, 0
     ann, dist_hist = {}, {}
@@ -56,7 +59,7 @@ def replay(graph, route, dest, speed=25.0, noise=5.0, seed=1, decel=C.DECEL, a_l
         if msg['advised_speed_ms'] is not None:
             adv_fix += 1
             s_abs = msg['route_progress_m'] + msg['curve_dist_m']
-            if not any(c['s0'] - MATCH_M <= s_abs <= c['s1'] + MATCH_M for c in truth):       # a long bend's binding point can move as the window slides: judge by the bend's extent
+            if not any(c['s0'] - MATCH_M <= s_abs <= c['s1'] + MATCH_M for c in truth_all):       # a long bend's binding point can move as the window slides: judge by the bend's extent
                 false_fix.append((round(msg['route_progress_m']), round(s_abs)))
     return truth, first, {'fixes': n, 'advisory_fixes': adv_fix, 'false_slowdown_fixes': len(false_fix), 'false_examples': false_fix[:5], 'low_confidence_fixes': lowconf,
                           'progress_err_median_m': sorted(errs)[len(errs) // 2] if errs else None, 'progress_err_p95_m': sorted(errs)[int(len(errs) * 0.95)] if errs else None, 'progress_err_max_m': max(errs) if errs else None,
@@ -66,7 +69,7 @@ def replay(graph, route, dest, speed=25.0, noise=5.0, seed=1, decel=C.DECEL, a_l
 def report(a, b, route, truth, first, st, speed, decel):
     L = ['# Curve-ahead replay: %s -> %s' % (a, b), '',
          'route %.2f km, replay speed %.0f m/s (%.0f km/h), GPS noise 5 m, A_LAT %.2f m/s^2, DECEL %.2f m/s^2, horizon %.0f m. Advisory only.' % (route.distance_m / 1000.0, speed, speed * 3.6, C.A_LAT, decel, C.HORIZON_M), '',
-         '%d real curves (curve speed < %.0f km/h, >= %d samples) in the route geometry; announced with high confidence: **%d**.' % (len(truth), C.CURVE_MAX_MS * 3.6, C.MIN_CURVE_SAMPLES, len(first)), '',
+         '%d real curves of severity >= moderate (radius < 200 m; curve speed < %.0f km/h, >= %d samples) in the route geometry; announced with high confidence: **%d**.' % (len(truth), C.CURVE_MAX_MS * 3.6, C.MIN_CURVE_SAMPLES, len(first)), '',
          '| # | at km | radius m | curve km/h | announced at (m before) | approach km/h then | slow-down must start (m before) | start slowing in (m) | early enough? |', '|---|---|---|---|---|---|---|---|---|']
     ok = 0
     for i, c in enumerate(truth):
@@ -89,9 +92,13 @@ def report(a, b, route, truth, first, st, speed, decel):
     nonmono = [k for k, h in st['dist_hist'].items() if any(b > a + 25.0 for a, b in zip(h, h[1:]))]
     L += ['', '## Announcements (each curve announced once, distance then updated every fix)', '',
           '%d announcements for %d real curves: **duplicate announcements %d**, announcements not matching a real curve **%d**, real curves never announced **%s**, announced curves whose distance ever grew by > 25 m while approaching **%d**' % (len(ann), len(truth), dup, spurious, missed or 'none', len(nonmono)), '',
-          '| id | first announced at route m | curve at route m | distance when announced | radius m | curve speed km/h | distance updates |', '|---|---|---|---|---|---|---|']
+          '| id | announcement | first announced at route m | curve starts at route m | distance when announced | radius m | curve speed km/h | distance updates |', '|---|---|---|---|---|---|---|---|']
     for a in sorted(ann.values(), key=lambda q: q['id']):
-        L.append('| %d | %.0f | %.0f | %.0f | %.0f | %.0f | %d |' % (a['id'], a['at_progress'], a['abs'], a['distance_m'], a['radius_m'], a['speed_ms'] * 3.6, len(st['dist_hist'][a['id']])))
+        L.append('| %d | %s | %.0f | %.0f | %.0f | %.0f | %.0f | %d |' % (a['id'], a['text'], a['at_progress'], a['abs'] - 15.0, a['distance_m'], a['radius_m'], a['speed_ms'] * 3.6, len(st['dist_hist'][a['id']])))
+    bysev = {}
+    for a in ann.values():
+        bysev[a['severity']] = bysev.get(a['severity'], 0) + 1
+    L += ['', 'by severity: ' + ', '.join('%d %s' % (bysev.get(k, 0), k) for k in ('gentle', 'moderate', 'firm', 'sharp', 'hairpin'))]
     L += ['', 'announced early enough to slow at %.1f m/s^2: **%d / %d**' % (decel, ok, len(truth)),
           'false slowdowns (advisory pointing at a curve that is not in the route geometry): **%d of %d fixes** %s' % (st['false_slowdown_fixes'], st['fixes'], st['false_examples']),
           'road match: progress error median %s m, p95 %s m, max %s m; high-confidence fixes %d, of which progress wrong by > %.0f m (wrong forward geometry): **%d**; recalculations during replay: %d' % tuple(
@@ -107,12 +114,13 @@ def main(argv=None):
     ap.add_argument('--speed', type=float, default=25.0)
     ap.add_argument('--decel', type=float, default=C.DECEL)
     ap.add_argument('--seed', type=int, default=1)
+    ap.add_argument('--min-severity', default=C.DEFAULT_MIN_SEVERITY, choices=C.SEVERITY_ORDER)
     ap.add_argument('--out')
     a = ap.parse_args(argv)
     g = Graph(a.graph)
     s, d = V.resolve(g, a.route[0]), V.resolve(g, a.route[1])
     route = find_route(g, (s[0], s[1]), (d[0], d[1]))
-    truth, first, st = replay(g, route, (d[0], d[1]), a.speed, 5.0, a.seed, a.decel)
+    truth, first, st = replay(g, route, (d[0], d[1]), a.speed, 5.0, a.seed, a.decel, C.A_LAT, a.min_severity)
     text, ok = report(a.route[0], a.route[1], route, truth, first, st, a.speed, a.decel)
     print(text)
     if a.out:

@@ -64,3 +64,11 @@ NOT re-run: the benchmark (`BENCHMARK.md` is from commit dd77b97; the matcher/sn
   (6 runs: 2 directions x 15/25/33 m/s); ~10% of fixes are low-confidence (no speed advised). Reports: `tesla/nav/validation/curve/`.
 - Not done / next: replay against a REAL logged drive (user's map_*.jsonl) to compare announcements with what the car actually did; decide how the message is transported
   (cereal) - separate step, still advisory only; approach-speed/braking fields exist in `advise()` but are not part of the announcement by request.
+
+## Update 2 - CurveCue comparison (github.com/mhathiyari/curve-call, MIT; web demo https://mhathiyari.github.io/curve-call/)
+The user tested that demo on Bucharest-Fundulea (15 curves: 2 gentle, 5 moderate, 4 firm, 4 sharp) and said it is what they want. Its engine is the same pipeline as ours
+(10 m interpolation, Menger curvature, segmentation, lateral-g speed). Adopted from it (not copied code): severity bands by radius (gentle > 200 m, moderate 100-200, firm 50-100,
+sharp 25-50, hairpin < 25), direction, spoken text ("Sharp left ahead, slow to 35"), and 'standard' verbosity (announce moderate and tighter; gentle only on request).
+Result on our graph (offline, existing matcher, 25 m/s, 5 m noise): Bucuresti->Fundulea **15 curves announced (6 moderate, 4 firm, 4 sharp, 1 hairpin)**, Fundulea->Bucuresti 12; each once,
+0 duplicates, distances only shrink. Routes differ from the demo's (theirs 39.6 km, ours 41.2 km via the A2), so the counts agree but are not the same curves.
+Not adopted yet (CurveCue has them): compound/S-bend merging, 'tightening' modifier, companion mode without a destination (walk forward along the road at forks), trigger-distance timing.

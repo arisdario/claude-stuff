@@ -42,18 +42,39 @@ def _sample(points, cum, s0, s1, step=STEP_M):
     return out
 
 
-def curvatures(samples, span_m=SPAN_M):
+# severity bands by curve radius: the same bands CurveCue uses (github.com/mhathiyari/curve-call, MIT licence): gentle > 200 m, moderate 100-200, firm 50-100, sharp 25-50, hairpin < 25
+SEVERITY_ORDER = ('gentle', 'moderate', 'firm', 'sharp', 'hairpin')
+DEFAULT_MIN_SEVERITY = 'moderate'          # CurveCue's 'standard' verbosity: moderate and tighter are announced; 'gentle' only if asked for
+SEVERITY_BANDS = ((25.0, 'hairpin'), (50.0, 'sharp'), (100.0, 'firm'), (200.0, 'moderate'), (1e9, 'gentle'))
+
+
+def severity(radius_m):
+    return next(name for limit, name in SEVERITY_BANDS if radius_m < limit)
+
+
+def narration(sev, direction, speed_ms, unit='kmh'):
+    """e.g. 'Sharp right ahead, slow to 40' (speed rounded to 5 km/h; moderate/gentle bends are announced without a speed)"""
+    if sev in ('gentle', 'moderate'):
+        return '%s %s ahead' % (sev.capitalize(), direction)
+    return '%s %s ahead, slow to %d' % ('Hairpin' if sev == 'hairpin' else sev.capitalize(), direction, int(round(speed_ms * 3.6 / 5.0)) * 5)
+
+
+def curvatures(samples, span_m=SPAN_M, with_sign=False):
     """kappa (1/m) per sample (Menger over +-span, 3-point median filter against single-vertex noise); 0 where the baseline does not fit"""
     k = max(1, int(round(span_m / STEP_M)))
     raw = [0.0] * len(samples)
+    sgn = [0.0] * len(samples)
     for i in range(k, len(samples) - k):
         a, b, c = samples[i - k], samples[i], samples[i + k]
         ab, bc, ca = geo.hav(a[1], a[2], b[1], b[2]), geo.hav(b[1], b[2], c[1], c[2]), geo.hav(c[1], c[2], a[1], a[2])
         mlat = 111320.0
         mlon = mlat * math.cos(math.radians(b[1]))
         ax, ay, cx, cy = (a[2] - b[2]) * mlon, (a[1] - b[1]) * mlat, (c[2] - b[2]) * mlon, (c[1] - b[1]) * mlat
-        raw[i] = 2.0 * abs(ax * cy - ay * cx) / max(ab * bc * ca, 1e-9)
-    return [sorted(raw[max(0, i - 1):i + 2])[len(raw[max(0, i - 1):i + 2]) // 2] for i in range(len(raw))]
+        cross = ax * cy - ay * cx                    # (a-b) x (c-b): > 0 means the road bends to the RIGHT travelling a -> b -> c (east/north axes)
+        raw[i] = 2.0 * abs(cross) / max(ab * bc * ca, 1e-9)
+        sgn[i] = cross
+    filt = [sorted(raw[max(0, i - 1):i + 2])[len(raw[max(0, i - 1):i + 2]) // 2] for i in range(len(raw))]
+    return (filt, sgn) if with_sign else filt
 
 
 def find_curves(points, cum, s_now, horizon_m=HORIZON_M, a_lat=A_LAT):
@@ -62,7 +83,7 @@ def find_curves(points, cum, s_now, horizon_m=HORIZON_M, a_lat=A_LAT):
     samples = _sample(points, cum, s_from, min(s_now + horizon_m + SPAN_M, cum[-1]))
     if len(samples) < 5:
         return []
-    kap = curvatures(samples)
+    kap, sgn = curvatures(samples, with_sign=True)
     vc = [max(V_FLOOR, min(255.0, math.sqrt(a_lat / x))) if x > 1e-6 else 255.0 for x in kap]
     out, i, n = [], 0, len(samples)
     while i < n:
@@ -72,7 +93,9 @@ def find_curves(points, cum, s_now, horizon_m=HORIZON_M, a_lat=A_LAT):
                 j += 1
             if j - i + 1 >= MIN_CURVE_SAMPLES:
                 b = min(range(i, j + 1), key=lambda q: vc[q])
-                out.append({'dist_m': samples[b][0] - s_now, 'radius_m': 1.0 / max(kap[b], 1e-9), 'v_curve': vc[b], 'start_m': samples[i][0] - s_now, 'end_m': samples[j][0] - s_now})
+                rad = 1.0 / max(kap[b], 1e-9)
+                dirn = 'right' if sgn[b] > 0 else 'left'
+                out.append({'dist_m': samples[b][0] - s_now, 'radius_m': rad, 'severity': severity(rad), 'direction': dirn, 'text': narration(severity(rad), dirn, vc[b]), 'v_curve': vc[b], 'start_m': samples[i][0] - s_now, 'end_m': samples[j][0] - s_now})
             i = j + 1
         else:
             i += 1
@@ -100,18 +123,20 @@ class CurveAnnouncer(object):
     MERGE_M = 5.0
     PASSED_M = 10.0
 
-    def __init__(self):
+    def __init__(self, min_severity=DEFAULT_MIN_SEVERITY):
         self.curves, self.next_id = {}, 1
+        self.min_rank = SEVERITY_ORDER.index(min_severity)
 
     def update(self, progress, confidence, curves):
         new, passed = [], []
+        curves = [c for c in curves if SEVERITY_ORDER.index(c['severity']) >= self.min_rank]
         if progress is not None and confidence == 'high':
             for c in curves:
                 a0, a1, ab = progress + c['start_m'], progress + c['end_m'], progress + c['dist_m']
                 ov = [(min(a1, v['a1']) - max(a0, v['a0']), k) for k, v in self.curves.items() if a0 <= v['a1'] + self.MERGE_M and a1 >= v['a0'] - self.MERGE_M]
                 hit = max(ov)[1] if ov else None
                 if hit is None:
-                    self.curves[self.next_id] = {'id': self.next_id, 'a0': a0, 'a1': a1, 'abs': ab, 'radius_m': c['radius_m'], 'speed_ms': c['v_curve']}
+                    self.curves[self.next_id] = {'id': self.next_id, 'a0': a0, 'a1': a1, 'abs': ab, 'radius_m': c['radius_m'], 'speed_ms': c['v_curve'], 'severity': c['severity'], 'direction': c['direction'], 'text': c['text']}
                     new.append(self.next_id)
                     self.next_id += 1
                 else:
@@ -119,13 +144,14 @@ class CurveAnnouncer(object):
                     v['a0'], v['a1'] = min(v['a0'], a0), max(v['a1'], a1)
                     if c['v_curve'] <= v['speed_ms'] or ab == v['abs']:                  # radius/speed follow the tightest point seen
                         v['abs'], v['radius_m'], v['speed_ms'] = ab, c['radius_m'], c['v_curve']
+                        v['severity'], v['direction'], v['text'] = c['severity'], c['direction'], c['text']
         out = []                                    # distance_m = distance to where the bend STARTS (0 = in it)
         for k in sorted(self.curves):
             v = self.curves[k]
             if progress is not None and progress > v['a1'] + self.PASSED_M:
                 passed.append(k)
                 continue
-            out.append({'id': k, 'new': k in new, 'distance_m': None if progress is None else max(0.0, v['a0'] - progress), 'radius_m': v['radius_m'], 'speed_ms': v['speed_ms']})
+            out.append({'id': k, 'new': k in new, 'distance_m': None if progress is None else max(0.0, v['a0'] - progress), 'radius_m': v['radius_m'], 'speed_ms': v['speed_ms'], 'severity': v['severity'], 'direction': v['direction'], 'text': v['text']})
         for k in passed:
             del self.curves[k]
         return {'new': new, 'passed': passed, 'active': out}
@@ -133,11 +159,11 @@ class CurveAnnouncer(object):
 
 class CurveAhead(object):
     """Wraps a Navigator only to know WHERE on the route the car is and HOW SURE that is. update() returns the advisory dict (see publish())."""
-    def __init__(self, graph, destination, a_lat=A_LAT, decel=DECEL, horizon_m=HORIZON_M, navigator=None):
+    def __init__(self, graph, destination, a_lat=A_LAT, decel=DECEL, horizon_m=HORIZON_M, navigator=None, min_severity=DEFAULT_MIN_SEVERITY):
         self.nav = navigator or Navigator(graph, destination)
         self.a_lat, self.decel, self.horizon = a_lat, decel, horizon_m
         self._last_prog, self._last_t = None, None
-        self.announcer = CurveAnnouncer()
+        self.announcer = CurveAnnouncer(min_severity)
 
     def start(self, lat, lon, heading=None):
         self.nav.plan(lat, lon, heading)
