@@ -44,3 +44,5 @@ separate test, and the deciding one for a C920 road camera.
 Logitech C920 (046d:082d, label V-U0028), plugged straight into the EON, car parked: `./uvctest 046d:082d 1280 720 30` -> **MJPEG 1280x720 @ 30 fps, 297 frames in 9.9 s = 30.0 fps, average frame 130,721 bytes (~31 Mbit/s), VERDICT OK**,
 `frame.jpg` saved. Exposure priority off and autofocus off are both available. Required: the local libuvc patch in `libuvc/src/stream.c` (the payload-size equality check made every mode fail with "Invalid mode" -51 on this camera).
 Not yet tested: a long run (10 min: `./uvctest 046d:082d 1280 720 30 600`), panda + camera + power through a hub on the step-down supply, the picture itself (focus/exposure/mount), and anything on the openpilot side.
+
+**10-minute run (EON on the 12 V step-down, no panda, camera straight into the EON):** `UVC_FOCUS=0 ./uvctest 046d:082d 1280 720 30 600` -> 18,001 frames in 600.0 s = **30.0 fps**, average frame 185,180 bytes (~44 Mbit/s), VERDICT OK. No restart or dropout.
