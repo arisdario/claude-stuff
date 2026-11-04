@@ -183,6 +183,12 @@ reboot
 Notes
 - Start order matters: openpilot first, then the ignition script, then the replay. The ignition script refuses to run with a panda or `boardd` present.
 - **Calibration:** without `--car-calib` the script swaps in a neutral calibration and puts yours back on Ctrl+C (`/data/bench_calibration_backup.json`). With it, openpilot keeps whatever is stored; delete `/data/params/d/CalibrationParams` first if you want to watch it learn from zero. Do not trust a calibration learned from a screen.
+- **Learned vehicle parameters (important):** the replay feeds real steering angles and speeds while the camera sees a still scene, so
+  `paramsd` learns nonsense (a steering ratio near double the car's, a tiny tyre stiffness) and SAVES it in `/data/params/d/LiveParameters`.
+  The next real drive then shows "Vehicle Parameter Identification Failed" and steers with a doubled gain: it oscillates. `bench_started.py`
+  now saves the car's values at start and puts them back on Ctrl+C (`/data/bench_liveparameters_backup.json`). If a bench run ended any other
+  way (reboot, power cut) run `python3 .../bench_started.py --restore` BEFORE driving. If the file already holds bad values (steerRatio far from
+  the car's `interface.py` value, stiffnessFactor at 0.5), delete it first: `rm /data/params/d/LiveParameters`, then start the bench.
 - **Switch files** read by `launch_chffrplus.sh` (only if that edit was made): `/data/no_loggerd` and `/data/no_mapcurved` keep those processes from starting. `rm` them to turn them back on, then restart.
 - `"waiting for CarParams"` and the uploader's `KeyError: 'dongle_id'` lines in the `bench` pane are normal on the bench.
 - Measuring the EON's CPU and heat on the bench: `tesla/traffic/README.md`.

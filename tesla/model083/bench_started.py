@@ -98,11 +98,46 @@ def calib_neutral(params):
   print('bench calibration: straight ahead (your car calibration saved in %s, restored on Ctrl+C)' % CALIB_BACKUP)
 
 
+LIVE_KEY = 'LiveParameters'
+LIVE_BACKUP = '/data/bench_liveparameters_backup.json'    # the car's learned steering ratio / tyre stiffness while the bench test runs
+
+
+def live_restore(params):
+  """put the car's learned vehicle parameters back (also run at start, in case a previous bench run did not finish).
+  WHY: the bench replays real steering angles and speeds while the camera sees a still scene, so paramsd learns nonsense (a huge
+  steering ratio, a tiny tyre stiffness) and SAVES it; the next real drive then starts with a doubled steering gain and oscillates."""
+  if not os.path.exists(LIVE_BACKUP):
+    return
+  saved = open(LIVE_BACKUP).read()
+  if saved == 'NONE':
+    params.delete(LIVE_KEY)
+  else:
+    params.put(LIVE_KEY, saved.encode('utf8'))
+  os.remove(LIVE_BACKUP)
+  print('restored your car\'s learned vehicle parameters: %s' % (saved if saved != 'NONE' else '(none)'))
+
+
+def live_backup(params):
+  cur = params.get(LIVE_KEY)
+  with open(LIVE_BACKUP, 'w') as f:
+    f.write(cur.decode('utf8') if cur else 'NONE')
+  print('your learned vehicle parameters are saved in %s and put back on Ctrl+C (the replay would otherwise corrupt them)' % LIVE_BACKUP)
+
+
 def main():
   ap = argparse.ArgumentParser()
   ap.add_argument('--car-calib', action='store_true',
                   help="keep the car's calibration (default: straight ahead, right for a video recorded by an EON)")
+  ap.add_argument('--restore', action='store_true',
+                  help="only put back the saved calibration and learned vehicle parameters, then exit (use it if a bench run ended without Ctrl+C, e.g. after a reboot)")
   args = ap.parse_args()
+  if args.restore:
+    from common.params import Params
+    p_ = Params()
+    calib_restore(p_)
+    live_restore(p_)
+    print('done (nothing was saved from a bench run)' if not os.path.exists(LIVE_BACKUP) else '')
+    return
   if panda_on_usb():
     sys.exit('STOP: a panda is connected over USB. This is for the bench only - unplug it.')
   procs = panda_processes()
@@ -114,6 +149,8 @@ def main():
   from common.params import Params
   params = Params()
   calib_restore(params)                    # left over from an interrupted run
+  live_restore(params)                     # left over from an interrupted run
+  live_backup(params)                      # paramsd keeps learning during the replay and saves it: protect the car's values
   if not args.car_calib:
     calib_neutral(params)                  # before ignition: calibrationd reads it when it starts
   def _stop(*_):
@@ -133,6 +170,7 @@ def main():
     pm.send('health', health_msg(False))
     time.sleep(0.5)
   calib_restore(params)
+  live_restore(params)
   print('done. Reboot to go back to normal (openpilot with boardd).')
 
 
