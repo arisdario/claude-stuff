@@ -28,3 +28,11 @@ def test_toggle_left_on_at_boot_starts_radarweb_and_names_are_configurable():
   sw = ps.Switch({'switch_param': 'MyToggle'}, d)
   sw.step(start_web=lambda c: calls.append('web_start') or 'ok', stop_web=lambda c: 'x', diag=lambda c, w: 'x')
   assert calls == ['web_start']
+
+
+def test_binary_params_do_not_crash():
+  d = tempfile.mkdtemp()
+  open(os.path.join(d, 'Blob'), 'wb').write(b'\x12\x9f\xff\x00binary')
+  os.mkdir(os.path.join(d, 'subdir'))
+  assert isinstance(ps.rd('Blob', d), str) and ps.rd('subdir', d) is None and ps.rd('missing', d) is None
+  assert ps.Switch({}, d).step(start_web=lambda c: 'x', stop_web=lambda c: 'x', diag=lambda c, w: 'x') == []

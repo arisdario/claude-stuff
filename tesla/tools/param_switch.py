@@ -36,22 +36,31 @@ def log(msg):
 
 
 def rd(name, params=None):
+  """value as text; params can be binary (capnp blobs): read bytes, decode leniently, never raise."""
   try:
-    return open(os.path.join(params or PARAMS, name)).read().strip()
-  except OSError:
+    with open(os.path.join(params or PARAMS, name), 'rb') as f:
+      return f.read(512).decode('utf8', 'replace').strip()
+  except (OSError, IOError):          # missing, a directory, or removed while reading
     return None
 
 
 def watch_names(params=None, interval=1.0):
   params = params or PARAMS
-  prev = {n: rd(n, params) for n in os.listdir(params)}
-  print('watching %s - press a toggle in the app' % params)
+  def snap():
+    try:
+      return {n: rd(n, params) for n in os.listdir(params)}
+    except OSError:
+      return {}
+  prev = snap()
+  print('watching %s (%d params) - press a toggle in the app' % (params, len(prev)))
+  sys.stdout.flush()
   while True:
     time.sleep(interval)
-    cur = {n: rd(n, params) for n in os.listdir(params)}
+    cur = snap()
     for n in sorted(set(cur) | set(prev)):
       if cur.get(n) != prev.get(n):
-        print('%s: %r -> %r' % (n, prev.get(n), cur.get(n)))
+        print('%s: %r -> %r' % (n, (prev.get(n) or '')[:60], (cur.get(n) or '')[:60]))
+        sys.stdout.flush()
     prev = cur
 
 
