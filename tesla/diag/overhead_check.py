@@ -52,6 +52,8 @@ def phase(seconds, label):
   out = {'label': label, 'model_hz': cnt['model'] / seconds, 'model_worst_ms': 1e3 * worst['model'], 'ctl_hz': cnt['controlsState'] / seconds,
          'ctl_worst_ms': 1e3 * worst['controlsState'], 'cpu_total_pct': avg(cpu), 'temp_max_c': max(temps) if temps else None,
          'procs': {k: round(avg(v), 1) for k, v in per.items() if any(key in k for key in ('camerad', 'modeld', 'controlsd', 'plannerd', 'collector'))}}
+  del socks                      # close the subscriptions: an undrained reader left open would itself be evicted by the publishers
+  import gc; gc.collect()
   print(json.dumps(out))
   return out
 
