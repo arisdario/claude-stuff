@@ -79,21 +79,27 @@ class Sim(object):
 
 
 class Clock(object):
-  def __init__(self):
+  def __init__(self, coupled=False):
     self.t = 1000.0
     self.sim = None
+    self.coupled = coupled                  # True: simulated time also advances by the REAL time spent processing (a slow reader really falls behind)
+    self.last = time.perf_counter()
 
   def __call__(self):
     return self.t
 
   def sleep(self, dt):
+    if self.coupled:
+      now = time.perf_counter()
+      dt = dt + (now - self.last)
+      self.last = now
     self.t += dt
     self.sim.step(self.t)
 
 
-def run_sim(scen, dur, cfg=None, check_every=None):
+def run_sim(scen, dur, cfg=None, check_every=None, coupled=False):
   root = tempfile.mkdtemp(prefix='diagtest_')
-  bus, clk = FakeMsg(), Clock()
+  bus, clk = FakeMsg(), Clock(coupled)
   sim = Sim(bus, scen)
   clk.sim = sim
   cfg = core.merged_cfg(dict({'queue_max': 10 ** 7}, **(cfg or {})))      # the sim runs ~40x real time
@@ -250,3 +256,25 @@ def test_image_quality_flip_swaps_top_bottom():
   a = sources.image_quality(b.getvalue(), False)
   f = sources.image_quality(b.getvalue(), True)
   assert a['model_view_top'] > a['model_view_bottom'] and f['model_view_top'] < f['model_view_bottom']
+
+
+def test_slow_reader_sheds_load_and_keeps_ticking_without_false_anomalies():
+  """the failure seen on the EON: extraction slower than the stream -> unbounded backlog, 1 Hz tick starved, false delay anomalies."""
+  import time as _t
+  orig = sources.Extractor.__call__
+
+  def slow(self, svc, ev, rt):
+    _t.sleep(0.03)                        # every extracted message costs 30 ms real time (the EON: ~1.5 ms in good times, far more when starved)
+    return orig(self, svc, ev, rt)
+  sources.Extractor.__call__ = slow
+  try:
+    coll, root, rc = run_sim({}, 8, {"work_s": 0.02, 'max_backlog': 200, 'stride': {'controlsState': 1, 'carState': 1, 'can': 1}}, coupled=True)
+  finally:
+    sources.Extractor.__call__ = orig
+  diag = [json.loads(l) for l in open(os.path.join(coll.root, 'performance', 'trace.jsonl')) if '"s":"diag"' in l]
+  assert len(diag) >= 5, len(diag)                         # the 1 Hz tick kept running in spite of the overload
+  assert max(d.get('pending', 0) for d in diag) <= 400
+  assert diag[-1].get('shed', 0) > 0
+  kinds = {k for e in coll.done for k in e['kinds']}
+  assert 'ipc_delay_high' not in kinds and 'camera_frame_delayed' not in kinds, kinds    # a lagging reader must not blame the car
+  shutil.rmtree(root)

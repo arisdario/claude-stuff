@@ -8,6 +8,7 @@ never touches CAN transmit and never imports control code. Runs at nice +10 and 
 Pause/resume at any time:  echo 0 > /data/params/d/DiagEnabled   (1 = record, missing = record)
 """
 import argparse
+import collections
 import json
 import os
 import platform
@@ -271,19 +272,48 @@ def run(coll, src, args, cfg, stop, sysmon=None, grabber=None, usb=sources.usb_s
   q_last = 0.0
   errs = 0
   paused = False
+  pending = collections.deque()
+  shed = 0
+  n_seen = {}
+  COUNTED = ('controlsState', 'carState', 'can')
+  stride = dict(cfg.get('stride', {'controlsState': 5, 'carState': 5, 'can': 2}))
+  coll.det.stride_ctl = stride.get('controlsState', 1)
+  work_s, max_backlog = cfg.get('work_s', 0.03), cfg.get('max_backlog', 800)
   t_end = clock() + args.duration if args.duration else None
   while not stop['flag'] and (t_end is None or clock() < t_end):
     t_loop = time.perf_counter()
     try:
-      msgs = src.poll() if not paused else []
-      for svc, ev, rt in msgs:
+      if not paused:
+        for item in src.poll():
+          pending.append(item)
+      # work is bounded per pass: a pass never takes more than work_s, the rest stays queued; the 1 Hz tick below always runs on time.
+      t_work = time.perf_counter() + work_s
+      lag_now = 0.0
+      while pending and time.perf_counter() < t_work:
+        svc, ev, rt = pending.popleft()
+        lt = (getattr(ev, 'logMonoTime', 0) or 0) / 1e9
+        if svc in COUNTED:
+          coll.note_msg(svc, lt, rt)               # cheap: producer timestamp + read delay only
+          n_seen[svc] = n_seen.get(svc, 0) + 1
+          if n_seen[svc] % stride.get(svc, 1):
+            continue                                # sampled stream: not every message is extracted
+        if lt:
+          lag_now = rt - lt
         if svc == 'can':
-          coll.ingest_can(rt, (getattr(ev, 'logMonoTime', 0) or 0) / 1e9, sources.can_frames(ev))
+          coll.ingest_can(rt, lt, sources.can_frames(ev))
           continue
         rec = ex(svc, ev, rt)
         if rec:
           coll.ingest(rec)
           trk.feed(rec)
+      # shed load instead of falling further behind: if more than max_backlog messages are waiting, drop the oldest (counted, logged once per second)
+      if len(pending) > max_backlog:
+        drop = len(pending) - max_backlog // 4
+        for _ in range(drop):
+          pending.popleft()
+        shed += drop
+      coll.det.lagging = lag_now > 0.3 or len(pending) > max_backlog // 2
+      msgs = pending
       now = clock()
       if not args.no_frames and now >= next_grab:
         next_grab = now + 0.1
@@ -324,6 +354,12 @@ def run(coll, src, args, cfg, stop, sysmon=None, grabber=None, usb=sources.usb_s
           d = coll.self_stats(now)
           d['depth_max'] = src.take_depth() if hasattr(src, 'take_depth') else {}
           d['paused'] = False
+          d['shed'] = shed
+          d['pending'] = len(pending)
+          d['read_lag_s'] = round(getattr(coll, 'read_lag', 0.0), 3)
+          if shed and shed != getattr(coll, '_shed_logged', 0):
+            coll._shed_logged = shed
+            coll.trigger('collector_overload', {'shed_total': shed, 'pending': len(pending)}, now)
           coll.ingest(d)
         coll.w.put_bytes(status_p, json.dumps({'rt': now, 'wall': time.time(), 'paused': paused, 'events': len(coll.done) + len(coll.events),
                                               'counts': dict(coll.counts), 'disk': coll.disk_state, 'free_mb': round(getattr(coll, 'free_mb', 0)),

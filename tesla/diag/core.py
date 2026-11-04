@@ -46,7 +46,9 @@ DEFAULT_CFG = {
   'frame_hz': 3.0, 'frame_keep_s': 100.0,
   'max_ring_mb': 250.0, 'max_trace_mb': 400.0, 'max_events': 40, 'event_cooldown_s': 12.0, 'max_event_s': 150.0,
   'min_free_mb': 1500.0, 'hard_free_mb': 600.0,
-  'queue_max': 30000, 'poll_s': 0.01,
+  'queue_max': 30000, 'poll_s': 0.01, 'work_s': 0.03, 'max_backlog': 800,
+  # the steering loop (0.3-0.4 Hz wiggle) needs ~20 Hz, not 100 Hz: every Nth message of these services is extracted (all are still counted for timing)
+  'stride': {'controlsState': 5, 'carState': 5, 'can': 2},
   # full-rate ring: the steering loop signals stay at full rate, bulk/auxiliary streams are capped (Hz). 0 = unlimited
   'ring_hz': {'carControl': 50, 'sensorEvents': 50, 'pathPlan': 25, 'liveParameters': 4, 'liveCalibration': 4, 'can_raw_other': 25},
   'can_raw_full': [0x370, 0x488, 0x0E],
@@ -234,12 +236,14 @@ class Detectors(object):
     self.loc_ok = {}
     self.sat_n = 0
     self.ctl_last = None
+    self.stride_ctl = 1                           # controlsState is sampled every Nth message: gap thresholds scale with it
     self.vego = 0.0
     self.enabled = False
     self.en_since = None
     self.health_last = None
     self.cam_bad = 0
     self.orient_bad = 0
+    self.lagging = False                          # set by the collector when it reads late: rt-based checks are then meaningless and skipped
 
   def feed(self, r):
     s = r.get('s')
@@ -266,7 +270,7 @@ class Detectors(object):
           out.append(('camera_frame_late', {'frameId': fid, 'interval_s': round(dt, 4), 'nominal_s': round(nom, 4)}))
     self.fr_last = (fid, eof)
     age = r['rt'] - eof
-    if age > T['frame_age_s']:
+    if age > T['frame_age_s'] and not self.lagging:
       out.append(('camera_frame_delayed', {'frameId': fid, 'age_s': round(age, 4)}))
     return out
 
@@ -337,10 +341,11 @@ class Detectors(object):
         out.append(('controller_saturation', {'field': r.get('sat_field')}))
     else:
       self.sat_n = 0
-    if self.ctl_last is not None and t - self.ctl_last > T['ctl_gap_s']:
-      out.append(('control_loop_gap', {'gap_s': round(t - self.ctl_last, 4)}))
-    self.ctl_last = t
-    if r.get('lt') is not None and t - r['lt'] > T['ipc_delay_s']:
+    tl = r.get('lt') or t                          # loop gaps on the producer's own clock
+    if self.ctl_last is not None and tl - self.ctl_last > T['ctl_gap_s'] * max(1, self.stride_ctl):
+      out.append(('control_loop_gap', {'gap_s': round(tl - self.ctl_last, 4)}))
+    self.ctl_last = tl
+    if r.get('lt') is not None and t - r['lt'] > T['ipc_delay_s'] and not self.lagging:
       out.append(('ipc_delay_high', {'service': 'controlsState', 'delay_s': round(t - r['lt'], 4)}))
     if act is not None and self.enabled:
       out += self._osc(t, act)
@@ -407,7 +412,7 @@ class Detectors(object):
     if r.get('v') is not None:
       self.vego = r['v']
     out = []
-    if r.get('lt') is not None and r['rt'] - r['lt'] > self.thr['ipc_delay_s']:
+    if r.get('lt') is not None and r['rt'] - r['lt'] > self.thr['ipc_delay_s'] and not self.lagging:
       out.append(('ipc_delay_high', {'service': 'carState', 'delay_s': round(r['rt'] - r['lt'], 4)}))
     return out
 
@@ -435,7 +440,7 @@ class Detectors(object):
   # ---- raw CAN
   def d_can_raw(self, r):
     T, out = self.thr, []
-    a, t = r['addr'], r['rt']
+    a, t = r['addr'], (r.get('lt') or r['rt'])      # producer time
     last = self.can_t.get(a)
     if last is not None:
       dt = t - last
@@ -543,7 +548,7 @@ class Collector(object):
     s, rt = rec['s'], rec['rt']
     self.counts[s] += 1
     self.rate[s].append(rt)
-    if s in ('frame', 'model', 'controlsState', 'carState', 'cameraOdometry', 'liveLocationKalman'):
+    if s in ('frame', 'model', 'cameraOdometry', 'liveLocationKalman'):
       k = rec.get('lt', rt) if s != 'frame' else rec.get('eof', rt)      # use the producer's own timestamp where there is one
       p = self.iv_last.get(s)
       if p is not None and k > p:
@@ -555,7 +560,7 @@ class Collector(object):
           self.iv['model_exec'].append(rec['exec'])
       if s == 'frame' and rec.get('eof'):
         self.iv['frame_age'].append(rt - rec['eof'])
-      if rec.get('lt') is not None and s in ('controlsState', 'carState', 'model'):
+      if rec.get('lt') is not None and s == 'model':
         self.iv['ipc_' + s].append(rt - rec['lt'])
     line = self._line(rec)
     rk = s
@@ -565,22 +570,34 @@ class Collector(object):
       lim = None if rec['addr'] in self.cfg['can_raw_full'] else self.cfg['ring_hz'].get('can_raw_other')
     ring_ok = True
     if lim:
-      if rt - self.ring_last.get(rk, -1e9) < 1.0 / lim:
+      tk = rec.get('lt') or rt
+      if tk - self.ring_last.get(rk, -1e9) < 1.0 / lim:
         ring_ok = False
       else:
-        self.ring_last[rk] = rt
+        self.ring_last[rk] = tk
     if self.disk_state != 'hard':
       if ring_ok:
         self.w.put_line(self._seg(rt), line)
       g = GROUPS.get(s, 'performance')
       if s not in ('can_raw',) and self.disk_state == 'ok' and self.trace_bytes < self.cfg['max_trace_mb'] * 1e6:
-        if rt - self.trace_last.get(s, -1e9) >= 1.0 / self.cfg['trace_hz'] or s in ('perf', 'diag', 'usb', 'cam_quality', 'health'):
-          self.trace_last[s] = rt
+        tk = rec.get('lt') or rt                         # producer time: a lagging reader must not change what is kept
+        if tk - self.trace_last.get(s, -1e9) >= 1.0 / self.cfg['trace_hz'] or s in ('perf', 'diag', 'usb', 'cam_quality', 'health'):
+          self.trace_last[s] = tk
           self.w.put_line(os.path.join(self.root, g, 'trace.jsonl'), line)
           self.trace_bytes += len(line)
     for kind, detail in self.det.feed(rec):
       self.trigger(kind, detail, rt)
     self.ingest_s += time.perf_counter() - t0
+
+  def note_msg(self, s, lt, rt):
+    """cheap per-message bookkeeping (no JSON, no extraction): interval of the producer's own timestamps and read delay."""
+    p = self.iv_last.get('n_' + s)
+    if p is not None and lt > p:
+      self.iv[s].append(lt - p)
+    self.iv_last['n_' + s] = lt
+    self.read_lag = rt - lt
+
+  read_lag = 0.0
 
   def ingest_can(self, rt, lt, frames):
     """frames: list of (addr, bus, data bytes). Counts all, records + decodes the watched/spec'd addresses."""
