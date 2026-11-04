@@ -12,6 +12,7 @@ extern "C" {
 int ext_c920_wanted(void);                      // 1 if /data/camera_source (or env CAMERA_SOURCE) says "external"
 int ext_c920_present(void);                     // 1 if a C920 (046d:082d) is on the USB bus
 int ext_c920_selftest(int timeout_ms);          // opens it, streams, waits for a frame, closes: 1 = it works
+int ext_c920_acquire(int present_wait_ms, int attempts, int timeout_ms);   // startup: wait for the camera to appear, then self-test with retries: 1 = it works
 void ext_c920_configure(CameraState *rear);     // gives the rear CameraState the geometry of a 1164x874 BGR picture
 int ext_c920_start(CameraState *rear, VisionBuf *bufs);   // starts the capture thread (it dispatches frames into rear->camera_tb); 0 = ok
 void ext_c920_stop(void);

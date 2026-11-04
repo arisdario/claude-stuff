@@ -292,6 +292,29 @@ int ext_c920_selftest(int timeout_ms) {
   return ok;
 }
 
+// Be patient at startup: after a cold boot the C920 can show up on USB, and deliver its first frames, later than camerad starts.
+// Wait up to present_wait_ms for the camera to appear, then try the self-test up to `attempts` times. Called only when "external" is selected.
+int ext_c920_acquire(int present_wait_ms, int attempts, int timeout_ms) {
+  int waited = 0;
+  while (!ext_c920_present() && waited < present_wait_ms) {
+    if (do_exit) return 0;
+    usleep(500000);
+    waited += 500;
+  }
+  if (!ext_c920_present()) {
+    fprintf(stderr, "external camera: C920 not found on USB after %d ms, using the phone camera\n", waited);
+    return 0;
+  }
+  if (waited > 0) fprintf(stderr, "external camera: C920 appeared after %d ms\n", waited);
+  for (int i = 0; i < attempts; i++) {
+    if (do_exit) return 0;
+    if (ext_c920_selftest(timeout_ms)) return 1;
+    fprintf(stderr, "external camera: attempt %d of %d failed%s\n", i + 1, attempts, i + 1 < attempts ? ", retrying" : ", using the phone camera");
+    if (i + 1 < attempts) sleep(1);
+  }
+  return 0;
+}
+
 void ext_c920_configure(CameraState *rear) {
   int aw = OUT_W, ah = OUT_H;
 #ifndef EXT_C920_TEST

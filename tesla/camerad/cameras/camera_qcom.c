@@ -359,7 +359,7 @@ void cameras_init(DualCameraState *s) {
   // external road camera: only when asked for AND it works right now; any failure leaves the phone's rear camera in use
   g_ext = 0;
   if (ext_c920_wanted()) {
-    if (ext_c920_present() && ext_c920_selftest(4000)) {
+    if (ext_c920_acquire(12000, 3, 4000)) {
       g_ext = 1;
       ext_c920_configure(&s->rear);
       LOG("*** ROAD CAMERA: external C920 (phone rear camera not used) ***");

@@ -39,3 +39,11 @@ The C920's blue LED is switched off by camerad at every start (the camera forget
 extension unit (selector 9, "LED1 Mode" = 0). It was verified on a real C920 with `tesla/usbcam/ledtool` (`set 0` printed VERIFIED). camerad uses the same
 strict checks (control must be readable, settable and 5 bytes long; only the 2 mode bits change; read back) and logs
 `external camera: LED off verified`. To leave the LED on auto, create `/data/camera_led_auto`. Nothing else about the camera is changed.
+
+## Startup patience (cold boots)
+
+After a cold boot the C920 can show up on USB, and deliver its first frames, later than camerad starts. Camerad used to try once and fall
+back to the phone's camera for the whole session. It now waits up to 12 s for the camera to appear and tries the self-test up to 3 times (4 s each),
+logging `C920 appeared after N ms` / `attempt N of 3 failed, retrying`. If the C920 is selected but really absent, it still falls back to the phone
+camera after the wait (so a boot without the camera takes up to 12 s longer). Look for the result in the log:
+`tmux capture-pane -p -t bench -S -5000 | grep -i "ROAD CAMERA\|external camera"`.
