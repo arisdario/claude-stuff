@@ -316,7 +316,13 @@ int g_prof_tick = 0;
 void profile_tick(uvc_device_handle_t *devh, double now_s) {
   char mb[32];
   struct stat st1, st2;
-  bool changed = false;
+  bool changed = false, do_factory = false;
+  char cmd[32];
+  if (access("/data/camera_cmd", F_OK) == 0) {                                // one-shot commands from the radarweb page
+    read_text("/data/camera_cmd", cmd, sizeof cmd);
+    unlink("/data/camera_cmd");
+    if (!strncmp(cmd, "factory", 7)) do_factory = true;
+  }
   if (stat("/data/camera_profile.conf", &st1) == 0 && st1.st_mtime != g_conf_mtime) {
     char buf[8192];
     read_text("/data/camera_profile.conf", buf, sizeof buf);
@@ -324,11 +330,15 @@ void profile_tick(uvc_device_handle_t *devh, double now_s) {
     g_conf = camprof::parse_conf(buf, &warn);
     g_conf_mtime = st1.st_mtime; changed = true;
     if (!warn.empty()) fprintf(stderr, "external camera: profile file: %s", warn.c_str());
+  } else if (stat("/data/camera_profile.conf", &st1) != 0 && g_conf_mtime != 0) {   // file removed (restore defaults): back to empty profiles
+    g_conf = camprof::Conf(); g_conf_mtime = 0; changed = true;
   }
   if (stat("/data/camera_profile", &st2) == 0 && st2.st_mtime != g_mode_mtime) { g_mode_mtime = st2.st_mtime; changed = true; }
   read_text("/data/camera_profile", mb, sizeof mb);
   camprof::Mode want = camprof::parse_mode(mb);
-  if (want == camprof::M_OFF && g_prof.mode == camprof::M_OFF) return;       // default: nothing here touches the camera
+  bool idle = want == camprof::M_OFF && g_prof.mode == camprof::M_OFF && !do_factory;
+  ++g_prof_tick;
+  if (idle && g_prof_tick % 5) return;                                           // default: nothing is written; the status (read-only) is refreshed every 5 s
   UvcIface cam(devh);
   camprof::Measure m;
   m.luma = g_luma;
@@ -337,19 +347,23 @@ void profile_tick(uvc_device_handle_t *devh, double now_s) {
   m.frames_ok = (now_ns() - g_last_frame_ns) < 1000000000LL;
   m.stream_age_s = (now_ns() - g_stream_start_ns) / 1e9;
   g_prof.log.clear();
-  g_prof.tick(now_s, want, changed, g_conf, m, cam);
+  if (!idle) g_prof.tick(now_s, want, changed, g_conf, m, cam);
+  if (do_factory && m.frames_ok) g_prof.factory(now_s, cam);
   for (size_t i = 0; i < g_prof.log.size(); i++) {
     fprintf(stderr, "external camera: %s\n", g_prof.log[i].c_str());
     FILE *lf = fopen("/data/camera_profile.log", "a");
     if (lf) { fprintf(lf, "%ld %s\n", (long)time(NULL), g_prof.log[i].c_str()); fclose(lf); }
   }
-  if (++g_prof_tick % 2 == 0) {                                                // status for the radarweb page, every 2 s
-    int ae = -1, wb = -1, wbk = -1, pl = -1;
-    cam.get(camprof::AE_MODE, &ae); cam.get(camprof::WB_AUTO, &wb); cam.get(camprof::WB_KELVIN, &wbk); cam.get(camprof::POWER_LINE, &pl);
-    char js[768];
-    snprintf(js, sizeof js, "{\"mode\":\"%s\",\"active\":\"%s\",\"luma\":%.1f,\"exposure\":%d,\"gain\":%d,\"ae_mode\":%d,\"wb_auto\":%d,\"wb_kelvin\":%d,\"power_line\":%d,\"reason\":\"%s\",\"error\":\"%s\",\"t\":%ld}\n",
-             camprof::mode_name(g_prof.mode), g_prof.active < 0 ? "none" : (g_prof.active ? "night" : "day"), m.luma, m.exposure, m.gain, ae, wb, wbk, pl,
-             g_prof.last_reason.c_str(), g_prof.last_error.c_str(), (long)time(NULL));
+  if (!idle || g_prof_tick % 5 == 0) {                                           // status for the radarweb page (read-only requests)
+    int v[camprof::N_CTL];
+    for (int i = 0; i < camprof::N_CTL; i++) if (!cam.get(i, &v[i])) v[i] = -1;
+    uint8_t aep = 255; uvc_get_ae_priority(devh, &aep, UVC_GET_CUR);
+    char js[1024];
+    snprintf(js, sizeof js, "{\"mode\":\"%s\",\"active\":\"%s\",\"luma\":%.1f,\"ae_mode\":%d,\"exposure\":%d,\"gain\":%d,\"brightness\":%d,\"contrast\":%d,\"saturation\":%d,\"sharpness\":%d,"
+             "\"backlight\":%d,\"wb_auto\":%d,\"wb_kelvin\":%d,\"power_line\":%d,\"ae_priority\":%d,\"apply_count\":%d,\"apply_ok\":%d,\"reason\":\"%s\",\"error\":\"%s\",\"t\":%ld}\n",
+             camprof::mode_name(g_prof.mode), g_prof.active < 0 ? "none" : (g_prof.active ? "night" : "day"), m.luma, v[camprof::AE_MODE], v[camprof::EXPOSURE], v[camprof::GAIN],
+             v[camprof::BRIGHTNESS], v[camprof::CONTRAST], v[camprof::SATURATION], v[camprof::SHARPNESS], v[camprof::BACKLIGHT], v[camprof::WB_AUTO], v[camprof::WB_KELVIN],
+             v[camprof::POWER_LINE], aep == 255 ? -1 : (int)aep, g_prof.apply_count, g_prof.apply_ok ? 1 : 0, g_prof.last_reason.c_str(), g_prof.last_error.c_str(), (long)time(NULL));
     FILE *f = fopen("/data/camera_status.json.tmp", "w");
     if (f) { fputs(js, f); fclose(f); rename("/data/camera_status.json.tmp", "/data/camera_status.json"); }
   }

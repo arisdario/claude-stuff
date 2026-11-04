@@ -61,6 +61,15 @@ int main() {
     for (int t = 500; t < 560; t++) step(t, 130, 80, 30);
     assert(c.active == 0 && switches == s1 + 1);                                       // after dwell + confirm: back to DAY, exactly one more switch
     (void)s1; }
+  // factory defaults: applied as a transaction, counted, and a failure restores
+  { Mock m; m.val[BRIGHTNESS] = 200; m.val[POWER_LINE] = 2; m.val[AE_MODE] = 1; Controller c; assert(c.factory(5, m));
+    assert(m.val[BRIGHTNESS] == 128 && m.val[POWER_LINE] == 1 && m.val[AE_MODE] == 8 && c.apply_count == 1 && c.apply_ok); }
+  { Mock m; m.val[BRIGHTNESS] = 200; m.fail_set = SHARPNESS; m.val[SHARPNESS] = 77; Controller c; assert(!c.factory(5, m));
+    assert(m.val[BRIGHTNESS] == 200 && c.apply_count == 1 && !c.apply_ok && !c.last_error.empty()); }
+  // apply_count changes on every profile attempt (the web page uses it to confirm that camerad really applied the request)
+  { Mock m; Controller c; Measure me; me.frames_ok = true; me.stream_age_s = 20; Conf cf2; cf2.day.v[POWER_LINE] = 1;
+    c.tick(10, M_DAY, true, cf2, me, m); assert(c.apply_count == 1 && c.apply_ok);
+    cf2.day.v[BRIGHTNESS] = 140; c.tick(20, M_DAY, true, cf2, me, m); assert(c.apply_count == 2 && m.val[BRIGHTNESS] == 140); }
   puts("camera_profile: all tests passed");
   return 0;
 }

@@ -2061,13 +2061,19 @@ img{max-width:100vw;max-height:100vh;object-fit:contain;background:#000}
 <div id=fx style="display:none;position:fixed;left:10px;bottom:8px;background:rgba(28,33,40,.9);padding:8px 12px;border-radius:12px;font-size:14px">Focus (C920) <input id=fr type=range min=0 max=250 step=5 value=0 style="width:240px;vertical-align:middle"> <b id=fv>0</b> <label style="margin-left:10px"><input id=fl type=checkbox> upside down</label> <button id=lb style="margin-left:10px">LED off now</button> <label><input id=lk type=checkbox checked> keep off</label> <span id=fs style="opacity:.8"></span><div style="opacity:.7;font-size:12px">0 = far (the road) .. 250 = near</div></div>
 <canvas id=gd style="position:fixed;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
 <div id=lv style="position:fixed;left:50%;transform:translateX(-50%);bottom:8px;background:rgba(28,33,40,.9);padding:8px 12px;border-radius:12px;font-size:14px;max-width:92vw;text-align:center"><label><input id=lg type=checkbox> level guides</label> &nbsp; tilt <input id=lt type=range min=-150 max=150 step=1 value=0 style="width:200px;vertical-align:middle"> <b id=lr>0.0&deg;</b> <button id=l0 style="margin-left:6px">0</button><details id=lh style="opacity:.8;font-size:12px;margin-top:3px"><summary style="cursor:pointer">how to use</summary>Green lines are level on the screen. Turn the tilt slider until the real horizon (or a lane edge) in the picture lines up with them: the number is the camera ROLL (positive = the picture's right side was higher). View-only: nothing is sent to the car. Sky must be at the TOP; if it is at the bottom tick &ldquo;upside down&rdquo; (a 180&deg; turn, not a mirror: left/right stay correct).</details></div>
-<div id=pfb style="position:fixed;left:10px;top:44px"><button id=pfo style="font:600 13px system-ui;padding:5px 12px;border-radius:14px;border:0;background:rgba(60,66,75,.85);color:#fff;cursor:pointer">Image profile</button></div>
-<div id=pf style="display:none;position:fixed;left:10px;top:76px;bottom:8px;width:min(560px,96vw);overflow:auto;background:rgba(20,24,30,.96);padding:10px 12px;border-radius:12px;font-size:13px;z-index:30">
-<div><b>C920 image profile</b> &nbsp;<button class=pm data-m=off>off</button> <button class=pm data-m=day>DAY</button> <button class=pm data-m=night>NIGHT</button> <button class=pm data-m=auto>AUTO</button></div>
-<div id=pst style="margin:6px 0;opacity:.9">...</div><div id=pmsg style="opacity:.8;min-height:16px"></div>
-<div style="opacity:.7;margin:4px 0">off = camera exactly as before. A box left empty = that control is not touched. Changes apply live to the selected profile; if the camera refuses a value everything is put back. Exposure/gain only act with ae_mode 1 (manual); exposure units 100 &micro;s, max 500 (50 ms = the whole 20 fps frame).</div>
-<table id=pt style="width:100%;border-collapse:collapse"></table>
-<div style="margin-top:8px"><b>AUTO switching</b> (hysteresis)</div><table id=pa style="width:100%;border-collapse:collapse"></table>
+<div id=pfb style="position:fixed;left:10px;top:44px"><button id=pfo style="font:600 13px system-ui;padding:5px 12px;border-radius:14px;border:0;background:rgba(60,66,75,.85);color:#fff;cursor:pointer">C920 camera settings</button></div>
+<div id=pf style="display:none;position:fixed;left:10px;top:76px;bottom:8px;width:min(600px,96vw);overflow:auto;background:rgba(20,24,30,.97);padding:10px 12px;border-radius:12px;font-size:13px;z-index:30">
+<div><b>C920 camera settings</b> &nbsp;mode: <button class=pm data-m=auto>AUTO</button> <button class=pm data-m=day>DAY</button> <button class=pm data-m=night>NIGHT</button> <button class=pm data-m=off>off</button></div>
+<div style="opacity:.7;margin:3px 0">off = the camera behaves exactly as before (its own automatic image). Resolution, frame rate, rotation, crop and calibration are never changed here.</div>
+<div id=pst style="margin:6px 0"></div>
+<div><b>Active camera values</b> (read back from the camera)</div><table id=pact style="width:100%;border-collapse:collapse"></table>
+<div style="margin-top:8px"><b>Edit profile:</b> <button class=pe data-p=day>DAY</button> <button class=pe data-p=night>NIGHT</button> <button class=pe data-p=auto>AUTO switching</button>
+ <span style="opacity:.7">empty = do not touch that control</span></div>
+<table id=pt style="width:100%;border-collapse:collapse;margin-top:4px"></table>
+<div style="margin-top:8px"><button id=pap style="background:#178644;color:#fff;padding:6px 14px;border:0;border-radius:8px;font-weight:600">Apply</button>
+ <button id=psug>Load suggested starting values</button> <button id=pdef style="margin-left:8px">Restore defaults</button> <button id=prel>Reload saved</button></div>
+<div id=pmsg style="margin:6px 0;min-height:18px"></div>
+<div style="opacity:.7">Suggested values are untested starting points, not tuned for your car: they only fill the boxes; nothing changes until you press Apply. Exposure units are 100 &micro;s (max 500 = 50 ms = one whole frame at the current 20 fps). Exposure and gain only act with ae_mode 1 (manual); colour temperature only with wb_auto 0. Settings are saved in /data and survive reboots.</div>
 <pre id=plog style="white-space:pre-wrap;opacity:.8;margin-top:8px"></pre></div>
 <details id=nav><summary>☰</summary><div><a href="/">road view</a><a href="/top">top-down view</a><a href="/near">near view</a></div></details>
 <script>
@@ -2092,19 +2098,37 @@ function fget(){fetch('/api/camfocus').then(function(r){return r.json()}).then(f
 fl.onchange=function(){FLIP=fl.checked;xf();fetch('/api/camfocus',{method:'POST',headers:{'X-Cam':'1'},body:'flip='+(fl.checked?1:0)}).then(function(r){return r.json()}).then(function(d){document.getElementById('fs').textContent=d.msg||''}).catch(function(){})};
 fr.oninput=function(){document.getElementById('fv').textContent=fr.value;clearTimeout(ft);ft=setTimeout(function(){fetch('/api/camfocus',{method:'POST',headers:{'X-Cam':'1'},body:String(fr.value)}).then(function(r){return r.json()}).then(function(d){document.getElementById('fs').textContent=d.msg||''}).catch(function(){})},250)};
 
-var PF=null,PFOPEN=false;
-function pfpost(b,cb){fetch('/api/camprofile',{method:'POST',headers:{'X-Cam':'1'},body:b}).then(function(r){return r.json()}).then(function(d){document.getElementById('pmsg').textContent=d.msg||'';if(cb)cb(d)}).catch(function(){})}
-function pfbuild(d){var KEYS=Object.keys(d.keys),h='<tr><th></th><th>DAY</th><th>NIGHT</th></tr>';
- KEYS.forEach(function(k){h+='<tr><td>'+k+' <span style="opacity:.6">'+d.keys[k][0]+'..'+d.keys[k][1]+'</span></td>'+['day','night'].map(function(p){var v=d.conf[p+'.'+k];return '<td><input data-k="'+p+'.'+k+'" type=number style="width:70px" value="'+(v===undefined||v<0?'':v)+'" placeholder="-"></td>'}).join('')+'</tr>'});
+var PF=null,PFOPEN=false,PEDIT='day',PDIRTY=false,PWAIT=null;
+var SUG={day:{ae_mode:8,power_line:1,backlight:0,brightness:112,contrast:128,saturation:128,sharpness:128,wb_auto:1},
+ night:{ae_mode:1,exposure:250,gain:160,power_line:1,backlight:0,brightness:128,contrast:135,saturation:140,sharpness:96,wb_auto:1}};
+var HELP={ae_mode:'1 manual exposure, 8 auto',exposure:'100 us units, manual only',gain:'0..255, manual only',wb_auto:'1 auto, 0 manual',wb_kelvin:'only with wb_auto 0',power_line:'1 = 50 Hz, 2 = 60 Hz',backlight:'0 off, 1 on'};
+function pfmsg(t,bad){var e=document.getElementById('pmsg');e.textContent=t||'';e.style.color=bad?'#f87171':''}
+function pfpost(b,cb){fetch('/api/camprofile',{method:'POST',headers:{'X-Cam':'1'},body:b}).then(function(r){return r.json()}).then(function(d){pfmsg(d.msg,!d.ok);if(cb)cb(d)}).catch(function(){pfmsg('request failed',true)})}
+function pfbuild(){var d=PF,h='';
+ if(PEDIT==='auto'){Object.keys(d.auto_keys).forEach(function(k){var v=d.conf['auto.'+k];h+='<tr><td>'+k+' <span style="opacity:.6">'+d.auto_keys[k][0]+'..'+d.auto_keys[k][1]+'</span></td><td><input data-k="auto.'+k+'" type=number style="width:90px" value="'+(v===undefined?'':v)+'" placeholder="default"></td></tr>'});
+  h+='<tr><td colspan=2 style="opacity:.7">NIGHT after the dark evidence holds for night_confirm_s; DAY after the bright evidence holds for day_confirm_s; never two switches within min_dwell_s.</td></tr>'}
+ else Object.keys(d.keys).forEach(function(k){var v=d.conf[PEDIT+'.'+k];h+='<tr><td>'+k+' <span style="opacity:.6">'+d.keys[k][0]+'..'+d.keys[k][1]+'</span></td><td><input data-k="'+PEDIT+'.'+k+'" type=number style="width:90px" value="'+(v===undefined||v<0?'':v)+'" placeholder="-"></td><td style="opacity:.6">'+(HELP[k]||'')+'</td></tr>'});
+ h+=PEDIT==='auto'?'':'<tr><td>Low Light Compensation</td><td colspan=2 style="opacity:.8">= auto-exposure priority, currently <b>'+(d.status&&d.status.ae_priority>=0?d.status.ae_priority:'?')+'</b> (0 = constant frame rate). Not editable here: 1 lets the camera drop the frame rate in the dark.</td></tr>';
  document.getElementById('pt').innerHTML=h;
- var A=Object.keys(d.auto_keys),g='';A.forEach(function(k){var v=d.conf['auto.'+k];g+='<tr><td>'+k+' <span style="opacity:.6">'+d.auto_keys[k][0]+'..'+d.auto_keys[k][1]+'</span></td><td><input data-k="auto.'+k+'" type=number style="width:70px" value="'+(v===undefined?'':v)+'" placeholder="default"></td></tr>'});
- document.getElementById('pa').innerHTML=g;
- Array.prototype.forEach.call(document.querySelectorAll('#pt input,#pa input'),function(i){i.onchange=function(){var v=i.value===''?-1:i.value;if(v===-1&&i.dataset.k.indexOf('auto.')===0)return;pfpost('set='+i.dataset.k+'='+v)}})}
+ Array.prototype.forEach.call(document.querySelectorAll('#pt input'),function(i){i.oninput=function(){PDIRTY=true;pfmsg('edited - press Apply')}});
+ Array.prototype.forEach.call(document.querySelectorAll('.pe'),function(b){b.style.background=b.dataset.p===PEDIT?'#178644':'';b.onclick=function(){PEDIT=b.dataset.p;pfbuild()}})}
+function pfcollect(){var parts=[];Array.prototype.forEach.call(document.querySelectorAll('#pt input'),function(i){var k=i.dataset.k;if(k.indexOf('auto.')===0){if(i.value!=='')parts.push(k+'='+i.value)}else parts.push(k+'='+(i.value===''?-1:i.value))});return parts.join(';')}
 function pfupd(){fetch('/api/camprofile').then(function(r){return r.json()}).then(function(d){
- if(!PF)pfbuild(d);PF=d;
- Array.prototype.forEach.call(document.querySelectorAll('.pm'),function(b){b.style.background=b.dataset.m===d.mode?'#178644':'';b.onclick=function(){pfpost('mode='+b.dataset.m,pfupd)}});
- var s=d.status,t='mode <b>'+d.mode+'</b>';if(s&&d.status_age!==null&&d.status_age<10){t+=' &middot; active <b>'+s.active+'</b> &middot; luma '+s.luma+' &middot; exposure '+s.exposure+' ('+(s.exposure/10)+' ms) &middot; gain '+s.gain+' &middot; ae_mode '+s.ae_mode+' &middot; WB '+(s.wb_auto?'auto':s.wb_kelvin+' K')+' &middot; power line '+(s.power_line==1?'50 Hz':s.power_line==2?'60 Hz':s.power_line)+(s.error?' &middot; <span style="color:#f87171">last error: '+s.error+'</span>':'')}else t+=' &middot; no live status from camerad (not running, or an older camerad without profiles)';
- document.getElementById('pst').innerHTML=t;document.getElementById('plog').textContent=(d.log||[]).join('\n')}).catch(function(){})}
+ var first=!PF;PF=d;if(first||!PDIRTY)pfbuild();
+ Array.prototype.forEach.call(document.querySelectorAll('.pm'),function(b){b.style.background=b.dataset.m===d.mode?'#178644':'';b.onclick=function(){pfpost('mode='+b.dataset.m,function(){setTimeout(pfupd,900)})}});
+ var s=d.status,live=s&&d.status_age!==null&&d.status_age<12;
+ document.getElementById('pst').innerHTML='mode <b>'+d.mode.toUpperCase()+'</b> &middot; active profile <b>'+(live?s.active:'?')+'</b>'+(live&&s.error?' &middot; <span style="color:#f87171">last error: '+s.error+'</span>':'')+(live?'':' &middot; <span style="color:#fbbf24">no live status from camerad (not running, an older camerad without profiles, or the camera is not streaming)</span>');
+ if(live){var rows=[['exposure',s.exposure+' ('+(s.exposure/10)+' ms)'],['gain',s.gain],['ae_mode',s.ae_mode+(s.ae_mode==8?' (auto)':s.ae_mode==1?' (manual)':'')],['brightness',s.brightness],['contrast',s.contrast],['saturation',s.saturation],['sharpness',s.sharpness],['white balance',s.wb_auto?'auto ('+s.wb_kelvin+' K)':s.wb_kelvin+' K manual'],['backlight comp.',s.backlight],['power line',s.power_line==1?'50 Hz':s.power_line==2?'60 Hz':s.power_line],['Low Light Comp. (AE priority)',s.ae_priority],['picture brightness (road)',s.luma]];
+  document.getElementById('pact').innerHTML=rows.map(function(r){return '<tr><td style="opacity:.7">'+r[0]+'</td><td>'+r[1]+'</td></tr>'}).join('')}
+ if(PWAIT&&live){if(s.apply_count!==PWAIT.n){pfmsg(s.apply_ok?'applied and verified by camerad':'camerad could NOT apply it: '+s.error+' (previous settings restored)',!s.apply_ok);PWAIT=null;PDIRTY=false}
+  else if(Date.now()-PWAIT.t>8000){pfmsg(d.mode==='off'?'saved. Mode is off, so nothing is applied: choose AUTO, DAY or NIGHT.':'saved, but camerad has not confirmed within 8 s (camera not streaming yet?)',d.mode!=='off');PWAIT=null;PDIRTY=false}}
+ document.getElementById('plog').textContent=(d.log||[]).join('\n')}).catch(function(){})}
+document.getElementById('pap').onclick=function(){var b=pfcollect();if(!b){pfmsg('nothing to apply');return}
+ var n=(PF&&PF.status)?PF.status.apply_count:0;pfpost('bulk='+b,function(d){if(d.ok)PWAIT={n:n,t:Date.now()};setTimeout(pfupd,1200)})};
+document.getElementById('psug').onclick=function(){if(PEDIT==='auto')return;var sg=SUG[PEDIT];Array.prototype.forEach.call(document.querySelectorAll('#pt input'),function(i){var k=i.dataset.k.split('.')[1];i.value=sg[k]===undefined?'':sg[k]});PDIRTY=true;pfmsg('suggested '+PEDIT.toUpperCase()+' values loaded - press Apply to use them')};
+document.getElementById('pdef').onclick=function(){if(!confirm('Restore defaults?\n\nAll saved profile values are cleared, the mode goes to off and the camera gets its factory image settings (50 Hz mains).'))return;
+ var n=(PF&&PF.status)?PF.status.apply_count:0;pfpost('defaults',function(d){if(d.ok){PWAIT={n:n,t:Date.now()};PDIRTY=false;PF=null}setTimeout(pfupd,1500)})};
+document.getElementById('prel').onclick=function(){PDIRTY=false;PF=null;pfupd();pfmsg('')};
 document.getElementById('pfo').onclick=function(){PFOPEN=!PFOPEN;document.getElementById('pf').style.display=PFOPEN?'block':'none';if(PFOPEN)pfupd()};
 setInterval(function(){if(PFOPEN)pfupd()},2000);
 
@@ -2157,9 +2181,44 @@ def camprof_get():
             'status_age': (time.time() - st['t']) if st and 't' in st else None}
 
 
+def _camprof_check(k, v):
+    sec, name = k.split('.', 1)
+    v = int(float(v))
+    if sec in ('day', 'night') and name in CAMPROF: lo, hi = CAMPROF[name]; unset_ok = True
+    elif sec == 'auto' and name in CAMPROF_AUTO: lo, hi = CAMPROF_AUTO[name]; unset_ok = False
+    else: raise ValueError('unknown setting %s' % k)
+    if name == 'ae_mode' and v not in (-1, 1, 8): raise ValueError('ae_mode must be 1 (manual) or 8 (auto)')
+    if v == -1 and unset_ok: return v
+    if not (lo <= v <= hi): raise ValueError('%s must be %d..%d (or empty = untouched)' % (k, lo, hi))
+    return v
+
+
+def _camprof_write(c):
+    tmp = CAMPROF_CONF + '.tmp'
+    with open(tmp, 'w') as f:
+        f.write('# written by radarweb /video; -1 = camera control untouched\n')
+        for kk in sorted(c): f.write('%s=%d\n' % (kk, int(c[kk])))
+    os.replace(tmp, CAMPROF_CONF)
+
+
 def camprof_post(txt):
     txt = txt.strip()
     try:
+        if txt.startswith('bulk='):          # all-or-nothing: every value is validated before anything is written
+            c = camprof_conf(); n = 0
+            for item in txt[5:].split(';'):
+                if not item.strip(): continue
+                k, v = item.split('=', 1)
+                c[k.strip()] = _camprof_check(k.strip(), v); n += 1
+            _camprof_write(c)
+            return {'ok': True, 'msg': '%d values saved; waiting for camerad to apply and verify them...' % n}
+        if txt == 'defaults':               # camera factory values (50 Hz mains), profiles cleared, mode off
+            try: os.remove(CAMPROF_CONF)
+            except FileNotFoundError: pass
+            with open('/data/camera_profile.tmp', 'w') as f: f.write('off\n')
+            os.replace('/data/camera_profile.tmp', '/data/camera_profile')
+            with open('/data/camera_cmd', 'w') as f: f.write('factory\n')
+            return {'ok': True, 'msg': 'defaults requested: profiles cleared, mode off, camera factory values being applied...'}
         if txt.startswith('mode='):
             m = txt[5:].strip()
             if m not in ('off', 'day', 'night', 'auto'): return {'ok': False, 'msg': 'unknown mode'}
@@ -2521,7 +2580,7 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._authed(): return
         if self.path.split('?')[0] == '/api/camprofile' and self.headers.get('X-Cam') == '1':
-            try: n_ = int(self.headers.get('Content-Length', '0') or '0'); txt_ = self.rfile.read(min(n_, 120)).decode('utf8', 'replace')
+            try: n_ = int(self.headers.get('Content-Length', '0') or '0'); txt_ = self.rfile.read(min(n_, 1200)).decode('utf8', 'replace')
             except Exception: txt_ = ''
             self._json(camprof_post(txt_))
         elif self.path.split('?')[0] == '/api/camfocus' and self.headers.get('X-Cam') == '1':

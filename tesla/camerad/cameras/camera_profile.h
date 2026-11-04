@@ -158,7 +158,26 @@ class Controller {
   bool have_orig = false;
   int orig[N_CTL];
   int fails = 0;
+  int apply_count = 0;             // number of apply attempts so far (the web page waits for this to change after "Apply")
+  bool apply_ok = true;            // result of the last attempt
   std::vector<std::string> log;     // lines for the caller to print / append to /data/camera_profile.log
+
+  // "Restore defaults": the camera's own factory values (uvcdump defaults) with 50 Hz mains. Applied once, as a transaction; exposure/gain stay with the camera's auto exposure.
+  static Profile factory_profile() {
+    Profile p;
+    p.v[AE_MODE] = 8; p.v[BRIGHTNESS] = 128; p.v[CONTRAST] = 128; p.v[SATURATION] = 128; p.v[SHARPNESS] = 128;
+    p.v[BACKLIGHT] = 0; p.v[WB_AUTO] = 1; p.v[POWER_LINE] = 1;
+    return p;
+  }
+  bool factory(double t, Iface &cam) {
+    std::string err, ch;
+    bool ok = apply(cam, factory_profile(), &err, &ch);
+    apply_count++; apply_ok = ok;
+    if (ok) last_error.clear(); else last_error = err;
+    note(t, ok ? "restore defaults: factory values applied [" + ch + "]" : "restore defaults FAILED (" + err + "), previous settings restored");
+    have_orig = false; active = -1;
+    return ok;
+  }
 
   // the camera was re-opened (camerad restart of the stream): forget what we applied so the profile is applied again once it streams
   void reopened() { active = -1; have_orig = false; night_ev = day_ev = -1; }
@@ -187,6 +206,7 @@ class Controller {
     std::string err, ch;
     bool ok = apply(cam, target == 0 ? cf.day : cf.night, &err, &ch);
     t_applied = t;
+    apply_count++; apply_ok = ok;
     if (!ok) { fails++; last_error = err; note(t, std::string("profile ") + (target ? "NIGHT" : "DAY") + " FAILED (" + err + "), previous settings restored"); return; }
     fails = 0; last_error.clear();
     if (switching) { t_switch = t; note(t, std::string("profile -> ") + (target ? "NIGHT" : "DAY") + " because " + why + (ch.empty() ? "" : " [" + ch + "]")); }
