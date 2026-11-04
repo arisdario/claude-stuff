@@ -69,3 +69,12 @@ by `tesla/tests/test_camera_profile.cc` (`g++ -std=c++11 -I cameras test_camera_
 * AUTO: NIGHT after the picture/exposure evidence is "dark" continuously for `night_confirm_s` (15 s); back to DAY after "bright" for `day_confirm_s` (45 s); never two switches within `min_dwell_s` (90 s).
 * Log: `/data/camera_profile.log` (every change and the reason) and camerad's stderr; status: `/data/camera_status.json` (2 s).
 Needs camerad rebuilt (`install_external_camera.sh --yes`, openpilot stopped). Not validated for driving: test on the bench, compare frames and model output first.
+
+### Frame rate decision (2026-11-04)
+The C920 stays at **1280x720 MJPEG, 20 fps** (`SRC_FPS` in `camera_ext_c920.cc`); the camera-settings work never changes it, and auto-exposure priority stays 0 so the camera
+cannot drop the rate in the dark. 30 fps is a separate investigation after the camera integration and the steering stability are resolved; any change must be benchmarked and
+validated against model timing, frame drops, CPU usage and thermal performance (`tesla/traffic/benchmark.py`, `tesla/diag`).
+
+### Comparing profiles (`tesla/tools/camera_ab.py`)
+`python3 camera_ab.py ab --a off --b night --period 8 --rounds 6 --out /data/camera_ab/run1` alternates two modes on the same scene (it sets the mode through the same files as radarweb and waits for
+camerad's confirmation), saving frames and the model's lane/path outputs; `compare A B --out report` writes the metrics and a side-by-side page. A brighter picture is not scored as better.
