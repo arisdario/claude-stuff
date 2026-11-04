@@ -46,7 +46,7 @@ DEFAULT_CFG = {
   'frame_hz': 3.0, 'frame_keep_s': 100.0,
   'max_ring_mb': 250.0, 'max_trace_mb': 400.0, 'max_events': 40, 'event_cooldown_s': 12.0, 'max_event_s': 150.0,
   'min_free_mb': 1500.0, 'hard_free_mb': 600.0,
-  'queue_max': 30000, 'poll_s': 0.01, 'work_s': 0.03, 'max_backlog': 800,
+  'queue_max': 30000, 'quality_s': 5.0, 'proc_every': 10, 'poll_s': 0.01, 'work_s': 0.03, 'max_backlog': 800,
   # the steering loop (0.3-0.4 Hz wiggle) needs ~20 Hz, not 100 Hz: every Nth message of these services is extracted (all are still counted for timing)
   'stride': {'controlsState': 5, 'carState': 5, 'can': 2},
   # full-rate ring: the steering loop signals stay at full rate, bulk/auxiliary streams are capped (Hz). 0 = unlimited

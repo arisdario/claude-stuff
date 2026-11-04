@@ -68,9 +68,11 @@ def _sat(d, path=''):
 class Extractor(object):
   """cereal event -> flat record (detector fields) + optional generic full dump at <= full_hz per service."""
 
-  def __init__(self, full_hz=20.0):
-    self.full_dt = 1.0 / full_hz
+  def __init__(self, full_hz=1.0, ls_hz=5.0):
+    self.full_dt = 1.0 / full_hz            # capnp to_dict() is slow on the EON: the full generic dump of a message is only taken ~1 Hz
+    self.ls_dt = 1.0 / ls_hz
     self.last_full = {}
+    self.last_ls = -1e9
 
   def _full(self, svc, rt):
     if rt - self.last_full.get(svc, -1e9) >= self.full_dt:
@@ -159,7 +161,10 @@ class Extractor(object):
     d.update(des=_g(c, 'angleSteersDes'), act=_g(c, 'angleSteers'), en=_g(c, 'enabled'), v=_g(c, 'vEgo'),
              sr=_g(c, 'steerRatio'), curv=_g(c, 'curvature'), cum_lag=_g(c, 'cumLagMs'), act_cs=_g(c, 'active'))
     ls = _g(c, 'lateralControlState')
-    lsd = gen(ls) if ls is not None else None
+    lsd = None
+    if ls is not None and d['rt'] - self.last_ls >= self.ls_dt:
+      self.last_ls = d['rt']
+      lsd = gen(ls)
     if lsd:
       d['ls'] = lsd
       sf = _sat(lsd)

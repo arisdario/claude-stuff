@@ -234,10 +234,12 @@ def main(argv=None):
   ap.add_argument('--params-dir', default='/data/params/d')
   ap.add_argument('--no-frames', action='store_true')
   ap.add_argument('--duration', type=float, default=0, help='stop by itself after N seconds (tests)')
+  ap.add_argument('--profile', type=float, default=0, help='run N seconds under cProfile and print where the time goes (then exit)')
   args = ap.parse_args(argv)
   cfg = core.merged_cfg(json.load(open(args.cfg)) if args.cfg else None)
   try:
-    os.nice(10)
+    if os.nice(0) < 10:                      # start_diagnostics.sh already runs us at nice 10: do not add 10 more (19 = starved)
+      os.nice(10 - os.nice(0))
   except (OSError, AttributeError):
     pass
   stop = {'flag': False}
@@ -258,13 +260,25 @@ def main(argv=None):
     j = json.load(open(mi)); j['skipped_services'] = src.skipped; json.dump(j, open(mi, 'w'), indent=1)
   except Exception:
     pass
+  if args.profile:
+    import cProfile
+    import pstats
+    args.duration = args.profile
+    pr = cProfile.Profile()
+    pr.enable()
+    rc = run(coll, src, args, cfg, stop)
+    pr.disable()
+    st = pstats.Stats(pr)
+    st.sort_stats('cumulative').print_stats(25)
+    st.sort_stats('tottime').print_stats(15)
+    return rc
   return run(coll, src, args, cfg, stop)
 
 
 def run(coll, src, args, cfg, stop, sysmon=None, grabber=None, usb=sources.usb_scan, clock=core.boot_now, sleep=time.sleep):
   ex = sources.Extractor()
   trk = Trackers(coll)
-  sysmon = sysmon or sources.SystemSampler()
+  sysmon = sysmon or sources.SystemSampler(proc_every=cfg.get('proc_every', 10))
   grabber = grabber or sources.FrameGrabber(os.environ.get('DIAG_LIVE_JPG', '/dev/c920_live.jpg'))
   status_p = os.path.join(args.root, 'status.json')
   next_1s = next_usb = next_grab = 0.0
@@ -320,7 +334,7 @@ def run(coll, src, args, cfg, stop, sysmon=None, grabber=None, usb=sources.usb_s
         jpg, mt = grabber.grab(now)
         if jpg and not paused:
           coll.add_frame(now, jpg)
-          if now - q_last >= 1.0:
+          if now - q_last >= cfg.get('quality_s', 5.0):
             q_last = now
             fl = (rdfile('/data/camera_flip') or '0').strip() not in ('0', '')
             qd = sources.image_quality(jpg, fl)
