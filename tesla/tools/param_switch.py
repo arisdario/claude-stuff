@@ -52,13 +52,20 @@ def watch_names(params=None, interval=1.0):
     except OSError:
       return {}
   prev = snap()
-  print('watching %s (%d params) - press a toggle in the app' % (params, len(prev)))
+  print('watching %s (%d params) - press a toggle in the app; params that change constantly are ignored' % (params, len(prev)))
   sys.stdout.flush()
+  hist = {}                                   # name -> change times: anything changing more than 3 times in 10 s is openpilot noise
   while True:
     time.sleep(interval)
     cur = snap()
+    now = time.time()
     for n in sorted(set(cur) | set(prev)):
       if cur.get(n) != prev.get(n):
+        h = hist.setdefault(n, [])
+        h.append(now)
+        hist[n] = h = [t for t in h if now - t < 10]
+        if len(h) > 3:
+          continue
         print('%s: %r -> %r' % (n, (prev.get(n) or '')[:60], (cur.get(n) or '')[:60]))
         sys.stdout.flush()
     prev = cur
