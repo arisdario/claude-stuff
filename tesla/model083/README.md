@@ -259,3 +259,17 @@ to keep the fixed PCC files (harmless with the old model).
 - Anything on the road.
 
 Built against Tinkla `0.7.5.a` (BogGyver/openpilot).
+
+## Steering-wiggle investigation: `pose_watch`
+
+Read-only logger (subscribes only; no control interaction) to separate
+"model path/pose oscillates" (camera geometry, model inputs) from "path is stable
+but steering oscillates" (downstream control gain):
+
+    # EON, openpilot running; ideally `rm /data/no_loggerd` first
+    python3 /data/openpilot/tesla/tools/pose_watch.py log        # -> /data/posewatch/pose_*.jsonl
+    python3 /data/openpilot/tesla/tools/pose_watch.py summary /data/posewatch/pose_XXXX.jsonl
+
+Records model path/lanes + frameId/timestampEof/frameDropPerc, cameraOdometry
+rot/trans (+std), gyro, liveLocationKalman yaw rate, GPS bearing, controlsState
+desired vs actual angle, liveParameters, liveCalibration, carState.
