@@ -796,5 +796,5 @@ class Collector(object):
       ev.t_end = min(ev.t_end, now)
       ev.reasons.append({'t': now, 'kind': 'shutdown_before_post_window', 'detail': {}})
       self.finalize(ev)
-    ok = self.w.stop()
+    ok = self.w.stop(timeout=200.0)         # event copies (gzip of up to ~2 min of full-rate data) are slow on the EON flash/CPU
     return ok

@@ -14,8 +14,8 @@ if [ -n "$PID" ] && [ -r "/proc/$PID/cmdline" ] && tr '\0' ' ' < "/proc/$PID/cmd
   echo "stopping collector pid $PID (flushing buffers)..."
   kill -TERM "$PID"
   i=0
-  while [ $i -lt 45 ] && [ -r "/proc/$PID/cmdline" ]; do sleep 1; i=$((i+1)); done
-  if [ -r "/proc/$PID/cmdline" ]; then echo "collector did not exit in 45 s - forcing (event copies in progress may be incomplete)"; kill -KILL "$PID"; sleep 1; fi
+  while [ $i -lt 240 ] && [ -r "/proc/$PID/cmdline" ]; do sleep 1; i=$((i+1)); [ $((i % 15)) -eq 0 ] && echo "  still finishing event copies (${i}s) - the EON is slow at compressing, please wait"; done
+  if [ -r "/proc/$PID/cmdline" ]; then echo "collector did not exit in 240 s - forcing (event copies in progress may be incomplete)"; kill -KILL "$PID"; sleep 1; fi
 else
   echo "collector is not running (stopped earlier or the EON lost power) - finalizing what was recorded"
 fi
