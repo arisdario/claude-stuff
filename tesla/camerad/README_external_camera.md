@@ -55,3 +55,17 @@ deletes the file. While streaming it also re-checks the LED every 5 s and switch
 unticked creates `/data/camera_led_auto` (camerad then leaves the LED to the camera from the next camera start). Limit: when the car's USB power comes up the
 camera lights its LED by itself, and software can only switch it off once camerad is running (a few seconds after boot or openpilot start). Needs camerad rebuilt:
 `install_external_camera.sh --yes` with openpilot stopped.
+
+## DAY / NIGHT image profiles (off by default)
+`/data/camera_profile` = `off` (default, or file missing) | `day` | `night` | `auto`. Profile values live in `/data/camera_profile.conf` (`day.gain=100`, `night.exposure=300`, ...; a
+missing key or `-1` = that camera control is not touched). All editing is on the radarweb **/video** page ("Image profile" button): mode buttons, live status
+(luma, exposure, gain, WB, power line, last error), and one input per control for DAY and NIGHT plus the AUTO thresholds. Logic: `cameras/camera_profile.h`, unit-tested
+by `tesla/tests/test_camera_profile.cc` (`g++ -std=c++11 -I cameras test_camera_profile.cc`).
+* Never changed by profiles: resolution, frame rate, crop, rotation, auto-exposure priority (stays 0 = constant 20 fps), focus, LED.
+* camerad is the only camera owner, so profiles are applied by camerad itself, once the stream has run for 5 s with frames flowing.
+* Every change is a transaction: old value read, new value set and read back; any mismatch/error puts back everything changed so far. `off` restores the values the camera
+  had before the first profile was applied. Camera re-open re-applies the profile.
+* Exposure/gain only act with `ae_mode=1` (manual exposure); exposure is capped at 500 (50 ms = one frame at 20 fps); the colour temperature only with `wb_auto=0`.
+* AUTO: NIGHT after the picture/exposure evidence is "dark" continuously for `night_confirm_s` (15 s); back to DAY after "bright" for `day_confirm_s` (45 s); never two switches within `min_dwell_s` (90 s).
+* Log: `/data/camera_profile.log` (every change and the reason) and camerad's stderr; status: `/data/camera_status.json` (2 s).
+Needs camerad rebuilt (`install_external_camera.sh --yes`, openpilot stopped). Not validated for driving: test on the bench, compare frames and model output first.

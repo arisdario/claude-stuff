@@ -11,6 +11,8 @@
 #include <unistd.h>
 
 #include <jpeglib.h>
+#include <sys/stat.h>
+#include "camera_profile.h"
 #include "libuvc/libuvc.h"
 
 #ifndef EXT_C920_TEST
@@ -116,6 +118,8 @@ pthread_t g_thread;
 volatile int g_stop = 0, g_started = 0;
 volatile unsigned long g_frames = 0;
 volatile int g_flip = 0;
+volatile float g_luma = -1.f;         // mean luma of the road region of the picture the model gets (profiles / AUTO switching), measured about once a second
+volatile int64_t g_stream_start_ns = 0;
 volatile int64_t g_last_frame_ns = 0;
 CameraState *g_rear = NULL;
 VisionBuf *g_bufs = NULL;
@@ -184,6 +188,12 @@ void on_frame(uvc_frame_t *f, void *) {
     uint8_t *a = g_rgb, *z = g_rgb + (size_t)SRC_W * SRC_H * 3 - 3;
     for (; a < z; a += 3, z -= 3) { for (int k = 0; k < 3; k++) { uint8_t t = a[k]; a[k] = z[k]; z[k] = t; } }
   }
+  if (g_frames % 20 == 0) {                                                     // ~1 per second at 20 fps: a sparse sample of the lower 55% (the road), after the flip
+    long sum = 0, n = 0;
+    for (int y = SRC_H * 45 / 100; y < SRC_H * 90 / 100; y += 12)
+      for (int x = 0; x < SRC_W; x += 16) { const uint8_t *p = g_rgb + ((size_t)y * SRC_W + x) * 3; sum += (p[0] * 77 + p[1] * 150 + p[2] * 29) >> 8; n++; }
+    if (n) g_luma = (float)sum / (float)n;
+  }
   g_last_frame_ns = now_ns();
   g_frames++;
 #ifndef EXT_C920_TEST
@@ -245,8 +255,104 @@ bool ext_open() {
   g_last_frame_ns = now_ns();
   if (uvc_start_streaming(g.devh, &ctrl, on_frame, NULL, 0) < 0) { ext_close(); return false; }
   g.streaming = 1;
+  g_stream_start_ns = now_ns();
   apply_led_off(g.devh);                                            // again once streaming: the firmware may switch the LED with the stream
   return true;
+}
+
+// ---- DAY / NIGHT profiles (logic and unit tests: camera_profile.h, tests/test_camera_profile.cc). Off unless /data/camera_profile says day/night/auto.
+struct UvcIface : camprof::Iface {
+  uvc_device_handle_t *h;
+  explicit UvcIface(uvc_device_handle_t *d) : h(d) {}
+  bool get(int c, int *v) override {
+    uint8_t b8 = 0; uint16_t b16 = 0; int16_t s16 = 0; uint32_t b32 = 0;
+    switch (c) {
+      case camprof::AE_MODE: if (uvc_get_ae_mode(h, &b8, UVC_GET_CUR) < 0) return false; *v = b8; return true;
+      case camprof::EXPOSURE: if (uvc_get_exposure_abs(h, &b32, UVC_GET_CUR) < 0) return false; *v = (int)b32; return true;
+      case camprof::GAIN: if (uvc_get_gain(h, &b16, UVC_GET_CUR) < 0) return false; *v = b16; return true;
+      case camprof::BRIGHTNESS: if (uvc_get_brightness(h, &s16, UVC_GET_CUR) < 0) return false; *v = s16; return true;
+      case camprof::CONTRAST: if (uvc_get_contrast(h, &b16, UVC_GET_CUR) < 0) return false; *v = b16; return true;
+      case camprof::SATURATION: if (uvc_get_saturation(h, &b16, UVC_GET_CUR) < 0) return false; *v = b16; return true;
+      case camprof::SHARPNESS: if (uvc_get_sharpness(h, &b16, UVC_GET_CUR) < 0) return false; *v = b16; return true;
+      case camprof::BACKLIGHT: if (uvc_get_backlight_compensation(h, &b16, UVC_GET_CUR) < 0) return false; *v = b16; return true;
+      case camprof::WB_AUTO: if (uvc_get_white_balance_temperature_auto(h, &b8, UVC_GET_CUR) < 0) return false; *v = b8; return true;
+      case camprof::WB_KELVIN: if (uvc_get_white_balance_temperature(h, &b16, UVC_GET_CUR) < 0) return false; *v = b16; return true;
+      case camprof::POWER_LINE: if (uvc_get_power_line_frequency(h, &b8, UVC_GET_CUR) < 0) return false; *v = b8; return true;
+    }
+    return false;
+  }
+  bool set(int c, int v) override {
+    switch (c) {
+      case camprof::AE_MODE: return uvc_set_ae_mode(h, (uint8_t)v) >= 0;
+      case camprof::EXPOSURE: return uvc_set_exposure_abs(h, (uint32_t)v) >= 0;
+      case camprof::GAIN: return uvc_set_gain(h, (uint16_t)v) >= 0;
+      case camprof::BRIGHTNESS: return uvc_set_brightness(h, (int16_t)v) >= 0;
+      case camprof::CONTRAST: return uvc_set_contrast(h, (uint16_t)v) >= 0;
+      case camprof::SATURATION: return uvc_set_saturation(h, (uint16_t)v) >= 0;
+      case camprof::SHARPNESS: return uvc_set_sharpness(h, (uint16_t)v) >= 0;
+      case camprof::BACKLIGHT: return uvc_set_backlight_compensation(h, (uint16_t)v) >= 0;
+      case camprof::WB_AUTO: return uvc_set_white_balance_temperature_auto(h, (uint8_t)v) >= 0;
+      case camprof::WB_KELVIN: return uvc_set_white_balance_temperature(h, (uint16_t)v) >= 0;
+      case camprof::POWER_LINE: return uvc_set_power_line_frequency(h, (uint8_t)v) >= 0;
+    }
+    return false;
+  }
+};
+
+bool read_text(const char *path, char *buf, size_t n) {
+  FILE *f = fopen(path, "r");
+  if (!f) { buf[0] = 0; return false; }
+  size_t k = fread(buf, 1, n - 1, f);
+  buf[k] = 0;
+  fclose(f);
+  return true;
+}
+
+camprof::Controller g_prof;
+camprof::Conf g_conf;
+time_t g_conf_mtime = 0, g_mode_mtime = 0;
+int g_prof_tick = 0;
+
+void profile_tick(uvc_device_handle_t *devh, double now_s) {
+  char mb[32];
+  struct stat st1, st2;
+  bool changed = false;
+  if (stat("/data/camera_profile.conf", &st1) == 0 && st1.st_mtime != g_conf_mtime) {
+    char buf[8192];
+    read_text("/data/camera_profile.conf", buf, sizeof buf);
+    std::string warn;
+    g_conf = camprof::parse_conf(buf, &warn);
+    g_conf_mtime = st1.st_mtime; changed = true;
+    if (!warn.empty()) fprintf(stderr, "external camera: profile file: %s", warn.c_str());
+  }
+  if (stat("/data/camera_profile", &st2) == 0 && st2.st_mtime != g_mode_mtime) { g_mode_mtime = st2.st_mtime; changed = true; }
+  read_text("/data/camera_profile", mb, sizeof mb);
+  camprof::Mode want = camprof::parse_mode(mb);
+  if (want == camprof::M_OFF && g_prof.mode == camprof::M_OFF) return;       // default: nothing here touches the camera
+  UvcIface cam(devh);
+  camprof::Measure m;
+  m.luma = g_luma;
+  cam.get(camprof::EXPOSURE, &m.exposure);
+  cam.get(camprof::GAIN, &m.gain);
+  m.frames_ok = (now_ns() - g_last_frame_ns) < 1000000000LL;
+  m.stream_age_s = (now_ns() - g_stream_start_ns) / 1e9;
+  g_prof.log.clear();
+  g_prof.tick(now_s, want, changed, g_conf, m, cam);
+  for (size_t i = 0; i < g_prof.log.size(); i++) {
+    fprintf(stderr, "external camera: %s\n", g_prof.log[i].c_str());
+    FILE *lf = fopen("/data/camera_profile.log", "a");
+    if (lf) { fprintf(lf, "%ld %s\n", (long)time(NULL), g_prof.log[i].c_str()); fclose(lf); }
+  }
+  if (++g_prof_tick % 2 == 0) {                                                // status for the radarweb page, every 2 s
+    int ae = -1, wb = -1, wbk = -1, pl = -1;
+    cam.get(camprof::AE_MODE, &ae); cam.get(camprof::WB_AUTO, &wb); cam.get(camprof::WB_KELVIN, &wbk); cam.get(camprof::POWER_LINE, &pl);
+    char js[768];
+    snprintf(js, sizeof js, "{\"mode\":\"%s\",\"active\":\"%s\",\"luma\":%.1f,\"exposure\":%d,\"gain\":%d,\"ae_mode\":%d,\"wb_auto\":%d,\"wb_kelvin\":%d,\"power_line\":%d,\"reason\":\"%s\",\"error\":\"%s\",\"t\":%ld}\n",
+             camprof::mode_name(g_prof.mode), g_prof.active < 0 ? "none" : (g_prof.active ? "night" : "day"), m.luma, m.exposure, m.gain, ae, wb, wbk, pl,
+             g_prof.last_reason.c_str(), g_prof.last_error.c_str(), (long)time(NULL));
+    FILE *f = fopen("/data/camera_status.json.tmp", "w");
+    if (f) { fputs(js, f); fclose(f); rename("/data/camera_status.json.tmp", "/data/camera_status.json"); }
+  }
 }
 
 void *capture_thread(void *) {
@@ -254,11 +360,13 @@ void *capture_thread(void *) {
   while (!g_stop && !do_exit) {
     if (!ext_open()) { fprintf(stderr, "external camera: not available, retrying\n"); sleep(1); continue; }
     g_flip = read_int_file(FLIP_FILE, 0) ? 1 : 0;
+    g_prof.reopened();
     fprintf(stderr, "ROAD CAMERA: external C920 streaming %dx%d MJPEG @ %d fps\n", SRC_W, SRC_H, SRC_FPS);
     int last_focus = read_int_file(FOCUS_FILE, 0), tick = 0;
     while (!g_stop && !do_exit && (now_ns() - g_last_frame_ns) < 3000000000LL) {
       usleep(100000);
       if (++tick % 10 == 0) {
+        if (g.devh) profile_tick(g.devh, now_ns() / 1e9);
         if (g.devh) {                                                                   // LED: on request from the radarweb camera page (/data/camera_led_now), and re-checked every 5 s
           if (access("/data/camera_led_now", F_OK) == 0) { unlink("/data/camera_led_now"); apply_led_off(g.devh); }
           else if (tick % 50 == 0) apply_led_off(g.devh, true);                         // quiet: logs only if it had to switch the LED off again
