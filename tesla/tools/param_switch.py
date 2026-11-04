@@ -71,6 +71,39 @@ def watch_names(params=None, interval=1.0):
     prev = cur
 
 
+def unbind_c920_audio(usb_root='/sys/bus/usb/devices', unbind='/sys/bus/usb/drivers/snd-usb-audio/unbind'):
+  """detach snd-usb-audio from the C920's AUDIO interfaces (class 0x01) so its microphone never shows up as an ALSA card (it can take card0 and crash controlsd).
+  Only interfaces of device 046d:082d with bInterfaceClass 01 that are bound to snd-usb-audio are touched; the video interfaces (class 0e) are never touched.
+  Returns the list of interfaces unbound."""
+  done = []
+  try:
+    devs = os.listdir(usb_root)
+  except OSError:
+    return done
+  for d in devs:
+    p = os.path.join(usb_root, d)
+    if rd('idVendor', p) != '046d' or rd('idProduct', p) != '082d':
+      continue
+    try:
+      subs = os.listdir(p)
+    except OSError:
+      continue
+    for itf in subs:
+      ip = os.path.join(p, itf)
+      if ':' not in itf or rd('bInterfaceClass', ip) != '01':
+        continue
+      drv = os.path.join(ip, 'driver')
+      if not os.path.islink(drv) or os.path.basename(os.path.realpath(drv)) != 'snd-usb-audio':
+        continue
+      try:
+        with open(unbind, 'w') as f:
+          f.write(itf)
+        done.append(itf)
+      except OSError:
+        pass
+  return done
+
+
 class Switch(object):
   """pure state machine: feed it the current values; it calls the actions on changes only."""
 
@@ -109,12 +142,17 @@ def main():
     print('already running')
     return
   sw = Switch(launcher.conf())
+  last_audio = 0.0
   log('param_switch started: radarweb <- %s, diagnostics <- %s' % (sw.c.get('switch_param', '/data/web_switch'), sw.c.get('diag_param', 'RecordFront')))
   while True:
     try:
       sw.c = launcher.conf()
       for what, res in sw.step():
         log('%s: %s' % (what, str(res).replace('\n', ' | ')[:300]))
+      if sw.c.get('c920_audio_off', '0') == '1' and time.time() - last_audio > 5.0:       # opt-in: /data/launcher.conf c920_audio_off=1
+        last_audio = time.time()
+        for itf in unbind_c920_audio():
+          log('c920 audio interface %s unbound from snd-usb-audio (video untouched)' % itf)
     except Exception as e:
       log('error: %r' % (e,))
     time.sleep(2.0)
