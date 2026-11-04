@@ -13,9 +13,12 @@ for R in /data/claude-stuff /data/openpilot; do
   [ -d "$R/.git" ] && { echo "$R: $(git -C $R log -1 --format='%h %cd %s' 2>&1 | cut -c1-120)  branch: $(git -C $R rev-parse --abbrev-ref HEAD 2>&1)"; git -C $R status --short 2>/dev/null | head -8; }
 done
 S "openpilot processes"
-for p in manager controlsd plannerd radard modeld camerad boardd loggerd uploader deleter paramsd locationd calibrationd sensord thermald ui mapcurved radarweb collector; do
-  n=$(for d in /proc/[0-9]*; do tr '\0' ' ' < $d/cmdline 2>/dev/null | grep -q "$p" && echo x; done | wc -l); echo "$p: $n"
+PL=/tmp/eon_snapshot_ps.$$
+for d in /proc/[0-9]*; do [ -r $d/cmdline ] && echo "$(tr '\0' ' ' < $d/cmdline 2>/dev/null)"; done > $PL    # one pass over /proc (300 forks), not one per name
+for p in manager controlsd plannerd radard modeld camerad boardd loggerd uploader deleter paramsd locationd calibrationd sensord thermald ui mapcurved radarweb collector launcher; do
+  echo "$p: $(grep -c "$p" $PL)"
 done
+rm -f $PL
 S "CPU load / memory"; head -4 /proc/loadavg; grep -E "MemTotal|MemAvailable|MemFree" /proc/meminfo
 S "temperatures (C)"
 for z in /sys/class/thermal/thermal_zone*; do t=$(cat $z/type 2>/dev/null); v=$(cat $z/temp 2>/dev/null); echo "$t $v"; done | head -30
