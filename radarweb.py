@@ -2050,6 +2050,7 @@ html,body{margin:0;height:100%;background:#0d0f12;color:#cfd6dd;font-family:syst
 #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
 img{max-width:100vw;max-height:100vh;object-fit:contain;background:#000}
 #msg{position:fixed;left:0;right:0;top:45%;text-align:center;font-size:18px;opacity:.85;padding:0 20px}
+#lv{z-index:20}@media (max-width:700px){#lv{bottom:112px!important}}
 #tabs{position:fixed;left:10px;top:8px}#tabs a{display:inline-block;margin-right:8px;padding:5px 12px;border-radius:14px;background:rgba(60,66,75,.8);color:#fff;text-decoration:none;font-size:14px}
 #tabs a.on{background:#178644}
 #nav{position:fixed;right:10px;bottom:8px;z-index:50}#nav summary{list-style:none;cursor:pointer;width:36px;height:36px;display:flex;align-items:center;justify-content:center;background:#1c2128;border:1px solid #30363d;border-radius:8px;font-size:18px;color:#cfd6dd}#nav summary::-webkit-details-marker{display:none}#nav[open] summary{background:#262c35}#nav>div{position:absolute;right:0;bottom:44px;background:#1c2128;border:1px solid #30363d;border-radius:8px;padding:6px 0;min-width:190px;box-shadow:0 8px 24px rgba(0,0,0,.45)}#nav a,#nav>div span{display:block;padding:9px 14px;color:#cfd6dd;text-decoration:none;font-size:13px;white-space:nowrap}#nav a:hover{background:#262c35}
@@ -2058,6 +2059,8 @@ img{max-width:100vw;max-height:100vh;object-fit:contain;background:#000}
 <div id=tabs><a href="?cam=road" id=t_road>road</a><a href="?cam=driver" id=t_driver>driver</a><a href="?cam=wide" id=t_wide>wide</a></div>
 <div id=rec><button id=rb>REC</button><span id=rs></span><div id=rf></div><div style="margin-top:10px"><button id=cb class=sec>Reset calibration</button></div><div id=cs></div></div>
 <div id=fx style="display:none;position:fixed;left:10px;bottom:8px;background:rgba(28,33,40,.9);padding:8px 12px;border-radius:12px;font-size:14px">Focus (C920) <input id=fr type=range min=0 max=250 step=5 value=0 style="width:240px;vertical-align:middle"> <b id=fv>0</b> <label style="margin-left:10px"><input id=fl type=checkbox> upside down</label> <span id=fs style="opacity:.8"></span><div style="opacity:.7;font-size:12px">0 = far (the road) .. 250 = near</div></div>
+<canvas id=gd style="position:fixed;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
+<div id=lv style="position:fixed;left:50%;transform:translateX(-50%);bottom:8px;background:rgba(28,33,40,.9);padding:8px 12px;border-radius:12px;font-size:14px;max-width:92vw;text-align:center"><label><input id=lg type=checkbox> level guides</label> &nbsp; tilt <input id=lt type=range min=-150 max=150 step=1 value=0 style="width:200px;vertical-align:middle"> <b id=lr>0.0&deg;</b> <button id=l0 style="margin-left:6px">0</button><details id=lh style="opacity:.8;font-size:12px;margin-top:3px"><summary style="cursor:pointer">how to use</summary>Green lines are level on the screen. Turn the tilt slider until the real horizon (or a lane edge) in the picture lines up with them: the number is the camera ROLL (positive = the picture's right side was higher). View-only: nothing is sent to the car. Sky must be at the TOP; if it is at the bottom tick &ldquo;upside down&rdquo; (a 180&deg; turn, not a mirror: left/right stay correct).</details></div>
 <details id=nav><summary>☰</summary><div><a href="/">road view</a><a href="/top">top-down view</a><a href="/near">near view</a></div></details>
 <script>
 var cam=(/cam=(\w+)/.exec(location.search)||[0,'road'])[1],im=document.getElementById('im'),msg=document.getElementById('msg');
@@ -2075,10 +2078,21 @@ function cal(){fetch('/api/recal').then(function(r){return r.json()}).then(funct
 document.getElementById('cb').onclick=function(){if(!confirm('Reset the camera calibration?\n\nopenpilot will forget the camera angle and relearn it while you drive. Only works while the car is stopped and openpilot is not engaged.'))return;
  fetch('/api/recal',{method:'POST',headers:{'X-Recal':'1'}}).then(function(r){return r.json()}).then(function(d){document.getElementById('cs').textContent=d.msg}).catch(function(e){document.getElementById('cs').textContent='request failed'})};
 cal();setInterval(cal,1500);
-var fr=document.getElementById('fr'),fx=document.getElementById('fx'),fl=document.getElementById('fl'),ft=0;
-function fget(){fetch('/api/camfocus').then(function(r){return r.json()}).then(function(d){if(cam!=='road'||!d.external){fx.style.display='none';return}fx.style.display='block';fr.value=d.focus;fl.checked=!!d.flip;im.style.transform=d.flip?'rotate(180deg)':'';document.getElementById('fv').textContent=d.focus}).catch(function(){})}
-fl.onchange=function(){im.style.transform=fl.checked?'rotate(180deg)':'';fetch('/api/camfocus',{method:'POST',headers:{'X-Cam':'1'},body:'flip='+(fl.checked?1:0)}).then(function(r){return r.json()}).then(function(d){document.getElementById('fs').textContent=d.msg||''}).catch(function(){})};
+var fr=document.getElementById('fr'),fx=document.getElementById('fx'),fl=document.getElementById('fl'),ft=0,FLIP=false,TILT=0;
+function xf(){im.style.transform=(FLIP||TILT)?'rotate('+((FLIP?180:0)+TILT)+'deg)':''}
+function fget(){fetch('/api/camfocus').then(function(r){return r.json()}).then(function(d){if(cam!=='road'||!d.external){fx.style.display='none';return}fx.style.display='block';fr.value=d.focus;fl.checked=!!d.flip;FLIP=!!d.flip;xf();document.getElementById('fv').textContent=d.focus}).catch(function(){})}
+fl.onchange=function(){FLIP=fl.checked;xf();fetch('/api/camfocus',{method:'POST',headers:{'X-Cam':'1'},body:'flip='+(fl.checked?1:0)}).then(function(r){return r.json()}).then(function(d){document.getElementById('fs').textContent=d.msg||''}).catch(function(){})};
 fr.oninput=function(){document.getElementById('fv').textContent=fr.value;clearTimeout(ft);ft=setTimeout(function(){fetch('/api/camfocus',{method:'POST',headers:{'X-Cam':'1'},body:String(fr.value)}).then(function(r){return r.json()}).then(function(d){document.getElementById('fs').textContent=d.msg||''}).catch(function(){})},250)};
+
+var lg=document.getElementById('lg'),lt=document.getElementById('lt'),gd=document.getElementById('gd');
+function drawGuides(){var w=gd.width=innerWidth*devicePixelRatio,h=gd.height=innerHeight*devicePixelRatio,c=gd.getContext('2d');c.clearRect(0,0,w,h);if(!lg.checked)return;
+ c.lineWidth=Math.max(1,devicePixelRatio);c.strokeStyle='rgba(60,220,110,.9)';c.beginPath();c.moveTo(0,h/2);c.lineTo(w,h/2);c.moveTo(w/2,0);c.lineTo(w/2,h);c.stroke();
+ c.strokeStyle='rgba(60,220,110,.35)';c.beginPath();for(var i=1;i<6;i++){c.moveTo(0,h*i/6);c.lineTo(w,h*i/6);c.moveTo(w*i/6,0);c.lineTo(w*i/6,h)}c.stroke();
+ c.fillStyle='rgba(60,220,110,.9)';c.font=(12*devicePixelRatio)+'px sans-serif';c.fillText('centre = lens axis (the car centreline should be the vertical line)',8*devicePixelRatio,h/2-6*devicePixelRatio)}
+lg.onchange=function(){drawGuides();try{localStorage.setItem('lvg',lg.checked?'1':'0')}catch(e){}};addEventListener('resize',drawGuides);
+lt.oninput=function(){TILT=lt.value/10;document.getElementById('lr').textContent=TILT.toFixed(1)+'\u00b0';xf()};
+document.getElementById('l0').onclick=function(){lt.value=0;lt.oninput()};
+try{lg.checked=localStorage.getItem('lvg')==='1'}catch(e){}drawGuides();
 fget();
 start();
 </script></body></html>"""
