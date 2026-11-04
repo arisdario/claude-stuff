@@ -2058,7 +2058,7 @@ img{max-width:100vw;max-height:100vh;object-fit:contain;background:#000}
 </style></head><body><div id=wrap><img id=im alt=""></div><div id=msg>connecting to the camera…</div>
 <div id=tabs><a href="?cam=road" id=t_road>road</a><a href="?cam=driver" id=t_driver>driver</a><a href="?cam=wide" id=t_wide>wide</a></div>
 <div id=rec><button id=rb>REC</button><span id=rs></span><div id=rf></div><div style="margin-top:10px"><button id=cb class=sec>Reset calibration</button></div><div id=cs></div></div>
-<div id=fx style="display:none;position:fixed;left:10px;bottom:8px;background:rgba(28,33,40,.9);padding:8px 12px;border-radius:12px;font-size:14px">Focus (C920) <input id=fr type=range min=0 max=250 step=5 value=0 style="width:240px;vertical-align:middle"> <b id=fv>0</b> <label style="margin-left:10px"><input id=fl type=checkbox> upside down</label> <span id=fs style="opacity:.8"></span><div style="opacity:.7;font-size:12px">0 = far (the road) .. 250 = near</div></div>
+<div id=fx style="display:none;position:fixed;left:10px;bottom:8px;background:rgba(28,33,40,.9);padding:8px 12px;border-radius:12px;font-size:14px">Focus (C920) <input id=fr type=range min=0 max=250 step=5 value=0 style="width:240px;vertical-align:middle"> <b id=fv>0</b> <label style="margin-left:10px"><input id=fl type=checkbox> upside down</label> <button id=lb style="margin-left:10px">LED off now</button> <label><input id=lk type=checkbox checked> keep off</label> <span id=fs style="opacity:.8"></span><div style="opacity:.7;font-size:12px">0 = far (the road) .. 250 = near</div></div>
 <canvas id=gd style="position:fixed;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
 <div id=lv style="position:fixed;left:50%;transform:translateX(-50%);bottom:8px;background:rgba(28,33,40,.9);padding:8px 12px;border-radius:12px;font-size:14px;max-width:92vw;text-align:center"><label><input id=lg type=checkbox> level guides</label> &nbsp; tilt <input id=lt type=range min=-150 max=150 step=1 value=0 style="width:200px;vertical-align:middle"> <b id=lr>0.0&deg;</b> <button id=l0 style="margin-left:6px">0</button><details id=lh style="opacity:.8;font-size:12px;margin-top:3px"><summary style="cursor:pointer">how to use</summary>Green lines are level on the screen. Turn the tilt slider until the real horizon (or a lane edge) in the picture lines up with them: the number is the camera ROLL (positive = the picture's right side was higher). View-only: nothing is sent to the car. Sky must be at the TOP; if it is at the bottom tick &ldquo;upside down&rdquo; (a 180&deg; turn, not a mirror: left/right stay correct).</details></div>
 <details id=nav><summary>☰</summary><div><a href="/">road view</a><a href="/top">top-down view</a><a href="/near">near view</a></div></details>
@@ -2080,7 +2080,7 @@ document.getElementById('cb').onclick=function(){if(!confirm('Reset the camera c
 cal();setInterval(cal,1500);
 var fr=document.getElementById('fr'),fx=document.getElementById('fx'),fl=document.getElementById('fl'),ft=0,FLIP=false,TILT=0;
 function xf(){im.style.transform=(FLIP||TILT)?'rotate('+((FLIP?180:0)+TILT)+'deg)':''}
-function fget(){fetch('/api/camfocus').then(function(r){return r.json()}).then(function(d){if(cam!=='road'||!d.external){fx.style.display='none';return}fx.style.display='block';fr.value=d.focus;fl.checked=!!d.flip;FLIP=!!d.flip;xf();document.getElementById('fv').textContent=d.focus}).catch(function(){})}
+function fget(){fetch('/api/camfocus').then(function(r){return r.json()}).then(function(d){if(cam!=='road'||!d.external){fx.style.display='none';return}fx.style.display='block';fr.value=d.focus;fl.checked=!!d.flip;FLIP=!!d.flip;xf();document.getElementById('lk').checked=!!d.led_keep_off;document.getElementById('fv').textContent=d.focus}).catch(function(){})}
 fl.onchange=function(){FLIP=fl.checked;xf();fetch('/api/camfocus',{method:'POST',headers:{'X-Cam':'1'},body:'flip='+(fl.checked?1:0)}).then(function(r){return r.json()}).then(function(d){document.getElementById('fs').textContent=d.msg||''}).catch(function(){})};
 fr.oninput=function(){document.getElementById('fv').textContent=fr.value;clearTimeout(ft);ft=setTimeout(function(){fetch('/api/camfocus',{method:'POST',headers:{'X-Cam':'1'},body:String(fr.value)}).then(function(r){return r.json()}).then(function(d){document.getElementById('fs').textContent=d.msg||''}).catch(function(){})},250)};
 
@@ -2093,6 +2093,9 @@ lg.onchange=function(){drawGuides();try{localStorage.setItem('lvg',lg.checked?'1
 lt.oninput=function(){TILT=lt.value/10;document.getElementById('lr').textContent=TILT.toFixed(1)+'\u00b0';xf()};
 document.getElementById('l0').onclick=function(){lt.value=0;lt.oninput()};
 try{lg.checked=localStorage.getItem('lvg')==='1'}catch(e){}drawGuides();
+function ledpost(b){fetch('/api/camfocus',{method:'POST',headers:{'X-Cam':'1'},body:b}).then(function(r){return r.json()}).then(function(d){document.getElementById('fs').textContent=d.msg||''}).catch(function(){})}
+document.getElementById('lb').onclick=function(){document.getElementById('lk').checked=true;ledpost('led=now')};
+document.getElementById('lk').onchange=function(){ledpost(this.checked?'led=now':'led=auto')};
 fget();
 start();
 </script></body></html>"""
@@ -2106,10 +2109,19 @@ def camfocus_get():
     except Exception: f = 0
     try: fl = int(open('/data/camera_flip').read().strip() or 0)
     except Exception: fl = 0
-    return {'external': ext, 'focus': max(0, min(250, f)), 'flip': 1 if fl else 0}
+    return {'external': ext, 'focus': max(0, min(250, f)), 'flip': 1 if fl else 0, 'led_keep_off': not os.path.exists('/data/camera_led_auto')}
 
 
 def camfocus_set(txt):
+    if txt.startswith('led='):       # status LED of the C920: 'now' = switch it off now and keep it off; 'auto' = leave it to the camera (from the next camera start)
+        try:
+            if txt[4:] == 'auto':
+                open('/data/camera_led_auto', 'w').write('1\n')
+                return {'ok': True, 'msg': 'LED left to the camera (takes effect at the next camera start)'}
+            if os.path.exists('/data/camera_led_auto'): os.remove('/data/camera_led_auto')
+            open('/data/camera_led_now', 'w').write('1\n')
+            return {'ok': True, 'msg': 'LED off requested (applied within a second, re-checked every 5 s)'}
+        except Exception as e: return {'ok': False, 'msg': 'could not save: %s' % e}
     if txt.startswith('flip='):      # upside-down mounting: camerad rotates the picture 180 degrees (applied within a second)
         v = 1 if txt[5:6] == '1' else 0
         try:

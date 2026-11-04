@@ -47,3 +47,11 @@ back to the phone's camera for the whole session. It now waits up to 12 s for th
 logging `C920 appeared after N ms` / `attempt N of 3 failed, retrying`. If the C920 is selected but really absent, it still falls back to the phone
 camera after the wait (so a boot without the camera takes up to 12 s longer). Look for the result in the log:
 `tmux capture-pane -p -t bench -S -5000 | grep -i "ROAD CAMERA\|external camera"`.
+
+
+## LED button (radarweb /video)
+`LED off now` writes `/data/camera_led_now`; camerad (checked once a second) switches the LED off through the Logitech XU, verifies it by reading it back and
+deletes the file. While streaming it also re-checks the LED every 5 s and switches it off again (quietly) if the camera turned it back on. `keep off`
+unticked creates `/data/camera_led_auto` (camerad then leaves the LED to the camera from the next camera start). Limit: when the car's USB power comes up the
+camera lights its LED by itself, and software can only switch it off once camerad is running (a few seconds after boot or openpilot start). Needs camerad rebuilt:
+`install_external_camera.sh --yes` with openpilot stopped.

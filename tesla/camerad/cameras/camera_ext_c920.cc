@@ -213,8 +213,8 @@ void ext_close() {
 // "LED1 Mode" = low 2 bits of byte 1 (0 off, 1 on, 2 blink, 3 auto). Verified on the user's C920 with tesla/usbcam/ledtool: set 0 -> VERIFIED.
 // Applied at every start (the camera forgets it at power loss) unless /data/camera_led_auto exists. Same strict checks as ledtool: the control must
 // be readable and settable, 5 bytes long; only the 2 mode bits change; the result is read back. Any failure is logged and streaming goes on.
-void apply_led_off(uvc_device_handle_t *devh) {
-  if (access("/data/camera_led_auto", F_OK) == 0) { fprintf(stderr, "external camera: LED left on auto (/data/camera_led_auto)\n"); return; }
+void apply_led_off(uvc_device_handle_t *devh, bool quiet = false) {
+  if (access("/data/camera_led_auto", F_OK) == 0) { if (!quiet) fprintf(stderr, "external camera: LED left on auto (/data/camera_led_auto)\n"); return; }
   static const uint8_t GUID[16] = {0xff, 0xe5, 0x2d, 0x21, 0x30, 0x80, 0x2c, 0x4e, 0x82, 0xd9, 0xf5, 0x87, 0xd0, 0x05, 0x40, 0xbd};   // as written in the xml
   uint8_t le[16]; memcpy(le, GUID, 16);                                                                                            // USB descriptor order
   le[0] = GUID[3]; le[1] = GUID[2]; le[2] = GUID[1]; le[3] = GUID[0]; le[4] = GUID[5]; le[5] = GUID[4]; le[6] = GUID[7]; le[7] = GUID[6];
@@ -225,7 +225,7 @@ void apply_led_off(uvc_device_handle_t *devh) {
   uint8_t info = 0, cur[5] = {0}, nw[5], back[5] = {0};
   if (uvc_get_ctrl(devh, (uint8_t)unit, 9, &info, 1, UVC_GET_INFO) < 0 || (info & 3) != 3 || uvc_get_ctrl_len(devh, (uint8_t)unit, 9) != 5 ||
       uvc_get_ctrl(devh, (uint8_t)unit, 9, cur, 5, UVC_GET_CUR) < 0) { fprintf(stderr, "external camera: LED control not as expected, LED unchanged\n"); return; }
-  if ((cur[1] & 3) == 0) { fprintf(stderr, "external camera: LED already off\n"); return; }
+  if ((cur[1] & 3) == 0) { if (!quiet) fprintf(stderr, "external camera: LED already off\n"); return; }
   memcpy(nw, cur, 5); nw[1] = (uint8_t)(cur[1] & ~3);
   int w = uvc_set_ctrl(devh, (uint8_t)unit, 9, nw, 5), rb = uvc_get_ctrl(devh, (uint8_t)unit, 9, back, 5, UVC_GET_CUR);
   fprintf(stderr, "external camera: LED off %s\n", (w >= 0 && rb >= 0 && (back[1] & 3) == 0 && back[0] == cur[0] && back[2] == cur[2] && back[3] == cur[3] && back[4] == cur[4]) ? "verified" : "NOT verified");
@@ -259,6 +259,10 @@ void *capture_thread(void *) {
     while (!g_stop && !do_exit && (now_ns() - g_last_frame_ns) < 3000000000LL) {
       usleep(100000);
       if (++tick % 10 == 0) {
+        if (g.devh) {                                                                   // LED: on request from the radarweb camera page (/data/camera_led_now), and re-checked every 5 s
+          if (access("/data/camera_led_now", F_OK) == 0) { unlink("/data/camera_led_now"); apply_led_off(g.devh); }
+          else if (tick % 50 == 0) apply_led_off(g.devh, true);                         // quiet: logs only if it had to switch the LED off again
+        }
         g_flip = read_int_file(FLIP_FILE, 0) ? 1 : 0;                                   // once a second: a focus change made in the radarweb camera page (writes /data/camera_focus) is applied live
         int f = read_int_file(FOCUS_FILE, 0);
         if (f < 0) f = 0;
