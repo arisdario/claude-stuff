@@ -53,6 +53,16 @@ class TestParsers(unittest.TestCase):
     self.assertEqual(t['cpu#1'], 48.0)
     self.assertNotIn('bad', t)
 
+  def test_qualcomm_tsens_are_tenths_of_a_degree(self):
+    d = tempfile.mkdtemp()
+    w(os.path.join(d, 'thermal_zone0/type'), 'tsens_tz_sensor9\n'); w(os.path.join(d, 'thermal_zone0/temp'), '699\n')
+    w(os.path.join(d, 'thermal_zone1/type'), 'msm_therm\n'); w(os.path.join(d, 'thermal_zone1/temp'), '53\n')
+    w(os.path.join(d, 'thermal_zone2/type'), 'pm8994_tz\n'); w(os.path.join(d, 'thermal_zone2/temp'), '51447\n')
+    t = S.read_thermal(d)
+    self.assertAlmostEqual(t['tsens_tz_sensor9'], 69.9)
+    self.assertEqual(t['msm_therm'], 53.0)
+    self.assertAlmostEqual(t['pm8994_tz'], 51.447)
+
   def test_gpu(self):
     d = tempfile.mkdtemp()
     w(os.path.join(d, 'gpubusy'), '30 120\n'); w(os.path.join(d, 'devfreq/cur_freq'), '510000000\n')

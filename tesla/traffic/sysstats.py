@@ -101,7 +101,10 @@ def read_thermal(root='/sys/class/thermal'):
       raw = float(_rd(os.path.join(z, 'temp')).strip())
     except (OSError, ValueError):
       continue
-    c = raw / 1000.0 if abs(raw) > 200 else raw
+    if typ.startswith('tsens_tz_sensor'):                  # Qualcomm SoC sensors on this kernel: tenths of a degree (openpilot's thermald divides by 10 too)
+      c = raw / 1000.0 if abs(raw) > 3000 else raw / 10.0
+    else:
+      c = raw / 1000.0 if abs(raw) > 200 else raw
     if not -40 < c < 200:
       continue
     name = typ if typ not in out else '%s#%s' % (typ, os.path.basename(z)[len('thermal_zone'):])
@@ -220,6 +223,8 @@ class Sampler(object):
       'cpu_mhz': read_cpu_mhz(os.path.join(self.sys, 'devices/system/cpu')),
       'mem_avail_mb': mem['avail_mb'], 'mem_total_mb': mem['total_mb'],
       'temps': temps, 'temp_max_c': max(temps.values()) if temps else None,
+      'temp_soc_max_c': max([v for k, v in temps.items() if k.startswith('tsens_tz_sensor')] or [None]) if any(k.startswith('tsens_tz_sensor') for k in temps) else None,
+      'temp_board_max_c': max([v for k, v in temps.items() if not k.startswith('tsens_tz_sensor') and not k.startswith('bms') and not k.startswith('bq') and k != 'battery'] or [None]) if temps else None,
       'gpu_busy_pct': gpu_busy, 'gpu_mhz': gpu_mhz,
       'batt_c': read_battery_c(os.path.join(self.sys, 'class/power_supply/battery')),
       'procs': dict(self.per), 'self_cpu_core_pct': self.own, 'ncores': ncore,

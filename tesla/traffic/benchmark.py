@@ -108,7 +108,7 @@ def hw_probe():
   return info
 
 
-COLS_FIXED = ['t', 'label', 'cpu_total_pct', 'others_cpu_pct', 'self_cpu_core_pct', 'mem_avail_mb', 'temp_max_c', 'gpu_busy_pct', 'gpu_mhz',
+COLS_FIXED = ['t', 'label', 'cpu_total_pct', 'others_cpu_pct', 'self_cpu_core_pct', 'mem_avail_mb', 'temp_max_c', 'temp_soc_max_c', 'temp_board_max_c', 'gpu_busy_pct', 'gpu_mhz',
               'batt_c', 'model_fps', 'frame_fps', 'model_gaps', 'thermal_status', 'cpu_mhz_max']
 
 
@@ -182,7 +182,7 @@ def load(path):
 def summarize(rows, own_budget=40.0):
   col = lambda k: [r.get(k) for r in rows]
   res = {'samples': len(rows), 'seconds': (rows[-1]['t'] - rows[0]['t']) if rows else 0, 'metrics': {}, 'warnings': []}
-  keys = ['cpu_total_pct', 'others_cpu_pct', 'mem_avail_mb', 'temp_max_c', 'gpu_busy_pct', 'gpu_mhz', 'batt_c', 'model_fps', 'frame_fps', 'cpu_mhz_max'] + \
+  keys = ['cpu_total_pct', 'others_cpu_pct', 'mem_avail_mb', 'temp_max_c', 'temp_soc_max_c', 'temp_board_max_c', 'gpu_busy_pct', 'gpu_mhz', 'batt_c', 'model_fps', 'frame_fps', 'cpu_mhz_max'] + \
          sorted(k for k in (rows[0] if rows else {}) if k.startswith('core'))
   for k in keys:
     v = col(k)
