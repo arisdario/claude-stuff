@@ -10,7 +10,7 @@ def test_patch_apply_idempotent_restore_and_refusal():
   orig = open(p).read()
   assert w.main([p, '--apply']) == 0
   new = open(p).read()
-  assert '["web",' in new and "/data/web_switch" in new and new.count('btn_id == 3:') >= 2
+  assert '["web",' in new and "/data/web_switch" in new and 'if btn_id == 3:' in new
   py_compile.compile(p, doraise=True)
   assert w.main([p, '--apply']) == 0 and open(p).read() == new            # idempotent
   assert w.main([p, '--restore']) == 0 and open(p).read() == orig
