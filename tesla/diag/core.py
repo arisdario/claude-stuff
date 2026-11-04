@@ -245,10 +245,15 @@ class Detectors(object):
     self.orient_bad = 0
     self.lagging = False                          # set by the collector when it reads late: rt-based checks are then meaningless and skipped
 
+  MUTED_WHEN_LAGGING = ('camera_frame', 'can_', 'ipc_', 'control_loop', 'model_path_jump', 'pose_discontinuity', 'model_latency')
+
   def feed(self, r):
     s = r.get('s')
     fn = getattr(self, 'd_' + s, None)
-    return fn(r) if fn else []
+    out = fn(r) if fn else []
+    if self.lagging:          # messages were skipped or read late: gaps/jumps between consecutive messages say nothing about the car
+      out = [o for o in out if not o[0].startswith(self.MUTED_WHEN_LAGGING)]
+    return out
 
   # ---- camera frame stream (camerad 'frame' message)
   def d_frame(self, r):
@@ -548,20 +553,14 @@ class Collector(object):
     s, rt = rec['s'], rec['rt']
     self.counts[s] += 1
     self.rate[s].append(rt)
-    if s in ('frame', 'model', 'cameraOdometry', 'liveLocationKalman'):
-      k = rec.get('lt', rt) if s != 'frame' else rec.get('eof', rt)      # use the producer's own timestamp where there is one
-      p = self.iv_last.get(s)
-      if p is not None and k > p:
-        self.iv[s].append(k - p)
-      self.iv_last[s] = k
-      if s == 'model' and rec.get('eof') and rec.get('lt'):
-        self.iv['model_lat'].append(rec['lt'] - rec['eof'])
-        if rec.get('exec') is not None:
-          self.iv['model_exec'].append(rec['exec'])
-      if s == 'frame' and rec.get('eof'):
-        self.iv['frame_age'].append(rt - rec['eof'])
-      if rec.get('lt') is not None and s == 'model':
-        self.iv['ipc_' + s].append(rt - rec['lt'])
+    if s == 'model' and rec.get('eof') and rec.get('lt'):
+      self.iv['model_lat'].append(rec['lt'] - rec['eof'])
+      if rec.get('exec') is not None:
+        self.iv['model_exec'].append(rec['exec'])
+    if s == 'frame' and rec.get('eof') and not self.det.lagging:
+      self.iv['frame_age'].append(rt - rec['eof'])
+    if s == 'model' and rec.get('lt') is not None and not self.det.lagging:
+      self.iv['ipc_model'].append(rt - rec['lt'])
     line = self._line(rec)
     rk = s
     lim = self.cfg['ring_hz'].get(s)

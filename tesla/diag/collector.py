@@ -288,8 +288,11 @@ def run(coll, src, args, cfg, stop, sysmon=None, grabber=None, usb=sources.usb_s
   paused = False
   pending = collections.deque()
   shed = 0
+  shed_prev = 0
+  shed_until = 0.0
   n_seen = {}
   COUNTED = ('controlsState', 'carState', 'can')
+  COUNTED_ALL = ('controlsState', 'carState', 'can', 'frame', 'model', 'cameraOdometry', 'liveLocationKalman')
   stride = dict(cfg.get('stride', {'controlsState': 5, 'carState': 5, 'can': 2}))
   coll.det.stride_ctl = stride.get('controlsState', 1)
   work_s, max_backlog = cfg.get('work_s', 0.03), cfg.get('max_backlog', 800)
@@ -299,6 +302,10 @@ def run(coll, src, args, cfg, stop, sysmon=None, grabber=None, usb=sources.usb_s
     try:
       if not paused:
         for item in src.poll():
+          svc_, ev_, rt_ = item
+          lt_ = (getattr(ev_, 'logMonoTime', 0) or 0) / 1e9
+          if svc_ in COUNTED_ALL and lt_:
+            coll.note_msg(svc_, lt_, rt_)            # intervals from EVERY message the sockets delivered, so shedding cannot inflate them
           pending.append(item)
       # work is bounded per pass: a pass never takes more than work_s, the rest stays queued; the 1 Hz tick below always runs on time.
       t_work = time.perf_counter() + work_s
@@ -307,7 +314,6 @@ def run(coll, src, args, cfg, stop, sysmon=None, grabber=None, usb=sources.usb_s
         svc, ev, rt = pending.popleft()
         lt = (getattr(ev, 'logMonoTime', 0) or 0) / 1e9
         if svc in COUNTED:
-          coll.note_msg(svc, lt, rt)               # cheap: producer timestamp + read delay only
           n_seen[svc] = n_seen.get(svc, 0) + 1
           if n_seen[svc] % stride.get(svc, 1):
             continue                                # sampled stream: not every message is extracted
@@ -326,7 +332,10 @@ def run(coll, src, args, cfg, stop, sysmon=None, grabber=None, usb=sources.usb_s
         for _ in range(drop):
           pending.popleft()
         shed += drop
-      coll.det.lagging = lag_now > 0.3 or len(pending) > max_backlog // 2
+      if shed != shed_prev:
+        shed_until = clock() + 5.0
+        shed_prev = shed
+      coll.det.lagging = lag_now > 0.3 or len(pending) > max_backlog // 2 or clock() < shed_until
       msgs = pending
       now = clock()
       if not args.no_frames and now >= next_grab:
