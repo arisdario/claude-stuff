@@ -2,7 +2,7 @@
 """param_switch.py - use toggles that ALREADY exist in the EON settings screen as on/off switches for radarweb and the diagnostics logger.
 
 No change to the EON UI/app: the app writes each toggle as a file in /data/params/d/<Name> ("1"/"0"). This watcher polls two of them every 2 s (idle cost ~0):
-  switch_param (default IsUploadRawEnabled = "Upload Raw Logs")        1 -> start radarweb      0 -> stop radarweb
+  switch_param (default /data/web_switch = the on-screen WEB button, see add_web_button.py; or a param name such as IsUploadRawEnabled = "Upload Raw Logs")        1 -> start radarweb      0 -> stop radarweb
   diag_param   (default RecordFront        = "Record and Upload Driver Camera")   1 -> start diagnostics recording   0 -> stop + build zip
 These two toggles only matter to loggerd/uploader, which are blocked on this EON (/data/no_loggerd, /data/no_uploader), so reusing them is harmless. The labels in the app will
 not match: that is the price of not touching the app. Change the names in /data/launcher.conf if your settings screen shows others (find them with --watch-names).
@@ -38,7 +38,7 @@ def log(msg):
 def rd(name, params=None):
   """value as text; params can be binary (capnp blobs): read bytes, decode leniently, never raise."""
   try:
-    with open(os.path.join(params or PARAMS, name), 'rb') as f:
+    with open(name if name.startswith('/') else os.path.join(params or PARAMS, name), 'rb') as f:
       return f.read(512).decode('utf8', 'replace').strip()
   except (OSError, IOError):          # missing, a directory, or removed while reading
     return None
@@ -79,7 +79,7 @@ class Switch(object):
     self.web = self.diag = None            # last seen value; None = not seen yet
 
   def step(self, start_web=launcher.start_web, stop_web=launcher.stop_web, diag=launcher.diag):
-    wn = self.c.get('switch_param', 'IsUploadRawEnabled')
+    wn = self.c.get('switch_param', '/data/web_switch')
     dn = self.c.get('diag_param', 'RecordFront')
     w, d = rd(wn, self.params), rd(dn, self.params)
     acts = []
@@ -109,7 +109,7 @@ def main():
     print('already running')
     return
   sw = Switch(launcher.conf())
-  log('param_switch started: radarweb <- %s, diagnostics <- %s' % (sw.c.get('switch_param', 'IsUploadRawEnabled'), sw.c.get('diag_param', 'RecordFront')))
+  log('param_switch started: radarweb <- %s, diagnostics <- %s' % (sw.c.get('switch_param', '/data/web_switch'), sw.c.get('diag_param', 'RecordFront')))
   while True:
     try:
       sw.c = launcher.conf()
