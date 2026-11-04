@@ -137,6 +137,9 @@ class MapCurveLookup:
                                'tools/mapcurve_build.py' % ', '.join(sorted(missing)))
         self.segment_cache = {}
         self.meta_cache = {}
+        self._cell_key = None       # level 1: the rows of the current grid-cell window (the old code re-read them from SQLite on every query)
+        self._cell_rows = []
+        self._near = None           # level 2: (lat, lon, m_lat, m_lon, rows) - the cell rows that can matter near one anchor position
         seg_cols = {r[1] for r in self.db.execute('PRAGMA table_info(segments)')}
         # old (v1) DBs have no node IDs -> no cross-segment links: prediction stops at the segment end
         self.has_nodes = {'start_node_id', 'end_node_id', 'oneway'} <= seg_cols
@@ -270,6 +273,27 @@ class MapCurveLookup:
             if along > LOOKAHEAD_M:
                 return best, along, i, False
 
+    NEAR_MARGIN_M = 300.0    # level-2 subset keeps points within radius + this of the anchor...
+    NEAR_MOVE_M = 200.0      # ...and is reused while the car stays within this of the anchor (100 m of slack for the changing lon scale)
+
+    def _candidates(self, key, lat, lon, m_lat, m_lon, radius):
+        """Candidate points (lat, lon, way_id, segment_id) for a query, in EXACTLY the order SQLite returned them before caching
+        (equal-distance ties at shared junction nodes are decided by that order). A superset of the points within `radius`;
+        the caller still applies the exact distance test."""
+        if key != self._cell_key:
+            self._cell_rows = self.db.execute(
+                'SELECT lat, lon, way_id, segment_id FROM pts '
+                'WHERE cell_lat BETWEEN ? AND ? AND cell_lon BETWEEN ? AND ?', key).fetchall()
+            self._cell_key = key
+            self._near = None
+        n = self._near
+        if n is not None and math.hypot((lat - n[0]) * n[2], (lon - n[1]) * n[3]) <= self.NEAR_MOVE_M:
+            return n[4]
+        r2 = radius + self.NEAR_MARGIN_M
+        keep = [r for r in self._cell_rows if abs((r[0] - lat) * m_lat) <= r2 and abs((r[1] - lon) * m_lon) <= r2]
+        self._near = (lat, lon, m_lat, m_lon, keep)
+        return keep
+
     def query_ahead(self, lat, lon, heading_deg, v_ego=0.0):
         """Return (binding_speed_ms, distance_m, match_info) or None.
 
@@ -294,11 +318,7 @@ class MapCurveLookup:
         span_lon = max(1, int(math.ceil(radius / (CELL_DEG * m_lon))) + 1)
         cl = int(math.floor(lat / CELL_DEG))
         co = int(math.floor(lon / CELL_DEG))
-        candidates = self.db.execute(
-            'SELECT lat, lon, way_id, segment_id FROM pts '
-            'WHERE cell_lat BETWEEN ? AND ? AND cell_lon BETWEEN ? AND ?',
-            (cl - span_lat, cl + span_lat, co - span_lon, co + span_lon)
-        ).fetchall()
+        candidates = self._candidates((cl - span_lat, cl + span_lat, co - span_lon, co + span_lon), lat, lon, m_lat, m_lon, radius)
 
         # Retain the nearest local sample per segment as a candidate.
         nearest = {}
