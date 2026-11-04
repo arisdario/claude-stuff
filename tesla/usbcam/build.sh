@@ -23,4 +23,6 @@ SRCV=$(echo "$SRC" | sed 's#uvctest.c#uvcview.c#')
 $CC $FLAGS $SRCV $LIB -lusb-1.0 -lpthread -o uvcview 2>build_view.log || $CC $FLAGS $SRCV $LIB -lusb-1.0 -o uvcview 2>>build_view.log || { cat build_view.log; exit 1; }
 SRCL=$(echo "$SRC" | sed 's#uvctest.c#ledtool.c#')
 $CC $FLAGS $SRCL $LIB -lusb-1.0 -lpthread -o ledtool 2>build_led.log || $CC $FLAGS $SRCL $LIB -lusb-1.0 -o ledtool 2>>build_led.log || { cat build_led.log; exit 1; }
-echo "built: $(pwd)/uvctest, $(pwd)/uvcview and $(pwd)/ledtool"
+SRCD=$(echo "$SRC" | sed 's#uvctest.c#uvcdump.c#')
+$CC $FLAGS $SRCD $LIB -lusb-1.0 -lpthread -o uvcdump 2>build_dump.log || $CC $FLAGS $SRCD $LIB -lusb-1.0 -o uvcdump 2>>build_dump.log || { cat build_dump.log; exit 1; }
+echo "built: $(pwd)/uvctest, $(pwd)/uvcview, $(pwd)/ledtool and $(pwd)/uvcdump"
