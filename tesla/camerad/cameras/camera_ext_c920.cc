@@ -231,10 +231,10 @@ void apply_led_off(uvc_device_handle_t *devh, bool quiet = false) {
   int unit = -1;
   for (const uvc_extension_unit_t *u = uvc_get_extension_units(devh); u; u = u->next)
     if (!memcmp(u->guidExtensionCode, le, 16) || !memcmp(u->guidExtensionCode, GUID, 16)) { unit = u->bUnitID; break; }
-  if (unit < 0) { fprintf(stderr, "external camera: LED control unit not found, LED unchanged\n"); return; }
+  if (unit < 0) { if (!quiet) fprintf(stderr, "external camera: LED control unit not found, LED unchanged\n"); return; }
   uint8_t info = 0, cur[5] = {0}, nw[5], back[5] = {0};
   if (uvc_get_ctrl(devh, (uint8_t)unit, 9, &info, 1, UVC_GET_INFO) < 0 || (info & 3) != 3 || uvc_get_ctrl_len(devh, (uint8_t)unit, 9) != 5 ||
-      uvc_get_ctrl(devh, (uint8_t)unit, 9, cur, 5, UVC_GET_CUR) < 0) { fprintf(stderr, "external camera: LED control not as expected, LED unchanged\n"); return; }
+      uvc_get_ctrl(devh, (uint8_t)unit, 9, cur, 5, UVC_GET_CUR) < 0) { if (!quiet) fprintf(stderr, "external camera: LED control not as expected, LED unchanged\n"); return; }
   if ((cur[1] & 3) == 0) { if (!quiet) fprintf(stderr, "external camera: LED already off\n"); return; }
   memcpy(nw, cur, 5); nw[1] = (uint8_t)(cur[1] & ~3);
   int w = uvc_set_ctrl(devh, (uint8_t)unit, 9, nw, 5), rb = uvc_get_ctrl(devh, (uint8_t)unit, 9, back, 5, UVC_GET_CUR);
