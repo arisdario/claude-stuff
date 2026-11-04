@@ -141,6 +141,52 @@ in `/data/bench_calibration_backup.json` meanwhile; if a run is cut off, the nex
 
 Working: lane probabilities above 0.8, lane width about 3.5 m, a lead box (`lead p` > 0.5) behind the car ahead.
 
+### Bench quick start (copy-paste, EON in the room, no car, no panda)
+
+Each part runs in its own `tmux` session, so nothing needs a second SSH window and it all survives the SSH connection.
+
+```
+# 0. which road camera? (it is chosen when camerad starts; the C920 must be plugged in)
+sh /data/claude-stuff/tesla/camerad/camera_switch.sh status          # external = C920, internal = the phone camera
+sh /data/claude-stuff/tesla/camerad/camera_switch.sh external        # or: internal
+
+# 1. stop everything, then start openpilot WITHOUT boardd (nothing can reach a car)
+tmux kill-session -t replay 2>/dev/null; tmux kill-session -t ign 2>/dev/null
+tmux kill-session -t bench 2>/dev/null; tmux kill-session -t comma 2>/dev/null
+pkill -f boardd; pkill -f pandad; pkill -f manager.py; sleep 3
+cd /data/openpilot && tmux new -d -s bench 'NOBOARD=1 ./launch_openpilot.sh'
+sleep 20
+
+# 2. pretend the ignition is on (the EON switches to the camera view within ~10 s).
+#    --car-calib keeps your car's calibration; without it the bench uses a "straight ahead" one and restores yours on Ctrl+C
+tmux new -d -s ign 'PYTHONPATH=/data/openpilot python3 /data/claude-stuff/tesla/model083/bench_started.py --car-calib'
+
+# 3. replay the logged CAN capture (speed, steering, GPS) into the local cereal socket
+tmux new -d -s replay 'PYTHONPATH=/data/openpilot python3 /data/claude-stuff/tesla/model083/bench_can_replay.py /data/tesla_can_bridge.log'
+```
+
+Check it is running (about 30 s later):
+```
+tmux ls                                                    # bench, ign, replay
+ps | grep -E "camerad|_modeld|controlsd" | grep -v grep
+tmux capture-pane -p -t bench -S -5000 | grep -i "ROAD CAMERA\|external camera"    # which camera camerad really used
+cd /data/openpilot && PYTHONPATH=/data/openpilot python3 /data/claude-stuff/tesla/model083/check_model.py 30   # model numbers
+```
+Look at a session: `tmux a -t ign` (leave it with `Ctrl+B` then `D`, never Ctrl+C unless you mean to stop it).
+
+Stop and go back to normal:
+```
+tmux kill-session -t replay; tmux kill-session -t ign; tmux kill-session -t bench
+reboot
+```
+
+Notes
+- Start order matters: openpilot first, then the ignition script, then the replay. The ignition script refuses to run with a panda or `boardd` present.
+- **Calibration:** without `--car-calib` the script swaps in a neutral calibration and puts yours back on Ctrl+C (`/data/bench_calibration_backup.json`). With it, openpilot keeps whatever is stored; delete `/data/params/d/CalibrationParams` first if you want to watch it learn from zero. Do not trust a calibration learned from a screen.
+- **Switch files** read by `launch_chffrplus.sh` (only if that edit was made): `/data/no_loggerd` and `/data/no_mapcurved` keep those processes from starting. `rm` them to turn them back on, then restart.
+- `"waiting for CarParams"` and the uploader's `KeyError: 'dongle_id'` lines in the `bench` pane are normal on the bench.
+- Measuring the EON's CPU and heat on the bench: `tesla/traffic/README.md`.
+
 ---
 
 ## Step 7 — tuning notes after it's driving
