@@ -273,6 +273,7 @@ def run(coll, src, args, cfg, stop, sysmon=None, grabber=None, usb=sources.usb_s
   paused = False
   t_end = clock() + args.duration if args.duration else None
   while not stop['flag'] and (t_end is None or clock() < t_end):
+    t_loop = time.perf_counter()
     try:
       msgs = src.poll() if not paused else []
       for svc, ev, rt in msgs:
@@ -327,8 +328,8 @@ def run(coll, src, args, cfg, stop, sysmon=None, grabber=None, usb=sources.usb_s
         coll.w.put_bytes(status_p, json.dumps({'rt': now, 'wall': time.time(), 'paused': paused, 'events': len(coll.done) + len(coll.events),
                                               'counts': dict(coll.counts), 'disk': coll.disk_state, 'free_mb': round(getattr(coll, 'free_mb', 0)),
                                               'dropped': coll.w.dropped, 'pid': os.getpid()}).encode())
-      if not msgs:
-        sleep(0.004)
+      # fixed cadence: never spin, even when messages arrive on every pass (that busy loop cost ~30% of a core on the EON)
+      sleep(max(0.001, cfg.get('poll_s', 0.01) - (time.perf_counter() - t_loop)))
     except Exception as e:           # the logger must survive anything
       errs += 1
       if errs <= 5:

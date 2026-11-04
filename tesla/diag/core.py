@@ -46,7 +46,7 @@ DEFAULT_CFG = {
   'frame_hz': 3.0, 'frame_keep_s': 100.0,
   'max_ring_mb': 250.0, 'max_trace_mb': 400.0, 'max_events': 40, 'event_cooldown_s': 12.0, 'max_event_s': 150.0,
   'min_free_mb': 1500.0, 'hard_free_mb': 600.0,
-  'queue_max': 30000,
+  'queue_max': 30000, 'poll_s': 0.01,
   # full-rate ring: the steering loop signals stay at full rate, bulk/auxiliary streams are capped (Hz). 0 = unlimited
   'ring_hz': {'carControl': 50, 'sensorEvents': 50, 'pathPlan': 25, 'liveParameters': 4, 'liveCalibration': 4, 'can_raw_other': 25},
   'can_raw_full': [0x370, 0x488, 0x0E],
@@ -771,11 +771,14 @@ class Collector(object):
         stats[k] = {'n': len(v), 'mean_ms': round(1e3 * m, 2), 'max_ms': round(1e3 * max(v), 2), 'min_ms': round(1e3 * min(v), 2),
                     'std_ms': round(1e3 * math.sqrt(sum((x - m) ** 2 for x in v) / len(v)), 2)}
     self.iv.clear()
-    can_hz = {}
+    tot = collections.Counter()
     for (a, bus), (n, _) in self.can_stats.items():
       if a in canspec.CAN_SPEC:
-        can_hz[hex(a)] = n - self.can_prev.get(a, 0)
-        self.can_prev[a] = n
+        tot[a] += n
+    can_hz = {}
+    for a, n in tot.items():
+      can_hz[hex(a)] = n - self.can_prev.get(a, 0)
+      self.can_prev[a] = n
     gaps = {hex(a): round(1e3 * g, 1) for a, g in self.can_gapmax.items()}
     self.can_gapmax = {}
     return {'s': 'diag', 'rt': now, 'iv': stats, 'can_hz': can_hz, 'can_gap_max_ms': gaps, 'self_cpu_core': None if first else round(100 * cpu, 2), 'queue': self.w.qsize(), 'queue_max': self.w.max_q,

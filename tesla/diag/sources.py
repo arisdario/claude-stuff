@@ -216,23 +216,32 @@ class Extractor(object):
 
 
 # ------------------------------------------------------------------ cereal
-class CerealSource(object):
-  """read-only subscriptions; poll() drains everything pending and returns [(svc, event, receive_time)]."""
+# services read at full rate; everything else is conflated (newest message only) and read every slow_every-th poll (~20 Hz),
+# which keeps the Python cost on the EON small: the steering-loop signals are what matter at full rate.
+FULL_RATE = ('frame', 'model', 'cameraOdometry', 'controlsState', 'carState', 'can')
 
-  def __init__(self, messaging, clock, services=SERVICES):
+
+class CerealSource(object):
+  """read-only subscriptions; poll() drains what is due and returns [(svc, event, receive_time)]."""
+
+  def __init__(self, messaging, clock, services=SERVICES, slow_every=5):
     self.m = messaging
     self.clock = clock
     self.socks, self.skipped = {}, []
+    self.slow_every, self.n = slow_every, 0
     for s in services:
       try:
-        self.socks[s] = messaging.sub_sock(s, conflate=False)
+        self.socks[s] = messaging.sub_sock(s, conflate=(s not in FULL_RATE))
       except Exception as e:
         self.skipped.append((s, str(e)))
     self.depth_max = {}
 
   def poll(self):
     out = []
+    self.n += 1
     for name, sock in self.socks.items():
+      if name not in FULL_RATE and self.n % self.slow_every:
+        continue
       msgs = self.m.drain_sock(sock, wait_for_one=False)
       if msgs:
         rt = self.clock()
