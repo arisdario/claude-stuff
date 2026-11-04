@@ -25,4 +25,7 @@ SRCL=$(echo "$SRC" | sed 's#uvctest.c#ledtool.c#')
 $CC $FLAGS $SRCL $LIB -lusb-1.0 -lpthread -o ledtool 2>build_led.log || $CC $FLAGS $SRCL $LIB -lusb-1.0 -o ledtool 2>>build_led.log || { cat build_led.log; exit 1; }
 SRCD=$(echo "$SRC" | sed 's#uvctest.c#uvcdump.c#')
 $CC $FLAGS $SRCD $LIB -lusb-1.0 -lpthread -o uvcdump 2>build_dump.log || $CC $FLAGS $SRCD $LIB -lusb-1.0 -o uvcdump 2>>build_dump.log || { cat build_dump.log; exit 1; }
+SRCF=$(echo "$SRC" | sed 's#uvctest.c#fmtbench.c#')
+# fmtbench: with libjpeg for the MJPEG decode timing; without it only that one number is missing
+$CC $FLAGS $SRCF $LIB -lusb-1.0 -lpthread -ljpeg -o fmtbench 2>build_fmt.log || $CC $FLAGS $SRCF $LIB -lusb-1.0 -ljpeg -o fmtbench 2>>build_fmt.log || $CC $FLAGS $SRCF $LIB -lusb-1.0 -lpthread -o fmtbench 2>>build_fmt.log || $CC $FLAGS $SRCF $LIB -lusb-1.0 -o fmtbench 2>>build_fmt.log || { cat build_fmt.log; exit 1; }
 echo "built: $(pwd)/uvctest, $(pwd)/uvcview, $(pwd)/ledtool and $(pwd)/uvcdump"

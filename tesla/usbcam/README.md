@@ -60,3 +60,9 @@ Find the EON's address with `ip addr show wlan0` (or `ifconfig wlan0`). Tested h
 10 s clip of a monitor playing an EON-recorded drive, C920 1280x720 MJPEG, focus 100, converted with `clip_to_eon.sh` (crop to 1164 wide, centred on a black 874-row canvas, no scaling) and run through `replay083.py` (0.8.3 model) on a PC:
 vanishing point estimated from the picture (582, 523): lane probability median L 0.97 / R 0.98, lane width 3.09 m, path +0.21 m, lead p 0.28; with the neutral vanishing point (582, 437): 0.99 / 1.00, width 2.49 m.
 So the model finds the lanes with high confidence on the C920's picture. Not a road test: the scene is a screen, the camera was aimed ~6 deg too high (road vanishing point at ~62% of the frame), and the C920 is not connected to openpilot's camera pipeline.
+
+
+## Format benchmark (`fmtbench`)
+Read-only comparison of what the C920 offers at 1280x720 / 20 fps: MJPEG, H.264 (if advertised) and YUYV. It changes nothing in openpilot.
+Stop openpilot first (`tmux kill-session -t comma`), then `bash build.sh && ./fmtbench list && ./fmtbench all 20`. It reports, per format: delivered fps, payload Mbit/s versus the bandwidth the
+camera reserves, frame-interval jitter, late and dropped frames, decode time (MJPEG with libjpeg like camerad, YUYV conversion; H.264 delivery only), frame age at delivery, and CPU.
