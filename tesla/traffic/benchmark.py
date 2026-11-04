@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sysstats as S  # noqa: E402
 
 MIN_BASELINE_S = 600
+THERMALD_GREEN_CAP = 72.0       # thermald leaves 'green' above 75 C (max cpu temp); the detector must be off well before that
 
 
 class CerealProbe(object):
@@ -108,7 +109,7 @@ def hw_probe():
   return info
 
 
-COLS_FIXED = ['t', 'label', 'cpu_total_pct', 'others_cpu_pct', 'self_cpu_core_pct', 'mem_avail_mb', 'temp_max_c', 'temp_soc_max_c', 'temp_board_max_c', 'gpu_busy_pct', 'gpu_mhz',
+COLS_FIXED = ['t', 'label', 'cpu_total_pct', 'others_cpu_pct', 'self_cpu_core_pct', 'mem_avail_mb', 'temp_max_c', 'temp_cpu_c', 'temp_mem_c', 'temp_gpu_c', 'temp_soc_max_c', 'temp_board_max_c', 'gpu_busy_pct', 'gpu_mhz',
               'batt_c', 'model_fps', 'frame_fps', 'model_gaps', 'thermal_status', 'cpu_mhz_max']
 
 
@@ -182,7 +183,7 @@ def load(path):
 def summarize(rows, own_budget=40.0):
   col = lambda k: [r.get(k) for r in rows]
   res = {'samples': len(rows), 'seconds': (rows[-1]['t'] - rows[0]['t']) if rows else 0, 'metrics': {}, 'warnings': []}
-  keys = ['cpu_total_pct', 'others_cpu_pct', 'mem_avail_mb', 'temp_max_c', 'temp_soc_max_c', 'temp_board_max_c', 'gpu_busy_pct', 'gpu_mhz', 'batt_c', 'model_fps', 'frame_fps', 'cpu_mhz_max'] + \
+  keys = ['cpu_total_pct', 'others_cpu_pct', 'mem_avail_mb', 'temp_max_c', 'temp_cpu_c', 'temp_mem_c', 'temp_gpu_c', 'temp_soc_max_c', 'temp_board_max_c', 'gpu_busy_pct', 'gpu_mhz', 'batt_c', 'model_fps', 'frame_fps', 'cpu_mhz_max'] + \
          sorted(k for k in (rows[0] if rows else {}) if k.startswith('core'))
   for k in keys:
     v = col(k)
@@ -214,13 +215,15 @@ def summarize(rows, own_budget=40.0):
     need_all = own_budget / ncores + 10.0                  # the detector's budget plus a 10-point safety margin, in percent of ALL cores
     res['headroom'] = {'idle_pct_p5': q(idle, 5), 'idle_pct_p50': q(idle, 50), 'idle_pct_p95': q(idle, 95), 'ncores': ncores,
                        'idle_needed_pct': round(need_all, 1), 'fraction_of_time_enough_idle': round(sum(1 for x in idle if x >= need_all) / len(idle), 3)}
+  if 'temp_max_c' in res['metrics'] and res['metrics']['temp_max_c']['p50'] > THERMALD_GREEN_CAP - 3.0:
+    res['warnings'].append('NO THERMAL HEADROOM: the median temperature (%.1f C) is within 3 C of the %.0f C cap (thermald leaves green at 75 C). A detector would not be allowed to run.' % (res['metrics']['temp_max_c']['p50'], THERMALD_GREEN_CAP))
   if 'others_cpu_pct' in res['metrics']:
     m = res['metrics']
     ncores = res.get('headroom', {}).get('ncores', 4)
     res['suggested_limits'] = {
       'others_cpu_limit_pct': round(min(m['others_cpu_pct']['p99'] + 5.0, 100.0 - own_budget / ncores - 10.0), 1),
       'own_cpu_limit_core_pct': own_budget,
-      'temp_limit_c': round(m['temp_max_c']['p99'] + 3.0, 1) if 'temp_max_c' in m else None,
+      'temp_limit_c': round(min(m['temp_max_c']['p99'] + 3.0, THERMALD_GREEN_CAP), 1) if 'temp_max_c' in m else None,
       'mem_avail_min_mb': round(max(50.0, m['mem_avail_mb']['min'] - 100.0), 0) if 'mem_avail_mb' in m else None,
       '_from': 'baseline run, detector OFF: rest-of-system cpu p99 + 5 points, never above 100 minus the detector budget minus 10; temperature p99 + 3 C; free RAM min - 100 MB. Review before use.',
     }

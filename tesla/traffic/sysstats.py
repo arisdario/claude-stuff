@@ -112,6 +112,24 @@ def read_thermal(root='/sys/class/thermal'):
   return out
 
 
+THERMALD_CPU_ZONES, THERMALD_MEM_ZONE, THERMALD_GPU_ZONE = (5, 7, 10, 12), 2, 16     # stock thermald: cpu0..cpu3, mem, gpu (raw values are tenths of a degree)
+
+
+def read_thermald_temps(root='/sys/class/thermal'):
+  """the same sensors thermald judges the thermal status by: {'cpu': max of the 4 cpu zones, 'mem', 'gpu', 'comp': max of all three} in C, or {} if the zones are missing"""
+  def zone(n):
+    try:
+      return float(_rd(os.path.join(root, 'thermal_zone%d' % n, 'temp')).split()[0]) / 10.0
+    except (OSError, ValueError, IndexError):
+      return None
+  cpu = [zone(n) for n in THERMALD_CPU_ZONES]
+  if any(v is None for v in cpu):
+    return {}
+  mem, gpu = zone(THERMALD_MEM_ZONE), zone(THERMALD_GPU_ZONE)
+  vals = cpu + [v for v in (mem, gpu) if v is not None]
+  return {'cpu': max(cpu), 'mem': mem, 'gpu': gpu, 'comp': max(vals)}
+
+
 def read_gpu(root='/sys/class/kgsl/kgsl-3d0'):
   """(busy percent since the last read of gpubusy, clock MHz) - either may be None. The Adreno driver resets gpubusy on read."""
   busy = mhz = None
@@ -215,6 +233,7 @@ class Sampler(object):
     ncore = max(1, len(cores))
     mem = parse_meminfo(self._read(os.path.join(self.proc, 'meminfo')))
     temps = read_thermal(os.path.join(self.sys, 'class/thermal'))
+    td = read_thermald_temps(os.path.join(self.sys, 'class/thermal'))
     gpu_busy, gpu_mhz = read_gpu(os.path.join(self.sys, 'class/kgsl/kgsl-3d0'))
     s = {
       't': now, 'dt': now - prev['t'],
@@ -222,7 +241,8 @@ class Sampler(object):
       'cpu_core_pct': [pct(prev['cores'].get(i), cur['cores'].get(i)) for i in sorted(cur['cores'])],
       'cpu_mhz': read_cpu_mhz(os.path.join(self.sys, 'devices/system/cpu')),
       'mem_avail_mb': mem['avail_mb'], 'mem_total_mb': mem['total_mb'],
-      'temps': temps, 'temp_max_c': max(temps.values()) if temps else None,
+      'temps': temps, 'temp_max_c': td['comp'] if td else (max(temps.values()) if temps else None),      # thermald's own 'max_comp_temp' when its zones exist
+      'temp_cpu_c': td.get('cpu'), 'temp_mem_c': td.get('mem'), 'temp_gpu_c': td.get('gpu'),
       'temp_soc_max_c': max([v for k, v in temps.items() if k.startswith('tsens_tz_sensor')] or [None]) if any(k.startswith('tsens_tz_sensor') for k in temps) else None,
       'temp_board_max_c': max([v for k, v in temps.items() if not k.startswith('tsens_tz_sensor') and not k.startswith('bms') and not k.startswith('bq') and k != 'battery'] or [None]) if temps else None,
       'gpu_busy_pct': gpu_busy, 'gpu_mhz': gpu_mhz,

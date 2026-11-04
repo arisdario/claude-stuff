@@ -63,6 +63,16 @@ class TestParsers(unittest.TestCase):
     self.assertEqual(t['msm_therm'], 53.0)
     self.assertAlmostEqual(t['pm8994_tz'], 51.447)
 
+  def test_thermald_zones(self):
+    d = tempfile.mkdtemp()
+    for n, raw in ((5, 648), (7, 654), (10, 674), (12, 683), (2, 638), (16, 634)):
+      w(os.path.join(d, 'thermal_zone%d/temp' % n), '%d\n' % raw)
+    r = S.read_thermald_temps(d)
+    self.assertAlmostEqual(r['cpu'], 68.3)
+    self.assertAlmostEqual(r['comp'], 68.3)
+    os.remove(os.path.join(d, 'thermal_zone7/temp'))
+    self.assertEqual(S.read_thermald_temps(d), {})                           # a missing cpu zone: do not guess
+
   def test_gpu(self):
     d = tempfile.mkdtemp()
     w(os.path.join(d, 'gpubusy'), '30 120\n'); w(os.path.join(d, 'devfreq/cur_freq'), '510000000\n')
