@@ -154,6 +154,19 @@ def vf_filter(g, fps=None):
   return '%scrop=%d:%d:%d:%d,scale=%d:%d:flags=bicubic' % (f, g['cw'], g['ch'], g['cx'], g['cy'], C920_W, C920_H)
 
 
+def model_input_coverage(M_y):
+  """where the model's 512x256 input lands on the 1164x874 canvas: fraction on the real picture rows (77..796) versus the
+  black padding or outside the canvas. M_y maps model pixels to canvas pixels (replay083)."""
+  u, v = np.meshgrid(np.arange(R.MW, dtype=np.float64), np.arange(R.MH, dtype=np.float64))
+  Z = M_y[2, 0] * u + M_y[2, 1] * v + M_y[2, 2]
+  x = (M_y[0, 0] * u + M_y[0, 1] * v + M_y[0, 2]) / Z; y = (M_y[1, 0] * u + M_y[1, 1] * v + M_y[1, 2]) / Z
+  inside = (x >= 0) & (x < OUT_W) & (y >= 0) & (y < OUT_H)
+  real = inside & (y >= PAD_Y) & (y < PAD_Y + C920_H)
+  return {'real_pct': float(100 * real.mean()), 'padding_pct': float(100 * (inside & ~real).mean()),
+          'outside_canvas_pct': float(100 * (~inside).mean()), 'canvas_x': [float(x.min()), float(x.max())],
+          'canvas_y': [float(y.min()), float(y.max())]}
+
+
 # ------------------------------------------------------------------------------------------------------ preprocessing
 def rgb_to_i420(rgb):
   """camerad rgb_to_yuv.cl: BT.601 limited range, 2x2 chroma average -> flat I420 (Y, U, V)"""
@@ -380,6 +393,8 @@ def main():
   vpc = vp_canvas(a.vp_frac)
   ext, pitch, yaw = R.extrinsic_from_vp(*vpc)
   M_y = (R.K @ ext)[:, [0, 1, 3]] @ R.GROUND_FROM_MEDMODEL; M_uv = R.uv_matrix(M_y)
+  cov = model_input_coverage(M_y)
+  print('model input coverage: %.1f%% real pixels, %.1f%% black padding, %.1f%% outside the canvas' % (cov['real_pct'], cov['padding_pct'], cov['outside_canvas_pct']))
   state = np.zeros((1, 512), np.float32); desire = np.zeros((1, 8), np.float32)
   tc = np.array([[0, 1]] if a.rhd else [[1, 0]], np.float32)
   prev = None; rows = []; raw = []; extras = []; t_list = []
@@ -459,7 +474,7 @@ def main():
              'events_by_kind': {k: sum(1 for e in events if e['kind'] == k) for k in sorted({e['kind'] for e in events})},
              'frames_flagged_pct': float(100. * flagged.mean()), 'thresholds': DEFAULT_THR,
              'geometry': g, 'vp_frac_assumed': a.vp_frac, 'vp_canvas_px': list(vpc), 'calib_pitch_yaw_deg': [pitch, yaw],
-             'traffic_convention': 'RHD-traffic flag' if a.rhd else 'default (index 0)', 'variable_frame_rate': bool(vfr)}
+             'model_input_coverage': cov, 'traffic_convention': 'RHD-traffic flag' if a.rhd else 'default (index 0)', 'variable_frame_rate': bool(vfr)}
   json.dump(summary, open(os.path.join(a.out, 'summary.json'), 'w'), indent=1, default=float)
 
   L = []
@@ -486,6 +501,8 @@ def main():
   L.append('| inference | EON SNPE DSP/GPU | onnxruntime on CPU: timings below are NOT EON timings |')
   L.append('')
   for nn in g['notes']: L.append('- ' + nn)
+  L.append('- model input coverage with the assumed vanishing point: %.1f%% real source pixels, %.1f%% black padding, %.1f%% outside the canvas%s' % (
+      cov['real_pct'], cov['padding_pct'], cov['outside_canvas_pct'], ' - SOURCE ROWS MISSING: the vanishing point is far from the picture centre' if cov['real_pct'] < 95 else ''))
   L.append('')
   L.append('## Results')
   L.append('- lane probability: left median %.2f (p5 %.2f), right median %.2f (p5 %.2f)' % (
