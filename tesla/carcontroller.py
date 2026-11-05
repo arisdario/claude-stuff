@@ -1,5 +1,6 @@
 import datetime
 import os
+import time
 from cereal import log,tesla
 from common.params import Params
 from collections import namedtuple
@@ -19,6 +20,7 @@ from selfdrive.car.tesla.HSO_module import HSOController
 from selfdrive.car.tesla.speed_utils.movingaverage import MovingAverage
 from selfdrive.car.tesla.AHB_module import AHBController
 from selfdrive.car.tesla.uds_relay import UdsRelay
+from selfdrive.car.tesla import ic_raw_lanes   # IC raw-lanes view (display only, off unless /data/ic_raw_lanes exists)
 import cereal.messaging as messaging
 
 # Steer angle limits
@@ -121,6 +123,9 @@ class CarController():
     self.speedlimit = None
     self.trafficevents = messaging.sub_sock('trafficEvents', conflate=True)
     self.pathPlan = messaging.sub_sock('pathPlan', conflate=True)
+    self.model_sock = messaging.sub_sock('model', conflate=True)   # raw model lanes for the IC raw-lanes view only
+    self._raw_model = None
+    self._raw_model_t = 0.
     self.radarState = messaging.sub_sock('radarState', conflate=True)
     self.icLeads = messaging.sub_sock('uiIcLeads', conflate=True)
     self.icCarLR = messaging.sub_sock('uiIcCarLR', conflate=True)
@@ -460,6 +465,12 @@ class CarController():
           try: self.lane_prob = max(pathPlanMsg.pathPlan.lProb, pathPlanMsg.pathPlan.rProb)   # LANEWIGGLE
           except Exception: pass
         self._steerdamp_off = os.path.exists(STEERDAMP_OFF_FILE)
+        if os.path.exists(ic_raw_lanes.RAW_LANES_FILE):   # display only: latest model message for the IC raw-lanes view
+          try:
+            mm = messaging.recv_one_or_none(self.model_sock)
+            if mm is not None:
+              self._raw_model = mm.model; self._raw_model_t = time.monotonic()
+          except Exception: pass
         icCarLRMsg = self.icCarLR.receive(non_blocking=True)
         trafficeventsMsgs = None
         if self.trafficevents is not None:
@@ -715,6 +726,28 @@ class CarController():
           self.lead2Id,self.lead2Dx,self.lead2Dy,self.lead2Vx))
     return messages
 
+  def _apply_raw_lanes_to_ic(self, pp):
+    """With /data/ic_raw_lanes present, the cluster's lane lines/curve/width come from the model's own lane polynomials
+    instead of pathPlan (see ic_raw_lanes.py). Only the IC fields change - never steering, braking or acceleration.
+    Falls back to the normal view if the model message is missing or older than 0.5 s."""
+    try:
+      if not os.path.exists(ic_raw_lanes.RAW_LANES_FILE): return
+      m = self._raw_model
+      if m is None or time.monotonic() - self._raw_model_t > ic_raw_lanes.MAX_MODEL_AGE_S: return
+      r = ic_raw_lanes.raw_lane_ic(list(m.leftLane.poly), list(m.rightLane.poly), m.leftLane.prob, m.rightLane.prob,
+                                   pp.laneWidth if pp.laneWidth > 0 else 3.7)
+      if r is None:
+        self.lLine = 0; self.rLine = 0       # raw view: the model sees no lane
+        return
+      self.lLine, self.rLine = r[0], r[1]
+      self.curv3 = -clip(r[2],-0.00003,0.00003)   # same sign flip and AP clip ranges as the pathPlan values
+      self.curv2 = -clip(r[3],-0.0025,0.0025)
+      self.curv1 = -clip(r[4],-0.2,0.2)
+      self.curv0 = -clip(r[5],-3.5,3.5)
+      self.laneWidth = r[6]
+    except Exception:
+      pass
+
   def handlePathPlanSocketForCurvatureOnIC(self, pathPlanMsg, alcaStateData, CS):
     pp = pathPlanMsg.pathPlan
     if pp.paramsValid:
@@ -741,6 +774,7 @@ class CarController():
       self.curv3 = -clip(pp.dPoly[0],-0.00003,0.00003) #self.curv3Matrix.add(-clip(pp.cPoly[0],-0.00003,0.00003))
       self.laneWidth = pp.laneWidth
       self.visionCurvC0 = self.curv0
+      self._apply_raw_lanes_to_ic(pp)   # IC DISPLAY ONLY (needs /data/ic_raw_lanes); visionCurvC0 above stays the planner's
       self.prev_ldwStatus = self.ldwStatus
       self.ldwStatus = 0
       if alcaStateData.alcaEnabled:
