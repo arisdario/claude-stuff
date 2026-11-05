@@ -21,6 +21,7 @@ from selfdrive.car.tesla.speed_utils.movingaverage import MovingAverage
 from selfdrive.car.tesla.AHB_module import AHBController
 from selfdrive.car.tesla.uds_relay import UdsRelay
 from selfdrive.car.tesla import ic_raw_lanes   # IC raw-lanes view (display only, off unless /data/ic_raw_lanes exists)
+from selfdrive.car.tesla import steer_limits   # opt-in angle-limit layer (off unless /data/steer_limits_on exists)
 import cereal.messaging as messaging
 
 # Steer angle limits
@@ -126,6 +127,7 @@ class CarController():
     self.model_sock = messaging.sub_sock('model', conflate=True)   # raw model lanes for the IC raw-lanes view only
     self._raw_model = None
     self._raw_model_t = 0.
+    self._sl_strength = 0.             # steer_limits strength: 0 = layer off (no /data/steer_limits_on)
     self.radarState = messaging.sub_sock('radarState', conflate=True)
     self.icLeads = messaging.sub_sock('uiIcLeads', conflate=True)
     self.icCarLR = messaging.sub_sock('uiIcCarLR', conflate=True)
@@ -421,6 +423,12 @@ class CarController():
     if enable_steer_control and not self.alca_enabled and not self._steerdamp_off and self.lane_prob < LANE_CONF_BP[1]:
       rl = interp(self.lane_prob, LANE_CONF_BP, [angle_rate_lim, angle_rate_lim * LANE_DAMP_MULT])
       apply_angle = clip(apply_angle, self.last_angle - rl, self.last_angle + rl)
+    # STEER_LIMITS (opt-in, default OFF): tesla-unity's speed-dependent rate limit + clip to +-20 deg of the measured angle,
+    # blended at the strength in /data/steer_limits_on (default 0.25). No file = strength 0 = apply_angle untouched.
+    if frame % 100 == 0:
+      self._sl_strength = steer_limits.read_strength()
+    if enable_steer_control and self._sl_strength > 0.:
+      apply_angle = steer_limits.limit_angle(apply_angle, self.last_angle, CS.angle_steers, CS.v_ego, self._sl_strength)
     # If human control, send the steering angle as read at steering wheel.
     if human_control:
       apply_angle = CS.angle_steers
