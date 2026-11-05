@@ -1,0 +1,33 @@
+--- a/board/safety/safety_tesla.h
++++ b/board/safety/safety_tesla.h
+@@ -22,6 +22,18 @@
+         {2., 29., 38.},
+         {500., 500., 500.}};
+ 
++    // PER-MESSAGE angle-rate limits for the steering request received in 0x659 (deg per message, about 50 Hz).
++    // The check below used to reuse the 250 ms real-time tables x25 (= 626 deg per message, i.e. no limit).
++    // These are 2x the car-side limits (tesla/steer_limits.py, tesla-unity table: up 5/4/.75, down 5/5.5/2.4 per message
++    // at 0/5/15 m/s) so the car code limits first and this check only trips on something the car code let through.
++    const struct lookup_t TESLA_LOOKUP_ANGLE_RATE_UP_MSG = {
++        {2., 7., 17.},
++        {10., 8., 1.5}};
++
++    const struct lookup_t TESLA_LOOKUP_ANGLE_RATE_DOWN_MSG = {
++        {2., 7., 17.},
++        {10., 11., 4.8}};
++
+     const AddrBus TESLA_TX_MSGS[] = {//chassis CAN
+     {0x045,0}, {0x209,0}, {0x219,0}, {0x229,0}, {0x239,0}, {0x249,0},
+       {0x2B9,0}, {0x309,0}, {0x329,0}, {0x349,0}, {0x369,0}, {0x379,0}, {0x389,0},
+@@ -1687,8 +1699,9 @@
+         if (controls_allowed)
+         {
+           // add 1 to not false trigger the violation
+-          int delta_angle_up = (int)(tesla_interpolate(TESLA_LOOKUP_ANGLE_RATE_UP, tesla_speed) * 25. + 1.);
+-          int delta_angle_down = (int)(tesla_interpolate(TESLA_LOOKUP_ANGLE_RATE_DOWN, tesla_speed) * 25. + 1.);
++          // per message (not per 250 ms): factor 1, +1 deg margin for the integer-degree truncation of desired_angle
++          int delta_angle_up = (int)(tesla_interpolate(TESLA_LOOKUP_ANGLE_RATE_UP_MSG, tesla_speed) + 1.);
++          int delta_angle_down = (int)(tesla_interpolate(TESLA_LOOKUP_ANGLE_RATE_DOWN_MSG, tesla_speed) + 1.);
+           int highest_desired_angle = tesla_desired_angle_last + (tesla_desired_angle_last > 0 ? delta_angle_up : delta_angle_down);
+           int lowest_desired_angle = tesla_desired_angle_last - (tesla_desired_angle_last > 0 ? delta_angle_down : delta_angle_up);
+           int TESLA_MAX_ANGLE = (int)(tesla_interpolate(TESLA_LOOKUP_MAX_ANGLE, tesla_speed) + 1.);
