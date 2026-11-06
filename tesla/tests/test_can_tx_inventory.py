@@ -16,6 +16,12 @@ class Tx(unittest.TestCase):
     self.assertIn('could not queue for the host', s)
     self.assertNotIn('0x659  ', s.split('consumed')[0])          # the consumed addresses are not counted as bus traffic
 
+  def test_echoes_are_the_panda_own_transmits(self):
+    rx = Counter({(0, 0x118): 3000, (128, 0x399): 200, (129, 0x2a9): 100})
+    s = '\n'.join(T.summarize(Counter({(0, 0x488): 10}), rx, 1, 1, 10))
+    self.assertIn('TRANSMITTED successfully', s); self.assertIn('bus 0  0x399', s); self.assertIn('bus 1  0x2a9', s)
+    self.assertNotIn('bus 128:', s)                              # not listed as a bus of its own
+
   def test_not_rising(self):
     s = '\n'.join(T.summarize(Counter({(0, 0x488): 10}), Counter({(0, 0x118): 10}), 5, 5, 10))
     self.assertIn('not rising now', s)

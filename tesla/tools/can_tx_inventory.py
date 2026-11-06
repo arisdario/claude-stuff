@@ -31,7 +31,7 @@ def summarize(sent, rx, errs0, errs1, secs, fwd0=None, fwd1=None):
   for (b, a), n in real.items():
     txbus[b] += n
   out.append('frames openpilot asks the panda to put on a bus (per second), by bus:')
-  for b in sorted(set(txbus) | set(rxbus)):
+  for b in sorted(set(txbus) | set(x for x in rxbus if x < 128)):
     out.append('  bus %d: sent %6.1f/s   received %7.1f/s (%d addresses)' % (b, txbus[b] / secs, rxbus[b] / secs, len(rxaddr[b])))
   out.append('')
   out.append('what is sent, busiest first (bus, address, per second):')
@@ -39,6 +39,11 @@ def summarize(sent, rx, errs0, errs1, secs, fwd0=None, fwd1=None):
     out.append('  bus %d  0x%03x  %6.1f/s' % (b, a, n / secs))
   if consumed:
     out.append('consumed inside the panda firmware (not sent on any bus): ' + ', '.join('0x%03x %s %.0f/s' % (a, CONSUMED[a], n / secs) for (b, a), n in sorted(consumed.items(), key=lambda kv: kv[0][1])))
+  echoes = {k: v for k, v in rx.items() if k[0] >= 128}
+  if echoes:
+    out.append('frames the panda itself TRANSMITTED successfully (it reports them back as bus 128+N = its own transmit on bus N), by address:')
+    for (b, a), n in sorted(echoes.items(), key=lambda kv: -kv[1])[:20]:
+      out.append('  bus %d  0x%03x  %6.1f/s' % (b - 128, a, n / secs))
   out.append('')
   for b in sorted(txbus):
     if rxbus[b] == 0:
