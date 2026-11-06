@@ -11,7 +11,7 @@ DIR=$OP/selfdrive/camerad
 BK=${BK:-/data/camerad_backup_stock}
 SCONS=${SCONS:-scons}
 [ -d "$DIR" ] || { echo "STOP: $DIR not found (set OP=...)"; exit 1; }
-FILES="SConscript cameras/camera_qcom.c cameras/camera_ext_c920.cc cameras/camera_ext_c920.h cameras/camera_profile.h"
+FILES="SConscript cameras/camera_qcom.c cameras/camera_ext_c920.cc cameras/camera_ext_c920.h cameras/camera_profile.h cameras/camera_h264.h"
 
 if [ "$1" = "--restore" ]; then
   [ -d "$BK" ] || { echo "STOP: no backup at $BK"; exit 1; }

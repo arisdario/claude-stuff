@@ -8,6 +8,28 @@ if arch == "aarch64":
   cameras = ['cameras/camera_qcom.c', 'cameras/camera_ext_c920.cc'] + ['libuvc/src/' + f for f in ['ctrl.c', 'ctrl-gen.c', 'device.c', 'diag.c', 'frame.c', 'init.c', 'misc.c', 'stream.c']]
   env = env.Clone()
   env.Append(CPPPATH = ['#selfdrive/camerad/libuvc/include', '/data/data/com.termux/files/usr/include/libusb-1.0', '/usr/include/libusb-1.0'])
+  # OPTIONAL H.264 input for the C920 (cameras/camera_h264.h, opt-in at run time with /data/camera_format). It is compiled in ONLY if the phone's ffmpeg headers exist AND a trial
+  # compile of that header succeeds right here; libavcodec itself is never linked (it is loaded at run time, only when H.264 is selected). Any doubt = camerad is built exactly
+  # as before, MJPEG only.
+  try:
+    import os
+    avc_inc = os.environ.get('EXT_AVCODEC_INC', '/system/comma/usr/include')
+    if os.path.exists(avc_inc + '/libavcodec/avcodec.h') and os.path.exists(avc_inc + '/libavutil/frame.h'):
+      trial = env.Clone()
+      trial.Append(CPPPATH = [avc_inc])
+      conf = Configure(trial)
+      trial_src = '#define EXT_WANT_AVCODEC 1\n#include "%s"\nint main() { h264::Decoder d; char w[8]; return d.open(w, sizeof w) ? 1 : 0; }\n' % os.path.join(Dir('#selfdrive/camerad/cameras').abspath, 'camera_h264.h')
+      trial_ok = conf.TryCompile(trial_src, '.cc')
+      conf.Finish()
+      if trial_ok:
+        env.Append(CPPPATH = [avc_inc], CXXFLAGS = ['-DEXT_WANT_AVCODEC'])
+        print("camerad: H.264 input is built in (opt-in: /data/camera_format = h264)")
+      else:
+        print("camerad: H.264 input NOT built in (the trial compile failed): MJPEG only")
+    else:
+      print("camerad: H.264 input NOT built in (no ffmpeg headers in %s): MJPEG only" % avc_inc)
+  except Exception as e:
+    print("camerad: H.264 input NOT built in (%s): MJPEG only" % e)
 elif arch == "larch64":
   libs += []
   cameras = ['cameras/camera_qcom2.c']

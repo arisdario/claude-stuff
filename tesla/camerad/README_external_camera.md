@@ -78,3 +78,31 @@ validated against model timing, frame drops, CPU usage and thermal performance (
 ### Comparing profiles (`tesla/tools/camera_ab.py`)
 `python3 camera_ab.py ab --a off --b night --period 8 --rounds 6 --out /data/camera_ab/run1` alternates two modes on the same scene (it sets the mode through the same files as radarweb and waits for
 camerad's confirmation), saving frames and the model's lane/path outputs; `compare A B --out report` writes the metrics and a side-by-side page. A brighter picture is not scored as better.
+
+## Optional H.264 input (for testing; MJPEG stays the default)
+The C920 can also send H.264 (about 3 Mbit/s against 37 Mbit/s for MJPEG). camerad can decode it itself, **only if you ask**:
+
+```
+sh camera_switch.sh format h264     # writes /data/camera_format; takes effect at the next camerad start (reboot)
+sh camera_switch.sh format mjpeg    # back to the default (removes the file)
+sh camera_switch.sh status          # shows what is asked for and what runs ("running format")
+```
+Read the log line `ROAD CAMERA: external C920 streaming 1280x720 H.264 (decoded here) @ 20 fps`. If it says MJPEG instead, the line just before it tells why.
+
+**MJPEG is not touched.** The MJPEG callback (`on_frame`) is byte for byte what it was; H.264 has its own callback (`on_frame_h264`) and all of its code is behind `#ifdef EXT_HAVE_AVCODEC`
+(`tests/test_camera_h264_isolation.py` freezes `on_frame` and compares the two tails text for text). `SConscript` defines the flag only if the phone's ffmpeg headers exist **and** a trial compile
+of `camera_h264.h` succeeds; otherwise camerad is built exactly as before. libavcodec is never linked: it is loaded with `dlopen` from `/system/comma/usr/lib` (override: env `EXT_AVCODEC_DIR`)
+only when H.264 is selected, and its major version must equal the headers' or it is refused.
+
+**Falls back to MJPEG by itself** (camerad keeps running, with a log line saying why) when: the decoder library or its H.264 decoder is missing or has another version, the camera offers no H.264 1280x720 @ 20 fps,
+the H.264 stream will not start, or it produces no picture (self-test at startup retries once with MJPEG; at run time, two restarts without a picture switch to MJPEG for the rest of that camerad run).
+
+**What reaches the model:** a picture is shown only after a keyframe (IDR) has been seen; after any decode error, or a frame the decoder itself marks damaged, the decoder is rebuilt and every frame is dropped until the next keyframe,
+so a broken reference chain never reaches the model. Decoding is single-threaded and low-delay. Output is converted with the same convention as the MJPEG path (BT.601 full range, chroma replicated).
+Every 30 s the log prints the decode time per frame, decoder errors and frames dropped waiting for a keyframe.
+
+Differences while H.264 runs: the live page (`/video`) shows a JPEG re-encoded from the decoded picture about twice a second (instead of the camera's own frame); startup can wait for the first keyframe (the self-test allows 4 s).
+
+**Tested off the EON** (`tests/ext_c920/test_h264.py`, `test_ext_open.py`, with ffmpeg 6 and a fake camera): decode equals ffmpeg's own decode (mean difference 0.19 of 255), nothing is output before a keyframe, nothing after a truncated frame until the next keyframe,
+and all eight format-choice and failure scenarios end in the expected format (MJPEG unless everything works). **Not tested:** the EON's own libavcodec build, the real C920 keyframe interval, CPU cost on the phone (measured with a stand-alone ffmpeg: about 6.4 ms per 1280x720 frame),
+picture quality in motion or low light, delay.

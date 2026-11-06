@@ -7,12 +7,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <jpeglib.h>
 #include <sys/stat.h>
 #include "camera_profile.h"
+#include "camera_h264.h"      // optional H.264 input: compiled in only when the build defines EXT_WANT_AVCODEC (see SConscript); libavcodec is loaded at run time, never linked
 #include "libuvc/libuvc.h"
 
 #ifndef EXT_C920_TEST
@@ -38,6 +40,7 @@ extern volatile sig_atomic_t do_exit;
 #define SOURCE_FILE "/data/camera_source"
 #define FOCUS_FILE "/data/camera_focus"
 #define FLIP_FILE "/data/camera_flip"   // 1 = camera mounted upside down: the picture is rotated 180 degrees
+#define FORMAT_FILE "/data/camera_format"   // "h264" = ask the C920 for H.264 and decode it here; anything else / no file = MJPEG (the default). Read at every camera (re)start.
 
 // ---------------------------------------------------------------------------------------- pure helpers
 void ext_c920_pack_bgr(const uint8_t *rgb, int src_w, int src_h, uint8_t *dst, int dst_stride, int dst_w, int dst_h, int x0, int y0) {
@@ -126,6 +129,9 @@ VisionBuf *g_bufs = NULL;
 uint32_t g_frame_id = 0;
 unsigned g_cleared = 0;              // bit per rear buffer that has been blanked once (the black bars above and below the picture are never overwritten)
 uint8_t *g_rgb = NULL;               // decode target, SRC_W x SRC_H x 3
+volatile int g_h264 = 0;             // the running stream is H.264 (0 = MJPEG, always 0 in a build without H.264 support)
+volatile int g_h264_try = 0;         // this ext_open chose H.264 (stays set after a failed start, for the fallback)
+volatile int g_force_mjpeg = 0;      // H.264 failed in this camerad run: MJPEG until the next camerad start
 bool g_dispatch = false;             // false during the startup self-test: decode and count, but do not touch openpilot's buffers
 
 int64_t now_ns() {
@@ -212,8 +218,94 @@ void on_frame(uvc_frame_t *f, void *) {
 #endif
 }
 
+#ifdef EXT_HAVE_AVCODEC
+// ---- H.264 input (opt-in). Its own callback: on_frame above (MJPEG) is untouched. Everything after the decode is the same as in on_frame
+// (tests/test_h264_tail.py compares the two tails text for text, so they cannot drift apart).
+h264::Decoder g_dec;
+volatile int64_t g_dec_ns_sum = 0;
+volatile long g_dec_n = 0;
+
+bool wants_h264() {
+  char b[32] = {0};
+  const char *e = getenv("CAMERA_FORMAT");
+  if (e && *e) strncpy(b, e, sizeof(b) - 1);
+  else {
+    FILE *f = fopen(FORMAT_FILE, "r");
+    if (!f) return false;
+    if (!fgets(b, sizeof(b), f)) b[0] = 0;
+    fclose(f);
+  }
+  return strncasecmp(b, "h264", 4) == 0;
+}
+
+// the live page normally gets the camera's own MJPEG frame; with H.264 there is none, so one decoded picture (unflipped, as the camera sees it) is JPEG-encoded about twice a second
+void publish_live_rgb(const uint8_t *rgb) {
+  static int64_t last = 0;
+  int64_t t = now_ns();
+  if (t - last < 500000000LL) return;
+  last = t;
+  FILE *fp = fopen("/dev/c920_live.tmp", "wb");
+  if (!fp) return;
+  struct jpeg_compress_struct co;
+  JErr je;
+  co.err = jpeg_std_error(&je.pub);
+  je.pub.error_exit = jerr_exit;
+  if (setjmp(je.jb)) { jpeg_destroy_compress(&co); fclose(fp); return; }
+  jpeg_create_compress(&co);
+  jpeg_stdio_dest(&co, fp);
+  co.image_width = SRC_W; co.image_height = SRC_H; co.input_components = 3; co.in_color_space = JCS_RGB;
+  jpeg_set_defaults(&co);
+  jpeg_set_quality(&co, 80, TRUE);
+  jpeg_start_compress(&co, TRUE);
+  while (co.next_scanline < co.image_height) { JSAMPROW row = (JSAMPROW)(rgb + (size_t)co.next_scanline * SRC_W * 3); jpeg_write_scanlines(&co, &row, 1); }
+  jpeg_finish_compress(&co);
+  jpeg_destroy_compress(&co);
+  if (fclose(fp) == 0) rename("/dev/c920_live.tmp", "/dev/c920_live.jpg");
+}
+
+void on_frame_h264(uvc_frame_t *f, void *) {
+  if (f->frame_format != UVC_FRAME_FORMAT_H264 || !g_rgb) return;
+  const int64_t t_dec0 = now_ns();
+  if (!g_dec.decode((const uint8_t *)f->data, f->data_bytes, SRC_W, SRC_H, g_rgb)) return;   // undecodable, or waiting for the next keyframe: skipped, never shown to the model
+  g_dec_ns_sum += now_ns() - t_dec0; g_dec_n++;
+  publish_live_rgb(g_rgb);
+  //TAIL-BEGIN
+  if (g_flip) {                                                                 // 180 degrees = reverse the pixel order
+    uint8_t *a = g_rgb, *z = g_rgb + (size_t)SRC_W * SRC_H * 3 - 3;
+    for (; a < z; a += 3, z -= 3) { for (int k = 0; k < 3; k++) { uint8_t t = a[k]; a[k] = z[k]; z[k] = t; } }
+  }
+  if (g_frames % 20 == 0) {                                                     // ~1 per second at 20 fps: a sparse sample of the lower 55% (the road), after the flip
+    long sum = 0, n = 0;
+    for (int y = SRC_H * 45 / 100; y < SRC_H * 90 / 100; y += 12)
+      for (int x = 0; x < SRC_W; x += 16) { const uint8_t *p = g_rgb + ((size_t)y * SRC_W + x) * 3; sum += (p[0] * 77 + p[1] * 150 + p[2] * 29) >> 8; n++; }
+    if (n) g_luma = (float)sum / (float)n;
+  }
+  g_last_frame_ns = now_ns();
+  g_frames++;
+#ifndef EXT_C920_TEST
+  if (!g_dispatch || !g_rear || !g_bufs) return;
+  const int idx = tbuffer_select(&g_rear->camera_tb);
+  VisionBuf *b = &g_bufs[idx];
+  if (!(g_cleared & (1u << idx))) { memset(b->addr, 0, b->len); g_cleared |= (1u << idx); }
+  ext_c920_pack_bgr(g_rgb, SRC_W, SRC_H, (uint8_t *)b->addr, g_rear->ci.frame_stride, OUT_W, OUT_H, CROP_X, PAD_Y);
+  visionbuf_sync(b, VISIONBUF_SYNC_TO_DEVICE);
+  FrameMetadata m;
+  memset(&m, 0, sizeof(m));
+  m.frame_id = g_frame_id++;
+  m.timestamp_eof = (uint64_t)nanos_since_boot();
+  g_rear->camera_bufs_metadata[idx] = m;
+  tbuffer_dispatch(&g_rear->camera_tb, idx);
+#endif
+  //TAIL-END
+}
+#endif  // EXT_HAVE_AVCODEC
+
 void ext_close() {
   if (g.streaming) { uvc_stop_streaming(g.devh); g.streaming = 0; }
+#ifdef EXT_HAVE_AVCODEC
+  g_dec.close();                                                    // the callback thread has stopped; decoder state never survives a camera restart
+#endif
+  g_h264 = 0;
   if (g.devh) { uvc_close(g.devh); g.devh = NULL; }
   if (g.dev) { uvc_unref_device(g.dev); g.dev = NULL; }
   if (g.ctx) { uvc_exit(g.ctx); g.ctx = NULL; }
@@ -250,10 +342,32 @@ bool ext_open() {
   uvc_set_ae_priority(g.devh, 0);                                   // frame rate stays at 20 fps in the dark
   uvc_set_focus_auto(g.devh, 0);                                    // no focus hunting
   uvc_set_focus_abs(g.devh, (uint16_t)read_int_file(FOCUS_FILE, 0)); // 0 = infinity (the road)
+  uvc_frame_callback_t *frame_cb = on_frame;
+  g_h264_try = 0;
+#ifdef EXT_HAVE_AVCODEC
+  bool use264 = false;
+  if (wants_h264() && !g_force_mjpeg) {                              // any problem below leaves use264 false: the MJPEG lines that follow run exactly as before
+    char why[256] = "";
+    if (!g_dec.open(why, sizeof why)) fprintf(stderr, "external camera: H.264 not available (%s): using MJPEG\n", why);
+    else if (uvc_get_stream_ctrl_format_size(g.devh, &ctrl, UVC_FRAME_FORMAT_H264, SRC_W, SRC_H, SRC_FPS) < 0) { fprintf(stderr, "external camera: the camera offers no H.264 %dx%d @ %d fps: using MJPEG\n", SRC_W, SRC_H, SRC_FPS); g_dec.close(); }
+    else { use264 = true; frame_cb = on_frame_h264; }
+  }
+  if (!use264)
+#else
+  if (access(FORMAT_FILE, F_OK) == 0) fprintf(stderr, "external camera: %s exists, but this camerad was built without H.264 support: MJPEG\n", FORMAT_FILE);
+#endif
   if (uvc_get_stream_ctrl_format_size(g.devh, &ctrl, UVC_FRAME_FORMAT_MJPEG, SRC_W, SRC_H, SRC_FPS) < 0) { ext_close(); return false; }
   if (!g_rgb) g_rgb = (uint8_t *)malloc((size_t)SRC_W * SRC_H * 3);
   g_last_frame_ns = now_ns();
-  if (uvc_start_streaming(g.devh, &ctrl, on_frame, NULL, 0) < 0) { ext_close(); return false; }
+#ifdef EXT_HAVE_AVCODEC
+  g_h264 = use264 ? 1 : 0; g_h264_try = use264 ? 1 : 0; g_dec_ns_sum = 0; g_dec_n = 0;
+#endif
+  if (uvc_start_streaming(g.devh, &ctrl, frame_cb, NULL, 0) < 0) {
+#ifdef EXT_HAVE_AVCODEC
+    if (use264) { g_force_mjpeg = 1; fprintf(stderr, "external camera: the H.264 stream would not start: MJPEG from now on\n"); }
+#endif
+    ext_close(); return false;
+  }
   g.streaming = 1;
   g_stream_start_ns = now_ns();
   apply_led_off(g.devh);                                            // again once streaming: the firmware may switch the LED with the stream
@@ -360,10 +474,10 @@ void profile_tick(uvc_device_handle_t *devh, double now_s) {
     uint8_t aep = 255; uvc_get_ae_priority(devh, &aep, UVC_GET_CUR);
     char js[1024];
     snprintf(js, sizeof js, "{\"mode\":\"%s\",\"active\":\"%s\",\"luma\":%.1f,\"ae_mode\":%d,\"exposure\":%d,\"gain\":%d,\"brightness\":%d,\"contrast\":%d,\"saturation\":%d,\"sharpness\":%d,"
-             "\"backlight\":%d,\"wb_auto\":%d,\"wb_kelvin\":%d,\"power_line\":%d,\"ae_priority\":%d,\"apply_count\":%d,\"apply_ok\":%d,\"reason\":\"%s\",\"error\":\"%s\",\"t\":%ld}\n",
+             "\"backlight\":%d,\"wb_auto\":%d,\"wb_kelvin\":%d,\"power_line\":%d,\"ae_priority\":%d,\"format\":\"%s\",\"apply_count\":%d,\"apply_ok\":%d,\"reason\":\"%s\",\"error\":\"%s\",\"t\":%ld}\n",
              camprof::mode_name(g_prof.mode), g_prof.active < 0 ? "none" : (g_prof.active ? "night" : "day"), m.luma, v[camprof::AE_MODE], v[camprof::EXPOSURE], v[camprof::GAIN],
              v[camprof::BRIGHTNESS], v[camprof::CONTRAST], v[camprof::SATURATION], v[camprof::SHARPNESS], v[camprof::BACKLIGHT], v[camprof::WB_AUTO], v[camprof::WB_KELVIN],
-             v[camprof::POWER_LINE], aep == 255 ? -1 : (int)aep, g_prof.apply_count, g_prof.apply_ok ? 1 : 0, g_prof.last_reason.c_str(), g_prof.last_error.c_str(), (long)time(NULL));
+             v[camprof::POWER_LINE], aep == 255 ? -1 : (int)aep, g_h264 ? "h264" : "mjpeg", g_prof.apply_count, g_prof.apply_ok ? 1 : 0, g_prof.last_reason.c_str(), g_prof.last_error.c_str(), (long)time(NULL));
     FILE *f = fopen("/data/camera_status.json.tmp", "w");
     if (f) { fputs(js, f); fclose(f); rename("/data/camera_status.json.tmp", "/data/camera_status.json"); }
   }
@@ -375,10 +489,17 @@ void *capture_thread(void *) {
     if (!ext_open()) { fprintf(stderr, "external camera: not available, retrying\n"); sleep(1); continue; }
     g_flip = read_int_file(FLIP_FILE, 0) ? 1 : 0;
     g_prof.reopened();
-    fprintf(stderr, "ROAD CAMERA: external C920 streaming %dx%d MJPEG @ %d fps\n", SRC_W, SRC_H, SRC_FPS);
+    fprintf(stderr, "ROAD CAMERA: external C920 streaming %dx%d %s @ %d fps\n", SRC_W, SRC_H, g_h264 ? "H.264 (decoded here)" : "MJPEG", SRC_FPS);
     int last_focus = read_int_file(FOCUS_FILE, 0), tick = 0;
+    const unsigned long frames_at_open = g_frames;
     while (!g_stop && !do_exit && (now_ns() - g_last_frame_ns) < 3000000000LL) {
       usleep(100000);
+#ifdef EXT_HAVE_AVCODEC
+      if (g_h264 && tick % 300 == 299 && g_dec_n > 0) {                                  // every 30 s while H.264 runs: what decoding costs and how the decoder is doing
+        fprintf(stderr, "external camera: H.264 decode %.1f ms per frame on average (%ld frames), decoder errors %ld, frames dropped waiting for a keyframe %ld\n", g_dec_ns_sum / 1e6 / (double)g_dec_n, g_dec_n, g_dec.errors(), g_dec.dropped());
+        g_dec_ns_sum = 0; g_dec_n = 0;
+      }
+#endif
       if (++tick % 10 == 0) {
         if (g.devh) profile_tick(g.devh, now_ns() / 1e9);
         if (g.devh) {                                                                   // LED: on request from the radarweb camera page (/data/camera_led_now), and re-checked every 5 s
@@ -397,6 +518,12 @@ void *capture_thread(void *) {
       }
     }
     if (!g_stop && !do_exit) fprintf(stderr, "external camera: no frames for 3 s, restarting the camera\n");
+#ifdef EXT_HAVE_AVCODEC
+    if (g_h264_try && g_frames == frames_at_open && !g_force_mjpeg) {            // H.264 never produced one picture: do not loop on it
+      g_force_mjpeg = 1;
+      fprintf(stderr, "external camera: H.264 gave no picture at all: MJPEG from now on\n");
+    }
+#endif
     ext_close();
   }
   ext_close();
@@ -405,8 +532,7 @@ void *capture_thread(void *) {
 
 }  // namespace
 
-int ext_c920_selftest(int timeout_ms) {
-  fprintf(stderr, "external camera: self-test (opening the C920 ...)\n");
+static int selftest_once(int timeout_ms) {
   g_dispatch = false;
   g_frames = 0;
   if (!ext_open()) return 0;
@@ -414,6 +540,19 @@ int ext_c920_selftest(int timeout_ms) {
   while (g_frames < 3 && waited < timeout_ms) { usleep(50000); waited += 50; }
   int ok = g_frames >= 3;
   ext_close();
+  return ok;
+}
+
+int ext_c920_selftest(int timeout_ms) {
+  fprintf(stderr, "external camera: self-test (opening the C920 ...)\n");
+  int ok = selftest_once(timeout_ms);
+#ifdef EXT_HAVE_AVCODEC
+  if (!ok && g_h264_try) {                                          // H.264 was chosen and failed (no stream, or no picture): the camera itself may be fine, so MJPEG gets one try before the C920 is given up on
+    g_force_mjpeg = 1;
+    fprintf(stderr, "external camera: H.264 self-test failed: trying MJPEG\n");
+    ok = selftest_once(timeout_ms);
+  }
+#endif
   fprintf(stderr, "external camera: self-test %s (%lu frames)\n", ok ? "PASSED" : "FAILED", (unsigned long)g_frames);
   return ok;
 }
