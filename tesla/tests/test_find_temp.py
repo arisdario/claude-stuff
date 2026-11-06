@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import find_temp as F
 
 
-def make_log(path, outside, inside, seed, rows=80, hide=True):
+def make_log(path, outside, inside, seed, rows=80, hide=True, inside_to=None):
   """a fake maplog: random chatter on many addresses, a counter, a clock - and, hidden, 0x2e5 byte 3 = (outside+40)*2 and 0x2e5 byte 5 = inside*10/ 5 (16-bit would be harder)"""
   rnd = random.Random(seed)
   with open(path, 'w') as f:
@@ -14,7 +14,7 @@ def make_log(path, outside, inside, seed, rows=80, hide=True):
       raw['0x318'] = bytes([0x9a, 0x0b, i % 60, 0x12, 4, (i // 60) % 60, 0x40, 1]).hex()          # a clock
       raw['0x1f0'] = bytes([i & 0xFF, 0, 0, 0, 0, 0, 0, 0]).hex()                                  # a counter
       if hide:
-        t_out = outside + 0.05 * (i % 3); t_in = inside
+        t_out = outside + 0.05 * (i % 3); t_in = inside if inside_to is None else inside + (inside_to - inside) * i / float(rows - 1)
         raw['0x2e5'] = bytes([1, 2, 3, int(round((t_out + 40) * 2)), 7, int(round(t_in * 5)), 9, 9]).hex()   # outside: x0.5 -40 ; inside: x0.2
       f.write(json.dumps({'t': i, 'raw': raw}) + '\n')
 
@@ -77,6 +77,31 @@ class T(unittest.TestCase):
         f.write(json.dumps({'raw': {'0x200': bytes([0, 0, 0, 0, 0x01, 0xF4, 0, 0]).hex()}}) + '\n')     # 0x01F4 = 500 big-endian at bytes 4-5 -> x0.1 = 50.0
     sc = F.scan(F.load(p)[0])
     self.assertIn((0x200, ('M', 16, 4, False)), sc); self.assertEqual(sc[(0x200, ('M', 16, 4, False))][0], 500)
+
+
+class OneLogMoving(unittest.TestCase):
+  def setUp(self):
+    self.d = tempfile.mkdtemp(prefix='ft2_')
+
+  def test_inside_that_moves_inside_one_log_is_found_with_start_greater_than_end(self):
+    p = os.path.join(self.d, 'move.jsonl'); make_log(p, 9.0, 23.5, seed=5, rows=100, inside_to=27.0)
+    per, _ = F.load(p)
+    # the moving field is not steady over the whole log, but steady in the first and last fifth
+    entries = [(F.scan(per, 'first'), {'inside': 23.5}), (F.scan(per, 'last'), {'inside': 27.0})]
+    rows, n, distinct = F.search(entries, 'inside', tol=0.75)
+    self.assertEqual((n, distinct), (2, 2))
+    top = rows[0]
+    self.assertEqual(top['addr'], 0x2e5); self.assertEqual(top['key'][2], 40); self.assertEqual((top['scale'], top['offset']), (0.2, 0.0))
+
+  def test_cli_accepts_start_greater_than_end(self):
+    p = os.path.join(self.d, 'cli.jsonl'); make_log(p, 9.0, 23.5, seed=6, rows=100, inside_to=27.0)
+    self.assertEqual(F.parse_spec(p + ':outside=9,inside=23.5>27')[1], {'outside': 9.0, 'inside': (23.5, 27.0)})
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+      rc = F.main([p + ':inside=23.5>27'])
+    out = buf.getvalue()
+    self.assertEqual(rc, 0); self.assertIn('0x2e5', out); self.assertIn('2 reading point(s), 2 distinct', out)
 
 
 if __name__ == '__main__':

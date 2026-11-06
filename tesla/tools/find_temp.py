@@ -4,10 +4,14 @@
 You tell it what the car's own display showed while each log was recorded; it scans every field of every address for one that matches those readings through a plain scale and offset.
 
   python3 find_temp.py LOG1.jsonl:outside=5,inside=19.5  LOG2.jsonl:outside=11,inside=23  LOG3.jsonl:outside=12,inside=27  [--top 10] [--tol 0.75]
+  python3 find_temp.py LOG.jsonl:outside=9,inside=23.5>26      ONE log in which the inside temperature changed from 23.5 (start) to 26 (end): see below
 
 LOG = a maplog file (/data/maplog/map_*.jsonl: one row per second with the latest payload of every address under "raw"). A reading is optional per log (give only outside, only inside, or both).
 HOW MANY LOGS: with ONE log the tool can only list fields that CAN be a temperature (many random fields fit one number): treat those as hints. With TWO logs at clearly different
 temperatures most chance matches disappear; with THREE or more, a field that fits all of them through a round scale (0.5, 0.1, 1 ... and offset 0, -40, -50 ...) is very likely real.
+ONE LOG IS ENOUGH FOR THE INSIDE TEMPERATURE if it moved during the recording (heat or cool the cabin by 2 degrees or more while logging; write down the display at the start and at the end and
+give them as inside=START>END). The tool then fits the first fifth of the log to START and the last fifth to END, which is two points, so a field must actually follow the cabin. Outside cannot
+be moved, so for outside you still need logs on other days.
 Record the logs a few hours or days apart (or after heating/cooling the cabin) and note the displayed numbers at the same moment. The value must also be steady inside each log (a temperature
 changes slowly): fields that jump around are ignored.
 
@@ -86,12 +90,17 @@ def trivial(key, med):
   return med == 0 or (not signed and med == (1 << w) - 1) or (signed and med == -1)
 
 
-def scan(per):
-  """-> {(addr, key): (median, steadiness)} for fields that are steady in this log"""
+def scan(per, part='all'):
+  """-> {(addr, key): (median, steadiness)} for fields that are steady in this log. part = 'all', 'first' (the first fifth of the samples) or 'last' (the last fifth)"""
   out = {}
   for addr, ints in per.items():
     if len(ints) < 3:
       continue
+    n = max(3, len(ints) // 5)
+    if part == 'first':
+      ints = ints[:n]
+    elif part == 'last':
+      ints = ints[-n:]
     for key, vals in fields(ints):
       med, st = stats(vals)
       if st >= STEADY and not trivial(key, med):
@@ -141,7 +150,11 @@ def parse_spec(spec):
     k, _, v = part.partition('=')
     if k.strip() not in ('outside', 'inside'):
       raise ValueError('%r: only outside= and inside= are known' % part)
-    rd[k.strip()] = float(v)
+    if '>' in v:                                      # START>END: the temperature moved during this log
+      a, _, b = v.partition('>')
+      rd[k.strip()] = (float(a), float(b))
+    else:
+      rd[k.strip()] = float(v)
   return path, rd
 
 
@@ -160,11 +173,18 @@ def main(argv=None):
     per, rows = load(path)
     sc = scan(per)
     print('%s: %d rows, %d addresses, %d steady fields; readings %s' % (path, rows, len(per), len(sc), rd))
-    logs.append((sc, rd))
+    moving = [t for t, v in rd.items() if isinstance(v, tuple)]
+    if moving:
+      first, last = scan(per, 'first'), scan(per, 'last')
+    for t, v in rd.items():
+      if isinstance(v, tuple):
+        logs.append((first, {t: v[0]})); logs.append((last, {t: v[1]}))     # two points from one log
+      else:
+        logs.append((sc, {t: v}))
   rc = 1
   for target in ('outside', 'inside'):
     rows, n, distinct = search(logs, target, a.tol)
-    print('\n== %s temperature: %d log(s) with a reading, %d distinct value(s)' % (target, n, distinct))
+    print('\n== %s temperature: %d reading point(s), %d distinct value(s)' % (target, n, distinct))
     if n == 0:
       print('   no reading given'); continue
     if n < 2 or distinct < 2:
