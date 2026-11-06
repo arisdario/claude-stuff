@@ -657,14 +657,25 @@ class CarState(CarStateBase):
 
     # WIGGLE-DIAG: was hardcoded to 0 ("#JCT"). No control code in this repo reads angle_steers_rate
     # (grepped) - only interface.py copies it to ret.steeringRate for logging/display. Plain finite
-    # difference of the same angle_steers used above; falls back to 0 on the first sample or if the
-    # clock didn't advance (duplicate/out-of-order CAN parse), so it can never divide by zero or spike.
+    # difference of the same angle_steers used above - BUT update() runs every CAN parse cycle while
+    # EPAS_sysStatus (the message EPAS_internalSAS/angle_steers comes from) only actually refreshes at
+    # ~1.3 Hz (see the "Actual message freq is 1.3 Hz" comment on its check above): most calls see the
+    # exact same cached value. Timestamping every call regardless would measure the real ~0.76 s jump
+    # against the ~0.01 s since the PREVIOUS call, overstating the rate by ~75x. So the timestamp (and
+    # "last" value) only move forward when angle_steers has actually changed - the rate is 0 on every
+    # call where nothing new arrived (honest: no new sample means no known rate, not a stale one held
+    # over), and correct on the call where a real new sample lands, using the true elapsed time since
+    # the previous real sample. Falls back to 0 on the first sample; can't divide by zero.
     _now = time.time()
-    if self._last_angle_steers_t is not None and _now > self._last_angle_steers_t:
-      self.angle_steers_rate = (self.angle_steers - self._last_angle_steers) / (_now - self._last_angle_steers_t)
+    if self._last_angle_steers_t is None:
+      self.angle_steers_rate = 0.
+      self._last_angle_steers, self._last_angle_steers_t = self.angle_steers, _now
+    elif self.angle_steers != self._last_angle_steers:
+      _dt = _now - self._last_angle_steers_t
+      self.angle_steers_rate = (self.angle_steers - self._last_angle_steers) / _dt if _dt > 0 else 0.
+      self._last_angle_steers, self._last_angle_steers_t = self.angle_steers, _now
     else:
       self.angle_steers_rate = 0.
-    self._last_angle_steers, self._last_angle_steers_t = self.angle_steers, _now
 
     self.turn_signal_state_left = cp.vl["GTW_carState"]['BC_indicatorLStatus']
     self.turn_signal_state_right = cp.vl["GTW_carState"]['BC_indicatorRStatus']

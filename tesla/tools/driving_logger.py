@@ -86,6 +86,12 @@ frame used for long_enabled/steer_enabled - teslacan.create_fake_DAS_msg packs i
 decoded back to degrees here (das_commanded_angle). Comparing das_commanded_angle against
 steering_angle/steering_rate/steering_torque side by side is the intended way to see whether a
 wiggle correlates with a torque blip, a commanded/measured angle mismatch, or neither.
+Also subscribes to carControl (standard openpilot message; interface.py/controlsd publish it every
+cycle) purely to log actuators.steerAngle and its negation (actuator_steer_angle /
+actuator_steer_angle_neg) as ground truth for which sign convention matches what, at a given moment
+- see "STEER_LIMITS HYPOTHETICALS" note below for why das_commanded_angle's sign can legitimately
+differ from steering_angle's while openpilot is actively steering.
+
 Two further signals exist on the bus but are not yet published to cereal by this fork (steer_error
 from EPAS_steeringFault, steer_not_allowed from EPAS_eacStatus - both internal-only in interface.py):
 not added here to keep this change minimal; flag if you want them exposed too.
@@ -248,13 +254,14 @@ def run(out_path, hz=20.0, duration=None, log=print):
   import cereal.messaging as messaging  # local import: keeps this file importable/testable off-car
   sl = _load_steer_limits()
 
-  topics = ('controlsState', 'carState', 'radarState', 'model')
+  topics = ('controlsState', 'carState', 'radarState', 'model', 'carControl')
   subs = {t: messaging.sub_sock(t, conflate=True) for t in topics}
   sc = messaging.sub_sock('sendcan')    # drained in full every tick, like lightdash - a flood here never starves us
 
   clf = Classifier()
   last_ctrl = last_long = last_steer = None
   last_das = decode_0x659(None)
+  last_actuator_angle = None
   t_ctrl = t_659 = None
   prev_request, prev_t_659 = None, None     # for the steer_limits hypotheticals, see module docstring
   reported_fields = False
@@ -291,6 +298,12 @@ def run(out_path, hz=20.0, duration=None, log=print):
 
       car = messaging.recv_one_or_none(subs['carState'])
       rad = messaging.recv_one_or_none(subs['radarState'])
+      cc = messaging.recv_one_or_none(subs['carControl'])
+      if cc is not None:
+        try:
+          last_actuator_angle = float(cc.carControl.actuators.steerAngle)
+        except Exception:
+          last_actuator_angle = None
 
       state = clf.update(now_mono, last_ctrl, None if t_ctrl is None else now_mono - t_ctrl,
                           last_long, None if t_659 is None else now_mono - t_659,
@@ -323,6 +336,12 @@ def run(out_path, hz=20.0, duration=None, log=print):
           # an angle-rate oscillation, or neither.
           'steering_torque': round(float(g('steeringTorque', 0.)), 3),
           'steering_rate': round(float(g('steeringRate', 0.)), 2),
+          # GROUND TRUTH for the commanded-vs-measured sign question: carControl.actuators.steerAngle is
+          # openpilot's own target angle BEFORE carcontroller.py's "apply_angle = -actuators.steerAngle
+          # # Tesla is reversed vs OP" negation. Logging both this raw value and its negation lets you
+          # see directly which convention matches steering_angle/das_commanded_angle, instead of guessing.
+          'actuator_steer_angle': None if last_actuator_angle is None else round(last_actuator_angle, 2),
+          'actuator_steer_angle_neg': None if last_actuator_angle is None else round(-last_actuator_angle, 2),
           'steering_pressed': bool(g('steeringPressed', False)),
           'left_blinker': bool(g('leftBlinker', False)),
           'right_blinker': bool(g('rightBlinker', False)),
