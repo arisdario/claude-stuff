@@ -1,0 +1,27 @@
+import os, sys, unittest
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
+from collections import Counter
+import can_tx_inventory as T
+
+
+class Tx(unittest.TestCase):
+  def test_suspect_bus_and_consumed(self):
+    sent = Counter({(0, 0x488): 500, (1, 0x2b9): 200, (0, 0x659): 1000, (0, 0x557): 100})
+    rx = Counter({(0, 0x118): 3000})
+    s = '\n'.join(T.summarize(sent, rx, 100, 600, 10))
+    self.assertIn('SUSPECT bus 1', s)
+    self.assertNotIn('SUSPECT bus 0', s)
+    self.assertIn('consumed inside the panda firmware', s)
+    self.assertIn('+500 in 10 s = 50/s', s)
+    self.assertNotIn('0x659  ', s.split('consumed')[0])          # the consumed addresses are not counted as bus traffic
+
+  def test_not_rising(self):
+    s = '\n'.join(T.summarize(Counter({(0, 0x488): 10}), Counter({(0, 0x118): 10}), 5, 5, 10))
+    self.assertIn('not rising now', s)
+
+  def test_no_health(self):
+    self.assertIn('no health message', '\n'.join(T.summarize(Counter(), Counter(), None, None, 10)))
+
+
+if __name__ == '__main__':
+  unittest.main()
