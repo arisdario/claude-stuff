@@ -120,6 +120,14 @@ class CarController():
       _mapcurve_ensure_running()
     except Exception:
       pass
+    # LIGHTDASH: start the read-only web dashboard (lightdash) with the stack, if /data/lightdash is built.
+    # Guarded + never raises, so it can't affect the car; disable with /data/lightdash_off. (Not in the
+    # openpilot process manager - see lightdash_launcher.py. lightdash never opens the panda or sends anything.)
+    try:
+      from selfdrive.car.tesla.lightdash_launcher import ensure_running as _lightdash_ensure_running
+      _lightdash_ensure_running()
+    except Exception:
+      pass
     self.sent_DAS_bootID = False
     self.speedlimit = None
     self.trafficevents = messaging.sub_sock('trafficEvents', conflate=True)
