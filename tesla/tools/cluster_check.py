@@ -29,6 +29,7 @@ PANDATOOL = '/data/pandatool.py'
 def analyze_dump(path):
   """-> dict(rows, seen{id: rows}, pairs{(op_status in 0x659, op_status in 0x399): rows})"""
   seen = collections.Counter(); pairs = collections.Counter(); rows = 0
+  lanes = collections.Counter(); objs = collections.Counter()
   with open(path) as f:
     for line in f:
       try:
@@ -38,13 +39,15 @@ def analyze_dump(path):
       rows += 1
       for k in r:
         seen[k.lower()] += 1
+      if r.get('0x239'): lanes[r['0x239'].replace(' ', '')[:14]] += 1      # payload without the counter byte
+      if r.get('0x309'): objs[r['0x309'].replace(' ', '')[:14]] += 1
       a, s = r.get('0x659'), r.get('0x399')
       if a and s:
         try:
           pairs[(int(a[:2], 16) & 15, int(s[:2], 16) & 15)] += 1
         except ValueError:
           pass
-  return {'rows': rows, 'seen': dict(seen), 'pairs': dict(pairs)}
+  return {'rows': rows, 'seen': dict(seen), 'pairs': dict(pairs), 'lanes': dict(lanes), 'objs': dict(objs)}
 
 
 def dump_verdict(res):
@@ -69,6 +72,30 @@ def dump_verdict(res):
   return 'STATUS_IGNORED', ('openpilot sends op_status 5 in %d rows but the cluster frame carries it in only %d: the panda is not using the '
                             'status bytes (older/different firmware than the source). Run pandatool status and re-flash if DIFFERENT' %
                             (engaged, engaged_follow))
+
+
+def decode_lanes(hexpayload):
+  """DAS_lanes (0x239) payload hex (>= 6 bytes) -> readable fields (DBC scaling)"""
+  c = bytes.fromhex(hexpayload)
+  return {'width_m': 2 + 0.3125 * (c[0] >> 4), 'left_lane': c[0] & 1, 'right_lane': (c[0] >> 1) & 1, 'range_m': c[1],
+          'C0_m': c[2] * 0.035 - 3.5, 'C1': c[3] * 0.0016 - 0.2, 'C2': c[4] * 2e-5 - 0.0025, 'C3': c[5] * 2.4e-7 - 3e-5}
+
+
+def lanes_note(res):
+  """-> text about whether the cluster ever got lane/lead data (None if no 0x239 in the dump)"""
+  lanes = res.get('lanes') or {}
+  if not lanes:
+    return None
+  n = sum(lanes.values()); top = max(lanes, key=lanes.get)
+  d = decode_lanes(top)
+  txt = '0x239 (lanes to the cluster): %d distinct payloads in %d rows; most common: width %.2f m, left=%d right=%d, range %d m, C0 %.2f m' % (
+      len(lanes), n, d['width_m'], d['left_lane'], d['right_lane'], d['range_m'], d['C0_m'])
+  if len(lanes) <= 2 and not d['left_lane'] and not d['right_lane']:
+    txt += '\n   => LANES_NEVER_UPDATED: the same "no lane" frame the whole drive (a width of 6.06 m / range 161 m is the firmware default overflow, see CLUSTER.md)'
+  objs = res.get('objs') or {}
+  if objs and len(objs) <= 2:
+    txt += '\n   0x309 (lead cars): %d distinct payloads: no lead was ever drawn' % len(objs)
+  return txt
 
 
 def read_cfg():
@@ -124,6 +151,8 @@ def main():
     lines.append('file: %s  rows: %d' % (log, res['rows']))
     lines.append('frames seen (rows): %s' % {k: res['seen'].get(k, 0) for k in ('0x659', '0x488') + CLUSTER_IDS})
     lines.append('(op_status in 0x659 from openpilot, op_status in 0x399 to the cluster): rows %s' % res['pairs'])
+    note = lanes_note(res)
+    if note: lines.append(note)
     code, text = dump_verdict(res)
     lines.append('=> %s: %s' % (code, text))
   out = '/data/cluster_check_%s.txt' % time.strftime('%Y%m%d_%H%M%S')

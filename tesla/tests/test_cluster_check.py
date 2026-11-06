@@ -34,6 +34,18 @@ class T(unittest.TestCase):
   def test_status_follows(self): self.assertEqual(self.v([row(5)] * 100), 'STATUS_FOLLOWS')
   def test_not_engaged(self): self.assertEqual(self.v([row(2, cl=1)] * 100), 'NOT_ENGAGED')
   def test_too_short(self): self.assertEqual(self.v([row(5)] * 5), 'TOO_SHORT')
+  def test_lanes_never_updated_is_reported(self):
+    rows = [dict(row(5, cl=1), **{'0x239': 'd0 a1 64 7f 7f 7f f0 %02x' % (i % 16), '0x309': '03 ff ff ff 03 00 00 00'}) for i in range(100)]
+    p = dump(rows)
+    try:
+      note = C.lanes_note(C.analyze_dump(p))
+      self.assertIn('LANES_NEVER_UPDATED', note); self.assertIn('width 6.06 m', note)
+    finally: os.remove(p)
+
+  def test_decode_lanes(self):
+    d = C.decode_lanes('d0a1647f7f7f')
+    self.assertAlmostEqual(d['width_m'], 6.0625); self.assertEqual((d['left_lane'], d['right_lane'], d['range_m']), (0, 0, 161))
+
   def test_bad_lines_ignored(self):
     p = dump([row(5)] * 80)
     open(p, 'a').write('not json\n')
