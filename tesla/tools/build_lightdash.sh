@@ -1,9 +1,9 @@
 #!/bin/sh
 # build_lightdash.sh - compile tools/lightdash.cc ON THE EON against its own openpilot tree (cereal sources + the capnp headers its build generated).
-#   sh /data/claude-stuff/tesla/tools/build_lightdash.sh          -> /data/lightdash        (override: OP=/data/openpilot OUT=/data/lightdash CXX=clang++)
+#   sh /data/claude-stuff/tesla/tools/build_lightdash.sh          -> /data/lightdash        (override: OP=/data/openpilot OUT=/data/lightdash CXX=clang++ SYS=/system/comma/usr/lib)
 # Read-only with respect to the car: it only compiles. Then:  /data/lightdash --selftest   and   nohup nice -n 19 /data/lightdash > /data/lightdash.log 2>&1 &
 set -e
-OP=${OP:-/data/openpilot}; C=$OP/cereal; OUT=${OUT:-/data/lightdash}; HERE=$(cd "$(dirname "$0")" && pwd)
+OP=${OP:-/data/openpilot}; C=$OP/cereal; OUT=${OUT:-/data/lightdash}; HERE=$(cd "$(dirname "$0")" && pwd); SYS=${SYS:-/system/comma/usr/lib}
 CXX=${CXX:-$(command -v clang++ || command -v g++)}
 [ -n "$CXX" ] || { echo "STOP: no clang++/g++ found"; exit 1; }
 [ -f "$C/gen/cpp/log.capnp.h" ] || { echo "STOP: $C/gen/cpp/log.capnp.h missing - openpilot has to be built once (scons) so cereal's capnp headers exist"; exit 1; }
@@ -11,13 +11,26 @@ CXX=${CXX:-$(command -v clang++ || command -v g++)}
 # capnp / zmq headers and libraries: openpilot ships its own under phonelibs, else the system ones
 INC=""; LIB=""
 for d in $(find "$OP/phonelibs" -maxdepth 3 -type d -name include 2>/dev/null | grep -E "capnp|zmq"); do INC="$INC -I$d"; done
-for f in libcapnp.a libkj.a libzmq.a; do p=$(find "$OP/phonelibs" -name "$f" 2>/dev/null | grep -E "aarch64|arm64" | head -1); [ -n "$p" ] && LIB="$LIB $p"; done
-[ -n "$LIB" ] || LIB="-lcapnp -lkj -lzmq"
+# each library on its own: the shared one openpilot's own build links against (SYS) first; else openpilot's static one from phonelibs (not position independent: needs -no-pie, see below); else the system default
+STATIC=0
+for n in capnp kj zmq; do
+  if [ -f "$SYS/lib$n.so" ]; then LIB="$LIB -L$SYS -l$n"
+  else
+    p=$(find "$OP/phonelibs" -name "lib$n.a" 2>/dev/null | grep -E "aarch64|arm64" | head -1)
+    if [ -n "$p" ]; then LIB="$LIB $p"; STATIC=1; else LIB="$LIB -l$n"; fi
+  fi
+done
 echo "compiler: $CXX"; echo "includes: $INC"; echo "libs: $LIB"
 OBJ=$(mktemp -d); trap 'rm -rf "$OBJ"' EXIT
-FLAGS="-O2 -std=c++14 -Wno-c99-designator -Wno-reorder-init-list -Wno-reorder $INC -I$C -I$C/messaging -I$C/gen/cpp"
+FLAGS="-O2 -std=c++14 -Wno-unknown-warning-option -Wno-c99-designator -Wno-reorder-init-list -Wno-reorder $INC -I$C -I$C/messaging -I$C/gen/cpp"
 CERE=$C/libcereal.a; [ -f "$CERE" ] || { for g in car log tesla tinkla ui; do $CXX $FLAGS -c $C/gen/cpp/$g.capnp.c++ -o $OBJ/$g.o; done; CERE="$OBJ/car.o $OBJ/log.o $OBJ/tesla.o $OBJ/tinkla.o $OBJ/ui.o"; }
 for f in messaging impl_zmq impl_msgq msgq; do $CXX $FLAGS -c $C/messaging/$f.cc -o $OBJ/$f.o; done
 $CXX $FLAGS -c "$HERE/lightdash.cc" -o $OBJ/lightdash.o
-$CXX $OBJ/lightdash.o $OBJ/messaging.o $OBJ/impl_zmq.o $OBJ/impl_msgq.o $OBJ/msgq.o $CERE $LIB -lpthread -o "$OUT"
-echo "built $OUT ($(wc -c < "$OUT") bytes)"; "$OUT" --selftest
+LINK="$CXX $OBJ/lightdash.o $OBJ/messaging.o $OBJ/impl_zmq.o $OBJ/impl_msgq.o $OBJ/msgq.o $CERE $LIB -lpthread -Wl,-rpath,$SYS"
+if ! $LINK -o "$OUT" 2>"$OBJ/link.log"; then
+  echo "link failed; retrying with -no-pie (openpilot's static phonelibs are not position independent)"
+  $LINK -no-pie -o "$OUT" 2>>"$OBJ/link.log" || { echo "LINK FAILED. The linker said:"; head -30 "$OBJ/link.log"; exit 1; }
+fi
+echo "built $OUT ($(wc -c < "$OUT") bytes)"
+LD_LIBRARY_PATH="$SYS:$LD_LIBRARY_PATH" "$OUT" --selftest
+echo "run it with:  LD_LIBRARY_PATH=$SYS nohup nice -n 19 $OUT > /data/lightdash.log 2>&1 &"
