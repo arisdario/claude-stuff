@@ -96,10 +96,12 @@ class OneLogMoving(unittest.TestCase):
   def test_cli_accepts_start_greater_than_end(self):
     p = os.path.join(self.d, 'cli.jsonl'); make_log(p, 9.0, 23.5, seed=6, rows=100, inside_to=27.0)
     self.assertEqual(F.parse_spec(p + ':outside=9,inside=23.5>27')[1], {'outside': 9.0, 'inside': (23.5, 27.0)})
+    self.assertEqual(F.parse_spec(p + ':outside=9,inside=23.5..27')[1], {'outside': 9.0, 'inside': (23.5, 27.0)})   # the form to type: > is a shell redirect
+    self.assertEqual(F.parse_spec('x.jsonl:inside=23..26')[1], {'inside': (23.0, 26.0)})
     import io, contextlib
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-      rc = F.main([p + ':inside=23.5>27'])
+      rc = F.main([p + ':inside=23.5..27'])
     out = buf.getvalue()
     self.assertEqual(rc, 0); self.assertIn('0x2e5', out); self.assertIn('2 reading point(s), 2 distinct', out)
 

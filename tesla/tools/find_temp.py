@@ -4,13 +4,13 @@
 You tell it what the car's own display showed while each log was recorded; it scans every field of every address for one that matches those readings through a plain scale and offset.
 
   python3 find_temp.py LOG1.jsonl:outside=5,inside=19.5  LOG2.jsonl:outside=11,inside=23  LOG3.jsonl:outside=12,inside=27  [--top 10] [--tol 0.75]
-  python3 find_temp.py LOG.jsonl:outside=9,inside=23.5>26      ONE log in which the inside temperature changed from 23.5 (start) to 26 (end): see below
+  python3 find_temp.py LOG.jsonl:outside=9,inside=23.5..26      ONE log in which the inside temperature changed from 23.5 (start) to 26 (end): see below. (Do NOT write > : the shell would send the output to a file)
 
 LOG = a maplog file (/data/maplog/map_*.jsonl: one row per second with the latest payload of every address under "raw"). A reading is optional per log (give only outside, only inside, or both).
 HOW MANY LOGS: with ONE log the tool can only list fields that CAN be a temperature (many random fields fit one number): treat those as hints. With TWO logs at clearly different
 temperatures most chance matches disappear; with THREE or more, a field that fits all of them through a round scale (0.5, 0.1, 1 ... and offset 0, -40, -50 ...) is very likely real.
 ONE LOG IS ENOUGH FOR THE INSIDE TEMPERATURE if it moved during the recording (heat or cool the cabin by 2 degrees or more while logging; write down the display at the start and at the end and
-give them as inside=START>END). The tool then fits the first fifth of the log to START and the last fifth to END, which is two points, so a field must actually follow the cabin. Outside cannot
+give them as inside=START..END (two dots)). The tool then fits the first fifth of the log to START and the last fifth to END, which is two points, so a field must actually follow the cabin. Outside cannot
 be moved, so for outside you still need logs on other days.
 Record the logs a few hours or days apart (or after heating/cooling the cabin) and note the displayed numbers at the same moment. The value must also be steady inside each log (a temperature
 changes slowly): fields that jump around are ignored.
@@ -150,8 +150,8 @@ def parse_spec(spec):
     k, _, v = part.partition('=')
     if k.strip() not in ('outside', 'inside'):
       raise ValueError('%r: only outside= and inside= are known' % part)
-    if '>' in v:                                      # START>END: the temperature moved during this log
-      a, _, b = v.partition('>')
+    if '..' in v or '>' in v:                         # START..END (or START>END, which the shell needs quoted): the temperature moved during this log
+      a, _, b = v.partition('..') if '..' in v else v.partition('>')
       rd[k.strip()] = (float(a), float(b))
     else:
       rd[k.strip()] = float(v)
