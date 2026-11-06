@@ -1,0 +1,83 @@
+import json, os, random, sys, tempfile, unittest
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
+import find_temp as F
+
+
+def make_log(path, outside, inside, seed, rows=80, hide=True):
+  """a fake maplog: random chatter on many addresses, a counter, a clock - and, hidden, 0x2e5 byte 3 = (outside+40)*2 and 0x2e5 byte 5 = inside*10/ 5 (16-bit would be harder)"""
+  rnd = random.Random(seed)
+  with open(path, 'w') as f:
+    for i in range(rows):
+      raw = {}
+      for a in range(0x100, 0x140):
+        raw['0x%x' % a] = bytes(rnd.randrange(256) for _ in range(8)).hex()
+      raw['0x318'] = bytes([0x9a, 0x0b, i % 60, 0x12, 4, (i // 60) % 60, 0x40, 1]).hex()          # a clock
+      raw['0x1f0'] = bytes([i & 0xFF, 0, 0, 0, 0, 0, 0, 0]).hex()                                  # a counter
+      if hide:
+        t_out = outside + 0.05 * (i % 3); t_in = inside
+        raw['0x2e5'] = bytes([1, 2, 3, int(round((t_out + 40) * 2)), 7, int(round(t_in * 5)), 9, 9]).hex()   # outside: x0.5 -40 ; inside: x0.2
+      f.write(json.dumps({'t': i, 'raw': raw}) + '\n')
+
+
+class T(unittest.TestCase):
+  def setUp(self):
+    self.d = tempfile.mkdtemp(prefix='ft_')
+
+  def logs(self, specs):
+    out = []
+    for n, (o, i) in enumerate(specs):
+      p = os.path.join(self.d, 'l%d.jsonl' % n); make_log(p, o, i, seed=n)
+      per, _ = F.load(p); out.append((F.scan(per), {'outside': o, 'inside': i}))
+    return out
+
+  def test_finds_the_hidden_temperature_with_three_logs(self):
+    logs = self.logs([(5.0, 19.0), (11.0, 23.0), (14.5, 27.5)])
+    rows, n, distinct = F.search(logs, 'outside')
+    self.assertEqual((n, distinct), (3, 3))
+    top = rows[0]
+    self.assertEqual(top['addr'], 0x2e5); self.assertEqual(top['key'][2], 24)                   # byte 3 = bit 24
+    self.assertEqual((top['scale'], top['offset']), (0.5, -40.0))
+    rows, _, _ = F.search(logs, 'inside')
+    self.assertEqual(rows[0]['addr'], 0x2e5); self.assertEqual(rows[0]['key'][2], 40); self.assertEqual((rows[0]['scale'], rows[0]['offset']), (0.2, 0.0))
+
+  def test_the_clock_and_the_counter_are_not_temperatures(self):
+    logs = self.logs([(5.0, 19.0), (11.0, 23.0), (14.5, 27.5)])
+    for target in ('outside', 'inside'):
+      rows, _, _ = F.search(logs, target)
+      self.assertNotIn(0x318, [r['addr'] for r in rows]); self.assertNotIn(0x1f0, [r['addr'] for r in rows])
+
+  def test_random_chatter_does_not_survive_three_logs(self):
+    logs = self.logs([(5.0, 19.0), (11.0, 23.0), (14.5, 27.5)])
+    rows, _, _ = F.search(logs, 'outside')
+    self.assertEqual(set(r['addr'] for r in rows), {0x2e5})                                    # nothing else fits all three
+
+  def test_a_single_log_is_flagged_weak(self):
+    logs = self.logs([(5.0, 19.0)])
+    rows, n, distinct = F.search(logs, 'outside')
+    self.assertEqual((n, distinct), (1, 1)); self.assertIn(0x2e5, [r['addr'] for r in rows])  # the real one is there, among others
+
+  def test_a_field_that_never_moves_is_rejected_when_the_temperature_did(self):
+    p1, p2 = os.path.join(self.d, 'a.jsonl'), os.path.join(self.d, 'b.jsonl')
+    for p in (p1, p2):
+      with open(p, 'w') as f:
+        for i in range(30):
+          f.write(json.dumps({'raw': {'0x100': bytes([0, 0, 0, 90, 0, 0, 0, 0]).hex()}}) + '\n')   # same raw in both logs
+    logs = [(F.scan(F.load(p1)[0]), {'outside': 5.0}), (F.scan(F.load(p2)[0]), {'outside': 15.0})]
+    self.assertEqual(F.search(logs, 'outside')[0], [])
+
+  def test_spec_parsing(self):
+    self.assertEqual(F.parse_spec('/data/x.jsonl:outside=5,inside=19.5'), ('/data/x.jsonl', {'outside': 5.0, 'inside': 19.5}))
+    with self.assertRaises(ValueError): F.parse_spec('x.jsonl')
+    with self.assertRaises(ValueError): F.parse_spec('x.jsonl:foo=1')
+
+  def test_big_endian_word(self):
+    p = os.path.join(self.d, 'be.jsonl')
+    with open(p, 'w') as f:
+      for i in range(30):
+        f.write(json.dumps({'raw': {'0x200': bytes([0, 0, 0, 0, 0x01, 0xF4, 0, 0]).hex()}}) + '\n')     # 0x01F4 = 500 big-endian at bytes 4-5 -> x0.1 = 50.0
+    sc = F.scan(F.load(p)[0])
+    self.assertIn((0x200, ('M', 16, 4, False)), sc); self.assertEqual(sc[(0x200, ('M', 16, 4, False))][0], 500)
+
+
+if __name__ == '__main__':
+  unittest.main()
