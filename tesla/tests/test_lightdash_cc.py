@@ -23,8 +23,11 @@ class T(unittest.TestCase):
     self.assertIn('PANDA_STALE_S = 2.0', CC); self.assertIn('PANDA_STALE_S = 2.0', PY)
 
   def test_cpp_never_opens_the_panda(self):
-    for bad in ('libusb', 'usb.h', 'Panda', 'PubSocket', 'sendMessage', 'send('):
-      self.assertNotIn(bad, CC.replace('send_all', '').replace('send(fd', ''), bad)
+    for bad in ('libusb', 'usb.h', 'Panda', 'PubSocket', 'sendMessage'):
+      self.assertNotIn(bad, CC, bad)
+    import re      # the only send() calls are TCP writes to the browser (MSG_NOSIGNAL), nothing else
+    for m in re.finditer(r'\bsend\(([^;]*);', CC):
+      self.assertIn('MSG_NOSIGNAL', m.group(0))
     for want in ('"sendcan"', '"model"', '"carState"', '"controlsState"'):
       self.assertIn(want, CC)
 
