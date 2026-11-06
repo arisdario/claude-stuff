@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """cluster_check: ONE read-only command for the "cluster shows nothing" question. Run it on the EON, parked (not engaged):
 
-    python3 /data/claude-stuff/tesla/tools/cluster_check.py            # newest /data/maplog/map_*.jsonl
+    python3 /data/claude-stuff/tesla/tools/cluster_check.py            # newest /data/maplog/map_*.jsonl; does NOT touch the panda
     python3 /data/claude-stuff/tesla/tools/cluster_check.py --log FILE
-    python3 /data/claude-stuff/tesla/tools/cluster_check.py --no-panda # skip pandatool (e.g. while openpilot runs)
+    python3 /data/claude-stuff/tesla/tools/cluster_check.py --panda    # ALSO run pandatool status: it OPENS the panda, so only with openpilot stopped
 
 It collects, prints and saves (/data/cluster_check_YYYYmmdd_HHMMSS.txt) three things, then gives a verdict:
   1. the enable_*/use_*/uses_* switches in /data/bb_openpilot.cfg (enable_das_emulation must be True; uses_a_pillar_harness tells the harness type)
-  2. `pandatool.py status` (read-only): does the flashed firmware match the source built from the tree?
+  2. only with --panda: `pandatool.py status` (read-only, but it opens the panda over USB: never while boardd/openpilot is running)
   3. the CAN-dump check of CLUSTER.md on the newest drive log: are the cluster frames on the bus, and do they follow openpilot?
 It changes nothing, sends nothing on CAN, and never flashes. No secrets are printed (only the enable_* lines).
 """
@@ -122,7 +122,8 @@ def pandatool_status(timeout=40):
 
 def main():
   ap = argparse.ArgumentParser()
-  ap.add_argument('--log'); ap.add_argument('--no-panda', action='store_true')
+  ap.add_argument('--log'); ap.add_argument('--panda', action='store_true', help='also run pandatool status (opens the panda: openpilot must be stopped)')
+  ap.add_argument('--no-panda', action='store_true', help=argparse.SUPPRESS)   # old flag, now the default
   a = ap.parse_args()
   lines = ['cluster_check %s' % time.strftime('%Y-%m-%d %H:%M:%S')]
   lines.append('\n=== 1. switches in %s' % CFG)
@@ -131,8 +132,8 @@ def main():
   emu = re.search(r'enable_das_emulation\s*=\s*(\w+)', cfg_text)
   lines.append('=> enable_das_emulation = %s' % (emu.group(1) if emu else 'not set (default False)'))
   lines.append('\n=== 2. pandatool status (read-only)')
-  if a.no_panda:
-    lines.append('(skipped: --no-panda)')
+  if not a.panda or a.no_panda:
+    lines.append('(skipped: it opens the panda, so it only runs with --panda and openpilot stopped)')
   else:
     st = pandatool_status(); lines += st
     txt = '\n'.join(st)
