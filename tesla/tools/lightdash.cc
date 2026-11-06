@@ -175,9 +175,9 @@ static std::string snapshot(const Mirror &m, const Extra &x, double now) {
 static const char PAGE[] = R"LIGHTDASHPAGE(<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,user-scalable=no">
 <title>cluster view</title><style>html,body{margin:0;height:100%;background:#0b0d10;color:#e8edf2;font:14px system-ui,Arial,sans-serif;overflow:hidden}
 canvas{display:block;width:100vw;height:100vh}</style></head><body><canvas id=c></canvas><script>
-var cv=document.getElementById('c'),g=cv.getContext('2d'),S=null,tdv=false,W=0,H=0,SC=2;
+var cv=document.getElementById('c'),g=cv.getContext('2d'),S=null,tdv=false,mode=0,W=0,H=0,SC=2;
 function rs(){var d=Math.min(window.devicePixelRatio||1,1.5);W=innerWidth;H=innerHeight;cv.width=W*d;cv.height=H*d;g.setTransform(d,0,0,d,0,0);draw()}
-addEventListener('resize',rs);cv.addEventListener('click',function(){tdv=!tdv;draw()});
+addEventListener('resize',rs);cv.addEventListener('click',function(){mode=(mode+1)%3;tdv=(mode==1);draw()});   // drive -> top-down -> diagnostic
 function P(x,y){ // real metres (x ahead, y left) -> screen
  if(tdv){var s=H*0.8/110;return [W/2-y*s*4,H*0.92-x*s]}
  var K=H*0.9,d=x+5;return [W/2-y*K/d,H*0.38+2.5*K/d]}
@@ -185,23 +185,28 @@ function line(pts,col,w,dash){if(pts.length<2)return;g.beginPath();g.setLineDash
 function poly(c,x){return c[0]+c[1]*x+c[2]*x*x+c[3]*x*x*x}
 function rr(x,y,w,h,r){g.beginPath();g.moveTo(x+r,y);g.lineTo(x+w-r,y);g.quadraticCurveTo(x+w,y,x+w,y+r);g.lineTo(x+w,y+h-r);g.quadraticCurveTo(x+w,y+h,x+w-r,y+h);g.lineTo(x+r,y+h);g.quadraticCurveTo(x,y+h,x,y+h-r);g.lineTo(x,y+r);g.quadraticCurveTo(x,y,x+r,y);g.closePath()}
 function carBack(cx,y0,w,rel){ // a car seen from behind; y0 = where its tyres touch the road, w = 1.8 m of real width
- var h=w*0.8,body=rel?'#b8484b':'#7d8792',dark='#12161b',glass='#1b2733';
- if(w<14){g.fillStyle=body;g.fillRect(cx-w/2,y0-h,w,h);return}
- g.save();g.translate(cx,y0);g.scale(1,0.12);g.fillStyle='rgba(0,0,0,.45)';g.beginPath();g.arc(0,0,w*0.56,0,6.2832);g.fill();g.restore();
+ var h=w*0.8,dark='#0e1217',gr;
+ if(w<14){g.fillStyle='#aab3bf';g.fillRect(cx-w/2,y0-h,w,h);return}
+ g.save();g.translate(cx,y0);g.scale(1,0.12);g.fillStyle='rgba(0,0,0,.55)';g.beginPath();g.arc(0,0,w*0.58,0,6.2832);g.fill();g.restore();
+ if(rel){g.save();g.translate(cx,y0);g.scale(1,0.18);gr=g.createRadialGradient(0,0,0,0,0,w*0.8);gr.addColorStop(0,'rgba(255,60,60,.38)');gr.addColorStop(1,'rgba(255,60,60,0)');g.fillStyle=gr;g.beginPath();g.arc(0,0,w*0.8,0,6.2832);g.fill();g.restore()}
  g.fillStyle=dark;rr(cx-w*0.46,y0-h*0.30,w*0.17,h*0.30,w*0.03);g.fill();rr(cx+w*0.29,y0-h*0.30,w*0.17,h*0.30,w*0.03);g.fill();
- g.fillStyle=body;rr(cx-w/2,y0-h*0.58,w,h*0.40,w*0.07);g.fill();
- g.beginPath();g.moveTo(cx-w*0.41,y0-h*0.56);g.lineTo(cx-w*0.30,y0-h);g.lineTo(cx+w*0.30,y0-h);g.lineTo(cx+w*0.41,y0-h*0.56);g.closePath();g.fill();
- g.fillStyle=glass;g.beginPath();g.moveTo(cx-w*0.35,y0-h*0.61);g.lineTo(cx-w*0.26,y0-h*0.93);g.lineTo(cx+w*0.26,y0-h*0.93);g.lineTo(cx+w*0.35,y0-h*0.61);g.closePath();g.fill();
- g.fillStyle=rel?'#ff5a5f':'#9a4a4d';rr(cx-w*0.47,y0-h*0.50,w*0.21,h*0.10,w*0.02);g.fill();rr(cx+w*0.26,y0-h*0.50,w*0.21,h*0.10,w*0.02);g.fill();
- g.fillStyle='#cfd6dd';g.fillRect(cx-w*0.10,y0-h*0.33,w*0.20,h*0.07);
- g.fillStyle='rgba(0,0,0,.35)';rr(cx-w/2,y0-h*0.23,w,h*0.05,w*0.02);g.fill()}
+ gr=g.createLinearGradient(0,y0-h,0,y0-h*0.15);gr.addColorStop(0,'#eef1f5');gr.addColorStop(0.55,'#bcc3cd');gr.addColorStop(1,'#7c8592');g.fillStyle=gr;
+ rr(cx-w/2,y0-h*0.58,w,h*0.40,w*0.08);g.fill();
+ g.beginPath();g.moveTo(cx-w*0.42,y0-h*0.56);g.quadraticCurveTo(cx-w*0.36,y0-h*0.99,cx-w*0.28,y0-h);g.lineTo(cx+w*0.28,y0-h);g.quadraticCurveTo(cx+w*0.36,y0-h*0.99,cx+w*0.42,y0-h*0.56);g.closePath();g.fill();
+ gr=g.createLinearGradient(0,y0-h*0.94,0,y0-h*0.60);gr.addColorStop(0,'#2b3747');gr.addColorStop(1,'#0f151d');g.fillStyle=gr;
+ g.beginPath();g.moveTo(cx-w*0.36,y0-h*0.62);g.quadraticCurveTo(cx-w*0.31,y0-h*0.92,cx-w*0.25,y0-h*0.94);g.lineTo(cx+w*0.25,y0-h*0.94);g.quadraticCurveTo(cx+w*0.31,y0-h*0.92,cx+w*0.36,y0-h*0.62);g.closePath();g.fill();
+ g.fillStyle=rel?'#ff4d52':'#9e4a4e';if(rel){g.shadowColor='rgba(255,70,70,.95)';g.shadowBlur=w*0.12}
+ rr(cx-w*0.47,y0-h*0.51,w*0.22,h*0.09,w*0.02);g.fill();rr(cx+w*0.25,y0-h*0.51,w*0.22,h*0.09,w*0.02);g.fill();g.shadowBlur=0;
+ g.fillStyle='#d5dbe2';g.fillRect(cx-w*0.10,y0-h*0.33,w*0.20,h*0.07);
+ g.fillStyle='rgba(0,0,0,.30)';rr(cx-w/2,y0-h*0.23,w,h*0.05,w*0.02);g.fill()}
 function carTop(cx,yr,w,l,rel){ // seen from above, rear edge at screen y=yr, nose pointing up (4.5 m long, 1.8 m wide)
- var body=rel?'#b8484b':'#7d8792',dark='#12161b',glass='#1b2733';
+ var dark='#0e1217',gl='#18212c',gr;
  g.fillStyle=dark;rr(cx-w*0.53,yr-l*0.84,w*0.10,l*0.18,w*0.03);g.fill();rr(cx+w*0.43,yr-l*0.84,w*0.10,l*0.18,w*0.03);g.fill();rr(cx-w*0.53,yr-l*0.20,w*0.10,l*0.18,w*0.03);g.fill();rr(cx+w*0.43,yr-l*0.20,w*0.10,l*0.18,w*0.03);g.fill();
- g.fillStyle=body;rr(cx-w/2,yr-l,w,l,w*0.30);g.fill();
- g.fillStyle=glass;rr(cx-w*0.38,yr-l*0.66,w*0.76,l*0.22,w*0.10);g.fill();rr(cx-w*0.36,yr-l*0.30,w*0.72,l*0.13,w*0.08);g.fill();
- g.fillStyle=rel?'#ff5a5f':'#9a4a4d';rr(cx-w*0.46,yr-l*0.06,w*0.22,l*0.04,w*0.02);g.fill();rr(cx+w*0.24,yr-l*0.06,w*0.22,l*0.04,w*0.02);g.fill()}
-function draw(){g.fillStyle='#0b0d10';g.fillRect(0,0,W,H);if(!S||!S.lanes){g.fillStyle='#9aa4af';g.fillText('waiting for data...',20,30);return}
+ gr=g.createLinearGradient(cx-w/2,0,cx+w/2,0);gr.addColorStop(0,'#aeb6c1');gr.addColorStop(0.5,'#e6e9ee');gr.addColorStop(1,'#aeb6c1');g.fillStyle=gr;rr(cx-w/2,yr-l,w,l,w*0.30);g.fill();
+ g.fillStyle=gl;rr(cx-w*0.38,yr-l*0.66,w*0.76,l*0.22,w*0.10);g.fill();rr(cx-w*0.36,yr-l*0.30,w*0.72,l*0.13,w*0.08);g.fill();
+ g.fillStyle=rel?'#ff4d52':'#9e4a4e';if(rel){g.shadowColor='rgba(255,70,70,.95)';g.shadowBlur=w*0.5}
+ rr(cx-w*0.46,yr-l*0.06,w*0.22,l*0.04,w*0.02);g.fill();rr(cx+w*0.24,yr-l*0.06,w*0.22,l*0.04,w*0.02);g.fill();g.shadowBlur=0}
+function drawDiag(){g.fillStyle='#0b0d10';g.fillRect(0,0,W,H);if(!S||!S.lanes){g.fillStyle='#9aa4af';g.fillText('waiting for data...',20,30);return}
  var L=S.lanes,R=Math.min(110,L.range*SC),pw=[],i;
  // grid
  g.strokeStyle='#1b2128';g.lineWidth=1;for(i=10;i<=100;i+=10){var a=P(i,-6),b=P(i,6);g.beginPath();g.moveTo(a[0],a[1]);g.lineTo(b[0],b[1]);g.stroke()}
@@ -226,7 +231,47 @@ function draw(){g.fillStyle='#0b0d10';g.fillRect(0,0,W,H);if(!S||!S.lanes){g.fil
  g.fillStyle=S.present?'#7bd88f':'#e5383b';g.fillText('panda data: '+(S.present?'live':('STALE ('+S.age+' s) - cluster is shown defaults')),16,y0+20);
  g.fillStyle='#e8edf2';g.fillText('cluster status: '+st.text+'   emulation: '+(S.emu===null?'?':S.emu?'on':'OFF (panda sends nothing)'),16,y0+40);
  g.fillText('lanes: width '+L.width.toFixed(2)+' m  left '+(L.left?'drawn':'not drawn')+'  right '+(L.right?'drawn':'not drawn')+'  range '+L.range+' (x'+SC+')'+(S.default?'   [DEFAULT frame - no lane data from openpilot]':''),16,y0+60);
- g.fillStyle='#9aa4af';g.font='12px system-ui';g.fillText('yellow = lane lines sent to the cluster   cyan = model lanes   green = model path   red = road edges   tap = switch view',16,H-14)}
+ g.fillStyle='#9aa4af';g.font='12px system-ui';g.fillText('yellow = lane lines sent to the cluster   cyan = model lanes   green = model path   red = road edges   tap = next view (drive / top / diagnostic)',16,H-14)}
+function grad(y0,y1,st){var gr=g.createLinearGradient(0,y0,0,y1);for(var i=0;i<st.length;i++)gr.addColorStop(st[i][0],st[i][1]);return gr}
+function ribbon(a,b,fill){if(a.length<2)return;g.beginPath();a.forEach(function(p,i){i?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1])});for(var i=b.length-1;i>=0;i--)g.lineTo(b[i][0],b[i][1]);g.closePath();g.fillStyle=fill;g.fill()}
+function chip(x,y,t,col,bg){g.font='600 12px system-ui';var w=g.measureText(t).width+20;g.fillStyle=bg;rr(x,y,w,24,12);g.fill();g.fillStyle=col;g.textAlign='left';g.fillText(t,x+10,y+16);return w}
+function pill(cx,cy,t){g.font='600 12px system-ui';var w=g.measureText(t).width+14;g.fillStyle='rgba(0,0,0,.45)';rr(cx-w/2,cy-11,w,20,10);g.fill();g.fillStyle='#dfe5ec';g.textAlign='center';g.fillText(t,cx,cy+4);g.textAlign='left'}
+function cruiseIcon(cx,cy,r,col){g.strokeStyle=col;g.lineWidth=3;g.beginPath();g.arc(cx,cy,r,Math.PI*0.80,Math.PI*2.20);g.stroke();g.beginPath();g.moveTo(cx,cy+r*0.55);g.lineTo(cx+r*0.45,cy-r*0.45);g.stroke();g.fillStyle=col;g.beginPath();g.arc(cx,cy+r*0.55,3,0,6.2832);g.fill()}
+function wheelIcon(cx,cy,r,col){g.strokeStyle=col;g.lineWidth=3.2;g.beginPath();g.arc(cx,cy,r,0,6.2832);g.stroke();g.beginPath();g.moveTo(cx-r,cy);g.lineTo(cx-r*0.35,cy);g.moveTo(cx+r,cy);g.lineTo(cx+r*0.35,cy);g.moveTo(cx,cy+r*0.35);g.lineTo(cx,cy+r);g.stroke();g.beginPath();g.arc(cx,cy,r*0.22,0,6.2832);g.fillStyle=col;g.fill()}
+function drawDrive(){
+ g.fillStyle=grad(0,H,[[0,'#06090d'],[0.45,'#0b131b'],[1,'#10202c']]);g.fillRect(0,0,W,H);
+ var eng=!!(S&&S.en),BLUE='rgba(64,156,255,0.95)';
+ g.save();g.translate(W/2,H*0.72);g.scale(0.55,1);var rg=g.createRadialGradient(0,0,0,0,0,H*0.62);rg.addColorStop(0,eng?'rgba(40,120,210,.16)':'rgba(110,135,175,.10)');rg.addColorStop(1,'rgba(40,120,210,0)');g.fillStyle=rg;g.beginPath();g.arc(0,0,H*0.62,0,6.2832);g.fill();g.restore();
+ if(!S||!S.lanes){g.fillStyle='#7d8792';g.font='16px system-ui';g.textAlign='center';g.fillText('waiting for data...',W/2,H/2);g.textAlign='left';return}
+ var M=S.model,i,xs=[];for(i=0;i<25;i++)xs.push(i*4);
+ var yb=P(0,0)[1],yh=P(110,0)[1];
+ if(M&&M.l&&M.r){
+  var lw=Math.max(2.6,Math.min(4.4,(M.l[2]-M.r[2])||3.4));
+  var mk=function(arr,off){var q=arr.map(function(y,k){return P(xs[k],y+off)});q.unshift(P(-1.5,arr[0]+off));q.unshift(P(-3.5,arr[0]+off));return q};   // two extra points behind the car so the road runs to the bottom of the screen
+  var lp=mk(M.l,0),rp=mk(M.r,0),ll=mk(M.l,lw),rl=mk(M.r,-lw);
+  ribbon(lp,rp,grad(yb,yh,[[0,eng?'rgba(60,140,230,.22)':'rgba(150,165,190,.16)'],[1,'rgba(60,140,230,0)']]));
+  var sd=grad(yb,yh,[[0,'rgba(150,165,190,.07)'],[1,'rgba(150,165,190,0)']]);ribbon(ll,lp,sd);ribbon(rp,rl,sd);
+  var path=function(a){g.beginPath();a.forEach(function(p,k){k?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1])});g.stroke()};
+  g.save();g.lineCap='round';
+  g.strokeStyle=grad(yb,yh,[[0,'rgba(190,200,215,.28)'],[1,'rgba(190,200,215,0)']]);g.lineWidth=2;[ll,rl].forEach(path);
+  if(eng){g.shadowColor='rgba(64,156,255,.85)';g.shadowBlur=14}
+  g.strokeStyle=grad(yb,yh,[[0,eng?BLUE:'rgba(235,240,248,.80)'],[0.75,eng?'rgba(64,156,255,.45)':'rgba(235,240,248,.30)'],[1,'rgba(64,156,255,0)']]);g.lineWidth=5;[lp,rp].forEach(path);
+  g.restore();
+  if(M.e){g.save();g.strokeStyle=grad(yb,yh,[[0,'rgba(170,180,195,.30)'],[1,'rgba(170,180,195,0)']]);g.lineWidth=2;[M.e.l,M.e.r].forEach(function(a){g.beginPath();a.forEach(function(y,k){var p=P(M.e.x[k],y);k?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1])});g.stroke()});g.restore()}
+ }
+ S.obj.slice().sort(function(a,b){return b.dx-a.dx}).forEach(function(o){var p=P(o.dx,o.dy),w=Math.max(12,1.8*H*0.9/(o.dx+5));carBack(p[0],p[1],w,o.relevant);pill(p[0],p[1]-w*0.8-14,Math.round(o.dx)+' m')});
+ var ew=Math.min(H*0.27,W*0.2),ey=H*0.92;
+ if(eng){g.save();g.translate(W/2,ey);g.scale(1,0.14);var eg=g.createRadialGradient(0,0,0,0,0,ew*0.95);eg.addColorStop(0,'rgba(64,156,255,.55)');eg.addColorStop(1,'rgba(64,156,255,0)');g.fillStyle=eg;g.beginPath();g.arc(0,0,ew*0.95,0,6.2832);g.fill();g.restore()}
+ carBack(W/2,ey,ew,false);
+ // the middle of the instrument panel: icons either side of the speed
+ var pw=Math.min(W*0.5,380),py=14,ph=96,px=W/2-pw/2;
+ g.fillStyle='rgba(8,14,20,.72)';rr(px,py,pw,ph,18);g.fill();g.strokeStyle='rgba(255,255,255,.06)';g.lineWidth=1;g.stroke();
+ var ic=eng?'rgba(64,156,255,1)':'rgba(120,130,142,.9)';
+ cruiseIcon(px+pw*0.14,py+ph*0.46,15,ic);wheelIcon(px+pw*0.86,py+ph*0.46,16,ic);
+ g.fillStyle='#f3f6fa';g.font='300 58px system-ui';g.textAlign='center';g.fillText(Math.round((S.v||0)*3.6),W/2,py+62);g.fillStyle='#8590a0';g.font='500 13px system-ui';g.fillText('km/h',W/2,py+84);
+ g.fillStyle=S.present?'rgba(130,150,170,.55)':'rgba(255,120,120,.9)';g.font='11px system-ui';
+ g.fillText((S.present?'panda live':'PANDA STALE')+'  ·  cluster '+S.status.text+'  ·  emulation '+(S.emu===null?'?':S.emu?'on':'off')+(S.default?'  ·  no lane data':'')+'  ·  tap: next view',W/2,H-12);g.textAlign='left'}
+function draw(){if(mode==0)drawDrive();else drawDiag()}
 function conn(){var es=new EventSource('/stream');es.onmessage=function(e){S=JSON.parse(e.data);draw()};es.onerror=function(){es.close();setTimeout(conn,1500)}}
 rs();conn();</script></body></html>)LIGHTDASHPAGE";
 
