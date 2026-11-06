@@ -27,13 +27,13 @@ import teslacan  # noqa: E402
 
 
 def pack_659(speed_control_enabled=0, enable_steer_control=0, op_status=1, speed_override=0, apUnavailable=0,
-             collision_warning=0, cc_state=0, pcc_available=0, alca_state=0):
+             collision_warning=0, cc_state=0, pcc_available=0, alca_state=0, apply_angle=0.0):
   """build a real 0x659 frame with teslacan's own packer, so the decode test exercises the real wire format"""
   _, _, raw, _ = teslacan.create_fake_DAS_msg(
       speed_control_enabled, speed_override, apUnavailable, collision_warning, op_status,
       acc_speed_kph=50, turn_signal_needed=0, forward_collission_warning=0, adaptive_cruise=0,
       hands_on_state=0, cc_state=cc_state, pcc_available=pcc_available, alca_state=alca_state,
-      acc_speed_limit=0, legal_speed_limit=0, apply_angle=0.0, enable_steer_control=enable_steer_control,
+      acc_speed_limit=0, legal_speed_limit=0, apply_angle=apply_angle, enable_steer_control=enable_steer_control,
       park_brake_request=0)
   return bytes(raw)
 
@@ -61,6 +61,18 @@ class TestDecode659(unittest.TestCase):
     self.assertEqual(d['op_status'], 5); self.assertEqual(d['op_status_text'], 'warning')
     self.assertTrue(d['speed_override']); self.assertTrue(d['ap_unavailable']); self.assertTrue(d['collision_warning'])
     self.assertEqual(d['cc_state'], 2); self.assertTrue(d['pcc_available']); self.assertEqual(d['alca_state'], 5)
+
+  def test_commanded_angle_round_trips_through_the_real_packer(self):
+    for angle in (0.0, 12.3, -12.3, 90.0, -270.5):
+      d = DL.decode_0x659(pack_659(apply_angle=angle))
+      self.assertAlmostEqual(d['commanded_angle'], angle, places=1)
+
+  def test_commanded_angle_independent_of_enable_bit(self):
+    d_on = DL.decode_0x659(pack_659(apply_angle=5.0, enable_steer_control=1))
+    d_off = DL.decode_0x659(pack_659(apply_angle=5.0, enable_steer_control=0))
+    self.assertAlmostEqual(d_on['commanded_angle'], 5.0, places=1)
+    self.assertAlmostEqual(d_off['commanded_angle'], 5.0, places=1)
+    self.assertTrue(d_on['steer_enabled']); self.assertFalse(d_off['steer_enabled'])
 
   def test_short_or_missing_data_is_all_none(self):
     for bad in (None, b'', b'\x00' * 3):

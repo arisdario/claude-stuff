@@ -1,3 +1,4 @@
+import time
 from common.kalman.simple_kalman import KF1D
 from opendbc.can.parser import CANParser
 from selfdrive.config import Conversions as CV
@@ -189,6 +190,10 @@ class CarState(CarStateBase):
     super().__init__(CP)
     self.params = Params()
     self.speed_control_enabled = 0
+    # WIGGLE-DIAG: angle_steers_rate was hardcoded to 0 (see update()); these hold the previous sample
+    # so it can be computed as a plain finite difference. Observability only - nothing reads these two.
+    self._last_angle_steers = 0.
+    self._last_angle_steers_t = None
     self.CL_MIN_V = 8.9
     self.CL_MAX_A = 20.
     # labels for buttons
@@ -650,7 +655,16 @@ class CarState(CarStateBase):
     # self.angle_steers  = -(cp.vl["STW_ANGLHP_STAT"]['StW_AnglHP']) #JCT polarity reversed from Honda/Acura
     self.angle_steers = -(epas_cp.vl["EPAS_sysStatus"]['EPAS_internalSAS'])  #BB see if this works better than STW_ANGLHP_STAT for angle
 
-    self.angle_steers_rate = 0 #JCT
+    # WIGGLE-DIAG: was hardcoded to 0 ("#JCT"). No control code in this repo reads angle_steers_rate
+    # (grepped) - only interface.py copies it to ret.steeringRate for logging/display. Plain finite
+    # difference of the same angle_steers used above; falls back to 0 on the first sample or if the
+    # clock didn't advance (duplicate/out-of-order CAN parse), so it can never divide by zero or spike.
+    _now = time.time()
+    if self._last_angle_steers_t is not None and _now > self._last_angle_steers_t:
+      self.angle_steers_rate = (self.angle_steers - self._last_angle_steers) / (_now - self._last_angle_steers_t)
+    else:
+      self.angle_steers_rate = 0.
+    self._last_angle_steers, self._last_angle_steers_t = self.angle_steers, _now
 
     self.turn_signal_state_left = cp.vl["GTW_carState"]['BC_indicatorLStatus']
     self.turn_signal_state_right = cp.vl["GTW_carState"]['BC_indicatorRStatus']
@@ -672,7 +686,11 @@ class CarState(CarStateBase):
     self.car_gas = self.pedal_gas
 
     self.steer_override = abs(epas_cp.vl["EPAS_sysStatus"]['EPAS_handsOnLevel']) > 0
-    self.steer_torque_driver = 0 #JCT
+    # WIGGLE-DIAG: was hardcoded to 0 ("#JCT") even though EPAS_torsionBarTorque is already parsed off
+    # the EPAS CAN bus two lines above (get_epas_can_signals) and simply discarded. No control code in
+    # this repo reads steer_torque_driver (grepped) - only interface.py copies it to ret.steeringTorque
+    # for logging/display, and steer_override/HSO use EPAS_handsOnLevel, not this. Observability only.
+    self.steer_torque_driver = epas_cp.vl["EPAS_sysStatus"]['EPAS_torsionBarTorque']
 
     # brake switch has shown some single time step noise, so only considered when
     # switch is on for at least 2 consecutive CAN samples

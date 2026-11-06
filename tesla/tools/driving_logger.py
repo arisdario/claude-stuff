@@ -62,6 +62,29 @@ Nothing above is assumed - every field name and bit position is one this repo's 
 already reads or writes. Fields are still read defensively (getattr/try-except) in case a given
 live cereal build doesn't carry one: a missing field becomes None in the log, not a crash, and the
 first sample logs which fields were actually present so you can see your car's real schema.
+
+--------------------------------------------------------------------------------------------------
+WIGGLE DIAGNOSIS: steering torque, rate, and the actual commanded angle
+--------------------------------------------------------------------------------------------------
+Two carState fields needed for this were also hardcoded to 0 and useless for diagnosis:
+  - steeringTorque (CS.steer_torque_driver) - EPAS_torsionBarTorque is already parsed off the EPAS
+    CAN bus by carstate.py's own CANParser; it was simply never assigned (hardcoded 0 "#JCT").
+  - steeringRate (CS.angle_steers_rate) - hardcoded 0 ("#JCT"), never computed at all.
+Fixed in carstate.py (see "WIGGLE-DIAG" comments there) by: (1) assigning the real, already-parsed
+EPAS_torsionBarTorque instead of discarding it, and (2) a plain finite difference of the same
+angle_steers signal already in use. Both are read-only with respect to control: grepped this whole
+repo first - no ALCA/HSO/carcontroller code reads steer_torque_driver or angle_steers_rate, only
+interface.py copies them into the cereal carState message for logging/display. Steering GAINS,
+steerRatio and stiffnessFactor are untouched.
+This logger also decodes the actual commanded angle (not just enabled/not) from the same 0x659
+frame used for long_enabled/steer_enabled - teslacan.create_fake_DAS_msg packs it as
+((apply_angle*10 + 0x4000) & 0x7FFF) + (enable_steer_control << 15) across bytes 6-7, which is
+decoded back to degrees here (das_commanded_angle). Comparing das_commanded_angle against
+steering_angle/steering_rate/steering_torque side by side is the intended way to see whether a
+wiggle correlates with a torque blip, a commanded/measured angle mismatch, or neither.
+Two further signals exist on the bus but are not yet published to cereal by this fork (steer_error
+from EPAS_steeringFault, steer_not_allowed from EPAS_eacStatus - both internal-only in interface.py):
+not added here to keep this change minimal; flag if you want them exposed too.
 """
 import argparse
 import json
@@ -79,11 +102,17 @@ def decode_0x659(d):
   """d: 8 bytes (bytes/bytearray/list[int]) of the DAS_udsRequest-reused 0x659 frame openpilot sends
   on sendcan every cycle. Returns a dict of the real, already-sent control bits. Never raises -
   returns a dict of Nones if d is too short."""
+  fields = ('long_enabled', 'steer_enabled', 'op_status', 'op_status_text', 'speed_override', 'ap_unavailable',
+            'collision_warning', 'cc_state', 'pcc_available', 'alca_state', 'commanded_angle')
   if d is None or len(d) < 8:
-    return {k: None for k in ('long_enabled', 'steer_enabled', 'op_status', 'op_status_text', 'speed_override',
-                               'ap_unavailable', 'collision_warning', 'cc_state', 'pcc_available', 'alca_state')}
-  b0, b3, b7 = d[0], d[3], d[7]
+    return {k: None for k in fields}
+  b0, b3, b6, b7 = d[0], d[3], d[6], d[7]
   op = b0 & 0x0F
+  # byte6/7 = c_apply_steer = ((apply_angle*10 + 0x4000) & 0x7FFF) + (enable_steer_control << 15), low byte
+  # first (teslacan.create_fake_DAS_msg). bit15 is steer_enabled (already read from byte7 bit7 above); the
+  # low 15 bits are the commanded angle openpilot is actually asking for, decoded back to degrees.
+  composite = b6 + (b7 << 8)
+  commanded_angle = round(((composite & 0x7FFF) - 0x4000) / 10.0, 2)
   return {
     'long_enabled': bool(b0 >> 7 & 1),          # DAS_longC_enabled
     'steer_enabled': bool(b7 >> 7 & 1),         # DAS_steeringEnabled
@@ -95,6 +124,7 @@ def decode_0x659(d):
     'cc_state': b3 >> 6 & 3,
     'pcc_available': bool(b3 >> 5 & 1),
     'alca_state': b3 & 0x1F,
+    'commanded_angle': commanded_angle,          # degrees openpilot is commanding right now (not just enabled/not)
   }
 
 
@@ -239,6 +269,13 @@ def run(out_path, hz=20.0, duration=None, log=print):
           'brake_pressed_UNRELIABLE': bool(g('brakePressed', False)),   # hardcoded False on this car - see docstring
           'brake_lights': bool(g('brakeLights', False)),
           'steering_angle': round(float(g('steeringAngle', 0.)), 2),
+          # WIGGLE-DIAG: carstate.py now fills these two from the real EPAS torque signal and a finite
+          # difference of steeringAngle (both were hardcoded to 0 before - see carstate.py comments
+          # tagged WIGGLE-DIAG). Compare commanded (das_commanded_angle, above) vs steering_angle vs
+          # steering_rate vs steering_torque to see whether the wiggle correlates with a torque blip,
+          # an angle-rate oscillation, or neither.
+          'steering_torque': round(float(g('steeringTorque', 0.)), 3),
+          'steering_rate': round(float(g('steeringRate', 0.)), 2),
           'steering_pressed': bool(g('steeringPressed', False)),
           'left_blinker': bool(g('leftBlinker', False)),
           'right_blinker': bool(g('rightBlinker', False)),
