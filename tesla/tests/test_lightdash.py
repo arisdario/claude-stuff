@@ -78,6 +78,22 @@ class WireLengths(unittest.TestCase):
     i = src.index('msg_id = 0x554')
     self.assertEqual(re.search(r'msg_len = (\d+)', src[i:i + 80]).group(1), '3')
 
+  def test_car_state_high_beam_and_outside_temp(self):
+    c = L.CarState()
+    self.assertEqual(c.snapshot(1.0), {'hb': None, 'fl': None, 'out': None})           # nothing seen yet
+    c.feed(0x30A, bytes.fromhex('8867760000000000'), 1.0); c.feed(0x283, bytes([0, 0, 0, 0, 0, 0, 0, 0x5F]), 1.0)
+    self.assertEqual(c.snapshot(1.5), {'hb': 1, 'fl': 0, 'out': 7.5})                  # 0x88 = high beam on, 0x5F * 0.5 - 40
+    c.feed(0x30A, bytes.fromhex('8467760000000000'), 2.0)
+    self.assertEqual((c.snapshot(2.1)['hb'], c.snapshot(2.1)['fl']), (0, 1))           # 0x84 = flash
+    c.feed(0x30A, bytes.fromhex('8067760000000000'), 3.0)
+    self.assertEqual((c.snapshot(3.1)['hb'], c.snapshot(3.1)['fl']), (0, 0))           # 0x80 = off
+    self.assertEqual(c.snapshot(5.9)['hb'], 0)                                         # 1 Hz frame: one lost frame is still held
+    self.assertIsNone(c.snapshot(6.5)['hb'])                                           # 3 s without a frame: unknown, not "off"
+    self.assertIsNone(c.snapshot(6.5)['out'])                                          # temperature older than 5 s: dropped
+    for sna in (0xFE, 0xFF):
+      c.feed(0x283, bytes([0, 0, 0, 0, 0, 0, 0, sna]), 7.0)
+      self.assertIsNone(c.snapshot(7.1)['out'])                                        # init / SNA never shown as a temperature
+
 
 if __name__ == '__main__':
   unittest.main()

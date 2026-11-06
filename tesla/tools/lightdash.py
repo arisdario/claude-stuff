@@ -27,6 +27,25 @@ from socketserver import ThreadingMixIn
 
 IC_LANE_SCALE = 2.0
 WANT = (0x557, 0x559, 0x659, 0x554)
+CAR_HOLD_S = 3.0                                       # 0x30A comes every 1 s: hold the last value across one lost frame
+
+
+class CarState(object):
+  """read-only from the car's own 'can' stream (never sent): 0x30A byte 0 = lamp state (1 Hz + on change), 0x283 byte 7 = outside temperature (~1 Hz)"""
+  def __init__(self):
+    self.hb = self.fl = 0; self.t30a = 0.; self.out = None; self.t283 = 0.
+
+  def feed(self, addr, d, now):
+    if addr == 0x30A and len(d) >= 1:
+      self.hb = d[0] >> 3 & 1; self.fl = d[0] >> 2 & 1; self.t30a = now
+    elif addr == 0x283 and len(d) >= 8:
+      self.out = d[7] * 0.5 - 40 if d[7] < 0xFE else None        # 0xFE init / 0xFF SNA = no value
+      self.t283 = now
+
+  def snapshot(self, now):
+    live = self.t30a and now - self.t30a <= CAR_HOLD_S
+    return {'hb': self.hb if live else None, 'fl': self.fl if live else None,
+            'out': round(self.out, 1) if (self.out is not None and self.t283 and now - self.t283 <= 5.) else None}
 PANDA_STALE_S = 2.0          # firmware: no 0x659 for 2 s -> reset_DAS_data()
 X_IDXS = [0., 0.1875, 0.75, 1.6875, 3., 4.6875, 6.75, 9.1875, 12., 15.1875, 18.75, 22.6875, 27., 31.6875, 36.75, 42.1875, 48., 54.1875,
           60.75, 67.6875, 75., 82.6875, 90.75, 99.1875, 108.]
@@ -165,7 +184,8 @@ def poll_cereal(hz=10.):
   import cereal.messaging as messaging
   sc = messaging.sub_sock('sendcan')
   subs = {n: messaging.sub_sock(n, conflate=True) for n in ('model', 'carState', 'controlsState')}
-  mirror = PandaMirror(); extra = {'v': 0., 'ang': 0., 'en': False}; model = None
+  scan = messaging.sub_sock('can')
+  mirror = PandaMirror(); car = CarState(); extra = {'v': 0., 'ang': 0., 'en': False}; model = None
   while True:
     if not Frame.clients:
       time.sleep(0.3); continue
@@ -174,6 +194,10 @@ def poll_cereal(hz=10.):
       for c in ev.sendcan:
         if c.address in WANT:
           mirror.feed(c.address, bytes(c.dat), now)
+    for ev in messaging.drain_sock(scan, wait_for_one=False):
+      for c in ev.can:
+        if c.src == 0 and c.address in (0x30A, 0x283):
+          car.feed(c.address, bytes(c.dat), now)
     m = messaging.recv_one_or_none(subs['carState'])
     if m is not None:
       cs = m.carState; extra['v'] = float(cs.vEgo)
@@ -186,7 +210,7 @@ def poll_cereal(hz=10.):
       try: model = build_model(m.model)
       except Exception: model = None
     snap = mirror.snapshot(now); mirror.lane_idx = (mirror.lane_idx + 1) % 16
-    snap.update(extra); snap['model'] = model; snap['t'] = round(time.time(), 2)
+    snap.update(extra); snap['car'] = car.snapshot(now); snap['model'] = model; snap['t'] = round(time.time(), 2)
     publish(snap)
     time.sleep(1. / hz)
 
@@ -224,7 +248,7 @@ def poll_demo(hz=10.):
     mirror.feed(0x554, bytes([0x20, 0, 0]), now)
     snap = mirror.snapshot(now); mirror.lane_idx = (mirror.lane_idx + 1) % 16
     xs = list(range(0, 100, 4))
-    snap.update({'v': 24 + 4 * math.sin(t * 0.2), 'ang': 300 * k, 'en': t % 30 > 4, 't': round(time.time(), 2), 'model': {
+    snap.update({'v': 24 + 4 * math.sin(t * 0.2), 'ang': 300 * k, 'en': t % 30 > 4, 'car': {'hb': int(t % 12 > 6), 'fl': 0, 'out': 9.5}, 't': round(time.time(), 2), 'model': {
         'p': [round(c0 + k * 3 * x ** 3 / 1e0 * 0 + 0.5 * k * 2 * x * x * 0.1, 2) for x in xs], 'pl': 0.9, 'pr': 0.8,
         'l': [round(c0 + 1.85 + 0.5 * k * 2 * x * x * 0.1, 2) for x in xs], 'r': [round(c0 - 1.85 + 0.5 * k * 2 * x * x * 0.1, 2) for x in xs]}})
     publish(snap)
@@ -298,6 +322,7 @@ function chip(x,y,t,col,bg){g.font='600 12px system-ui';var w=g.measureText(t).w
 function pill(cx,cy,t){g.font='600 12px system-ui';var w=g.measureText(t).width+14;g.fillStyle='rgba(0,0,0,.45)';rr(cx-w/2,cy-11,w,20,10);g.fill();g.fillStyle='#dfe5ec';g.textAlign='center';g.fillText(t,cx,cy+4);g.textAlign='left'}
 function cruiseIcon(cx,cy,r,col){g.strokeStyle=col;g.lineWidth=3;g.beginPath();g.arc(cx,cy,r,Math.PI*0.80,Math.PI*2.20);g.stroke();g.beginPath();g.moveTo(cx,cy+r*0.55);g.lineTo(cx+r*0.45,cy-r*0.45);g.stroke();g.fillStyle=col;g.beginPath();g.arc(cx,cy+r*0.55,3,0,6.2832);g.fill()}
 function wheelIcon(cx,cy,r,col){g.strokeStyle=col;g.lineWidth=3.2;g.beginPath();g.arc(cx,cy,r,0,6.2832);g.stroke();g.beginPath();g.moveTo(cx-r,cy);g.lineTo(cx-r*0.35,cy);g.moveTo(cx+r,cy);g.lineTo(cx+r*0.35,cy);g.moveTo(cx,cy+r*0.35);g.lineTo(cx,cy+r);g.stroke();g.beginPath();g.arc(cx,cy,r*0.22,0,6.2832);g.fillStyle=col;g.fill()}
+function beamIcon(cx,cy,r,col){g.strokeStyle=col;g.fillStyle=col;g.lineWidth=2.6;g.beginPath();g.moveTo(cx+r*0.15,cy-r*0.8);g.quadraticCurveTo(cx-r*0.95,cy-r*0.8,cx-r*0.95,cy);g.quadraticCurveTo(cx-r*0.95,cy+r*0.8,cx+r*0.15,cy+r*0.8);g.closePath();g.fill();for(var k=-1;k<=1;k++){g.beginPath();g.moveTo(cx+r*0.45,cy+k*r*0.62);g.lineTo(cx+r*1.1,cy+k*r*0.62);g.stroke()}}
 function drawDrive(){
  g.fillStyle=grad(0,H,[[0,'#06090d'],[0.45,'#0b131b'],[1,'#10202c']]);g.fillRect(0,0,W,H);
  var eng=!!(S&&S.en),BLUE='rgba(64,156,255,0.95)';
@@ -328,6 +353,8 @@ function drawDrive(){
  g.fillStyle='rgba(8,14,20,.72)';rr(px,py,pw,ph,18);g.fill();g.strokeStyle='rgba(255,255,255,.06)';g.lineWidth=1;g.stroke();
  var ic=eng?'rgba(64,156,255,1)':'rgba(120,130,142,.9)';
  cruiseIcon(px+pw*0.14,py+ph*0.46,15,ic);wheelIcon(px+pw*0.86,py+ph*0.46,16,ic);
+ var cr=S.car||{};if(cr.hb||cr.fl)beamIcon(px+pw*0.14,py+ph*0.46+34,9,cr.hb?'rgba(64,156,255,1)':'rgba(235,240,248,.85)');
+ if(cr.out!==null&&cr.out!==undefined){g.fillStyle='#aab4c2';g.font='500 14px system-ui';g.textAlign='center';g.fillText(cr.out.toFixed(1)+' \u00b0C',px+pw*0.86,py+ph*0.46+38);g.textAlign='left'}
  g.fillStyle='#f3f6fa';g.font='300 58px system-ui';g.textAlign='center';g.fillText(Math.round((S.v||0)*3.6),W/2,py+62);g.fillStyle='#8590a0';g.font='500 13px system-ui';g.fillText('km/h',W/2,py+84);
  g.fillStyle=S.present?'rgba(130,150,170,.55)':'rgba(255,120,120,.9)';g.font='11px system-ui';
  g.fillText((S.present?'panda live':'PANDA STALE')+'  ·  cluster '+S.status.text+'  ·  emulation '+(S.emu===null?'?':S.emu?'on':'off')+(S.default?'  ·  no lane data':'')+'  ·  tap: next view',W/2,H-12);g.textAlign='left'}

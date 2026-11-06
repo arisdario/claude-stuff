@@ -100,6 +100,16 @@ struct Mirror {
   }
 };
 
+// read-only from the car's own 'can' stream (never sent): 0x30A byte 0 = lamp state (1 Hz + on change), 0x283 byte 7 = outside temperature (~1 Hz)
+struct CarState {
+  int hb = 0, fl = 0; double t30a = 0; double out = 0; bool out_ok = false; double t283 = 0;
+  void feed(uint32_t addr, const uint8_t *d, size_t n, double now) {
+    if (addr == 0x30A && n >= 1) { hb = (d[0] >> 3) & 1; fl = (d[0] >> 2) & 1; t30a = now; }
+    else if (addr == 0x283 && n >= 8) { out_ok = d[7] < 0xFE; out = d[7] * 0.5 - 40; t283 = now; }   // 0xFE init / 0xFF SNA = no value
+  }
+};
+static const double CAR_HOLD_S = 3.0;                                  // 0x30A comes every 1 s: hold the last value across one lost frame
+
 static void json_lanes(std::string &s, const uint8_t *b) {          // DAS_lanes 0x239, DBC scaling
   appendf(s, "\"lanes\":{\"width\":%.4f,\"left\":%d,\"right\":%d,\"range\":%d,\"c\":[%.3f,%.5f,%.7f,%.9f],\"use\":[%d,%d],\"counter\":%d}",
           2 + 0.3125 * (b[0] >> 4), b[0] & 1, b[0] >> 1 & 1, b[1], b[2] * 0.035 - 3.5, b[3] * 0.0016 - 0.2, b[4] * 2e-5 - 0.0025,
@@ -134,7 +144,7 @@ struct Extra {
   bool have_model = false; std::vector<float> p, l, r, e_l, e_r; float pl = 0, pr = 0; bool have_edges = false;
 };
 
-static std::string snapshot(const Mirror &m, const Extra &x, double now) {
+static std::string snapshot(const Mirror &m, const Extra &x, double now, const CarState &cs = CarState()) {
   std::string s; s.reserve(1400);
   bool stale = m.stale(now);
   appendf(s, "{\"present\":%s,\"emu\":%s,", stale ? "false" : "true", m.emu < 0 ? "null" : (m.emu ? "true" : "false"));
@@ -144,6 +154,9 @@ static std::string snapshot(const Mirror &m, const Extra &x, double now) {
   uint8_t lf[8]; m.lanesFrame(lf); json_lanes(s, lf); s += ",";
   json_objects(s, m);
   appendf(s, ",\"v\":%.3f,\"ang\":%.3f,\"en\":%s,", x.v, x.ang, x.en ? "true" : "false");
+  s += "\"car\":{";
+  if (cs.t30a != 0 && now - cs.t30a <= CAR_HOLD_S) appendf(s, "\"hb\":%d,\"fl\":%d,", cs.hb, cs.fl); else s += "\"hb\":null,\"fl\":null,";
+  if (cs.out_ok && cs.t283 != 0 && now - cs.t283 <= 5.0) appendf(s, "\"out\":%.1f},", cs.out); else s += "\"out\":null},";
   if (x.have_model) {
     s += "\"model\":{";
     auto arr = [&](const char *k, const std::vector<float> &a) {
@@ -238,6 +251,7 @@ function chip(x,y,t,col,bg){g.font='600 12px system-ui';var w=g.measureText(t).w
 function pill(cx,cy,t){g.font='600 12px system-ui';var w=g.measureText(t).width+14;g.fillStyle='rgba(0,0,0,.45)';rr(cx-w/2,cy-11,w,20,10);g.fill();g.fillStyle='#dfe5ec';g.textAlign='center';g.fillText(t,cx,cy+4);g.textAlign='left'}
 function cruiseIcon(cx,cy,r,col){g.strokeStyle=col;g.lineWidth=3;g.beginPath();g.arc(cx,cy,r,Math.PI*0.80,Math.PI*2.20);g.stroke();g.beginPath();g.moveTo(cx,cy+r*0.55);g.lineTo(cx+r*0.45,cy-r*0.45);g.stroke();g.fillStyle=col;g.beginPath();g.arc(cx,cy+r*0.55,3,0,6.2832);g.fill()}
 function wheelIcon(cx,cy,r,col){g.strokeStyle=col;g.lineWidth=3.2;g.beginPath();g.arc(cx,cy,r,0,6.2832);g.stroke();g.beginPath();g.moveTo(cx-r,cy);g.lineTo(cx-r*0.35,cy);g.moveTo(cx+r,cy);g.lineTo(cx+r*0.35,cy);g.moveTo(cx,cy+r*0.35);g.lineTo(cx,cy+r);g.stroke();g.beginPath();g.arc(cx,cy,r*0.22,0,6.2832);g.fillStyle=col;g.fill()}
+function beamIcon(cx,cy,r,col){g.strokeStyle=col;g.fillStyle=col;g.lineWidth=2.6;g.beginPath();g.moveTo(cx+r*0.15,cy-r*0.8);g.quadraticCurveTo(cx-r*0.95,cy-r*0.8,cx-r*0.95,cy);g.quadraticCurveTo(cx-r*0.95,cy+r*0.8,cx+r*0.15,cy+r*0.8);g.closePath();g.fill();for(var k=-1;k<=1;k++){g.beginPath();g.moveTo(cx+r*0.45,cy+k*r*0.62);g.lineTo(cx+r*1.1,cy+k*r*0.62);g.stroke()}}
 function drawDrive(){
  g.fillStyle=grad(0,H,[[0,'#06090d'],[0.45,'#0b131b'],[1,'#10202c']]);g.fillRect(0,0,W,H);
  var eng=!!(S&&S.en),BLUE='rgba(64,156,255,0.95)';
@@ -268,6 +282,8 @@ function drawDrive(){
  g.fillStyle='rgba(8,14,20,.72)';rr(px,py,pw,ph,18);g.fill();g.strokeStyle='rgba(255,255,255,.06)';g.lineWidth=1;g.stroke();
  var ic=eng?'rgba(64,156,255,1)':'rgba(120,130,142,.9)';
  cruiseIcon(px+pw*0.14,py+ph*0.46,15,ic);wheelIcon(px+pw*0.86,py+ph*0.46,16,ic);
+ var cr=S.car||{};if(cr.hb||cr.fl)beamIcon(px+pw*0.14,py+ph*0.46+34,9,cr.hb?'rgba(64,156,255,1)':'rgba(235,240,248,.85)');
+ if(cr.out!==null&&cr.out!==undefined){g.fillStyle='#aab4c2';g.font='500 14px system-ui';g.textAlign='center';g.fillText(cr.out.toFixed(1)+' \u00b0C',px+pw*0.86,py+ph*0.46+38);g.textAlign='left'}
  g.fillStyle='#f3f6fa';g.font='300 58px system-ui';g.textAlign='center';g.fillText(Math.round((S.v||0)*3.6),W/2,py+62);g.fillStyle='#8590a0';g.font='500 13px system-ui';g.fillText('km/h',W/2,py+84);
  g.fillStyle=S.present?'rgba(130,150,170,.55)':'rgba(255,120,120,.9)';g.font='11px system-ui';
  g.fillText((S.present?'panda live':'PANDA STALE')+'  ·  cluster '+S.status.text+'  ·  emulation '+(S.emu===null?'?':S.emu?'on':'off')+(S.default?'  ·  no lane data':'')+'  ·  tap: next view',W/2,H-12);g.textAlign='left'}
@@ -319,7 +335,12 @@ static int selftest() {
   printf("0x554 with 3 bytes sets the emulation flag: emu=%d -> %s\n", m.emu, ok4 ? "OK" : "MISMATCH");
   std::string s = snapshot(m, Extra(), 1.5); bool ok3 = s.find("\"present\":true") != std::string::npos && s.find("\"op\":5") != std::string::npos;
   printf("snapshot json: %zu bytes -> %s\n", s.size(), ok3 ? "OK" : "MISMATCH");
-  return (ok && ok2 && ok3 && ok4) ? 0 : 1;
+  CarState cs; const uint8_t b30[8] = {0x88, 0x67, 0x76, 0, 0, 0, 0, 0}, b283[8] = {0, 0, 0, 0, 0, 0, 0, 0x5F};
+  cs.feed(0x30A, b30, 8, 1.0); cs.feed(0x283, b283, 8, 1.0);
+  std::string sc = snapshot(m, Extra(), 1.5, cs); std::string sl = snapshot(m, Extra(), 7.0, cs);
+  bool ok5 = sc.find("\"hb\":1,\"fl\":0,\"out\":7.5") != std::string::npos && sl.find("\"hb\":null,\"fl\":null,\"out\":null") != std::string::npos;
+  printf("car state: 0x30A 0x88 -> high beam, 0x283 byte 7 0x5F -> 7.5 C, both dropped when stale -> %s\n", ok5 ? "OK" : "MISMATCH");
+  return (ok && ok2 && ok3 && ok4 && ok5) ? 0 : 1;
 }
 
 static void fill_model(Extra &x, cereal::ModelData::Reader mm) {
@@ -357,13 +378,14 @@ int main(int argc, char **argv) {
   fcntl(ls, F_SETFL, O_NONBLOCK);
   Context *ctx = Context::create();
   SubSocket *sc = SubSocket::create(ctx, "sendcan");
+  SubSocket *scan = SubSocket::create(ctx, "can");
   SubSocket *sm = SubSocket::create(ctx, "model", "127.0.0.1", true);
   SubSocket *scs = SubSocket::create(ctx, "carState", "127.0.0.1", true);
   SubSocket *sct = SubSocket::create(ctx, "controlsState", "127.0.0.1", true);
-  if (!sc || !sm || !scs || !sct) { fprintf(stderr, "lightdash: cannot subscribe to openpilot messages (is openpilot running?)\n"); return 1; }
-  printf("lightdash (C++) on http://%s:%d/  (sendcan + model; never opens the panda)\n", bind_addr, port); fflush(stdout);
+  if (!sc || !scan || !sm || !scs || !sct) { fprintf(stderr, "lightdash: cannot subscribe to openpilot messages (is openpilot running?)\n"); return 1; }
+  printf("lightdash (C++) on http://%s:%d/  (sendcan + can + model; never opens the panda, never sends)\n", bind_addr, port); fflush(stdout);
 
-  Mirror mirror; Extra extra; std::vector<Client> clients; std::vector<Conn> pend; std::string last = "{}"; double want_until = 0, next_tick = 0;
+  Mirror mirror; CarState car; Extra extra; std::vector<Client> clients; std::vector<Conn> pend; std::string last = "{}"; double want_until = 0, next_tick = 0;
   kj::Array<capnp::word> buf;
   while (!g_quit) {
     double now = now_s();
@@ -434,6 +456,18 @@ int main(int argc, char **argv) {
       }
       delete msg;
     }
+    for (long nc = 0; nc < 4096; nc++) {                                // the car's own frames: only 0x30A / 0x283 on bus 0 are looked at
+      Message *msg = scan->receive(true); if (!msg) break;
+      capnp::FlatArrayMessageReader *rd; if (read_event(msg, buf, rd)) {
+        auto ev = rd->getRoot<cereal::Event>();
+        if (ev.which() == cereal::Event::CAN) for (auto c : ev.getCan()) {
+          uint32_t ad = c.getAddress();
+          if ((ad == 0x30A || ad == 0x283) && c.getSrc() == 0) { auto d = c.getDat(); car.feed(ad, d.begin(), d.size(), now); }
+        }
+        delete rd;
+      }
+      delete msg;
+    }
     { double ms = (now_s() - t_tick0) * 1000; g_st.drain_ms_sum += ms; if (ms > g_st.drain_ms_max) g_st.drain_ms_max = ms; g_st.drain_msgs_sum += nd; if (nd > g_st.drain_msgs_max) g_st.drain_msgs_max = nd; g_st.ticks++; }
     if (Message *msg = scs->receive(true)) {
       capnp::FlatArrayMessageReader *rd; if (read_event(msg, buf, rd)) { auto ev = rd->getRoot<cereal::Event>();
@@ -453,7 +487,7 @@ int main(int argc, char **argv) {
         delete rd; }
       delete msg;
     }
-    last = snapshot(mirror, extra, now);
+    last = snapshot(mirror, extra, now, car);
     mirror.laneIdx = (mirror.laneIdx + 1) % 16;
     std::string frame = "data: " + last + "\n\n";
     for (size_t i = 0; i < clients.size();) {

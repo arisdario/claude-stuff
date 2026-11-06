@@ -28,11 +28,18 @@ class T(unittest.TestCase):
     import re      # the only send() calls are TCP writes to the browser (MSG_NOSIGNAL), nothing else
     for m in re.finditer(r'\bsend\(([^;]*);', CC):
       self.assertIn('MSG_NOSIGNAL', m.group(0))
-    for want in ('"sendcan"', '"model"', '"carState"', '"controlsState"'):
+    for want in ('"sendcan"', '"can"', '"model"', '"carState"', '"controlsState"'):
       self.assertIn(want, CC)
 
   def test_build_script_is_compile_only(self):
     self.assertIn('--selftest', SH); self.assertNotIn('flash', SH.lower()); self.assertNotIn('pandatool', SH)
+
+  def test_car_state_twins(self):
+    for needle in ('0x30A', '0x283', '0xFE'):
+      self.assertIn(needle, CC); self.assertIn(needle, PY)
+    self.assertIn('CAR_HOLD_S = 3.0', CC); self.assertIn('CAR_HOLD_S = 3.0', PY)
+    self.assertIn('d[7] * 0.5 - 40', CC); self.assertIn('d[7] * 0.5 - 40', PY)
+    self.assertIn('c.getSrc() == 0', CC); self.assertIn('c.src == 0', PY)             # bus 0 only
 
 
 if __name__ == '__main__':
