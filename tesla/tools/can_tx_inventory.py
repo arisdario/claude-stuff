@@ -4,9 +4,13 @@ Subscribes to messages only (sendcan, can, health). It never opens the panda or 
 
   cd /data/openpilot && python3 /data/can_tx_inventory.py [seconds]        (default 10)
 
-canSendErrs is ONE counter for every frame the panda failed to put on a bus; it does not say which. The usual cause is a bus where no device acknowledges frames
-(the transmit queue fills). So the table compares, per bus: frames openpilot asks the panda to send vs frames the panda receives. A bus we send to but never hear
-from is the suspect. The four DAS-emulation addresses are consumed inside the panda firmware (they are not put on any bus) and are listed apart."""
+The panda keeps two error counters, and neither says WHICH message (read from the panda source, board/drivers/can.h):
+  canSendErrs  frames the panda could not queue for the HOST (its receive queue to boardd overflowed). Rises while boardd/openpilot is stopped or not draining
+               (restarts, reboots, a stalled USB link). It is NOT a failed transmit on the CAN bus.
+  canFwdErrs   frames the panda could not queue onto a BUS (that bus's transmit queue was full), e.g. a bus where no device acknowledges.
+Frames the Tesla safety hook rejects are dropped silently and counted by neither. The table compares, per bus, frames openpilot asks the panda to send vs frames
+it receives: a bus we send to but never hear from is the suspect for canFwdErrs. The four DAS-emulation addresses are consumed inside the panda firmware
+(not put on any bus) and are listed apart."""
 import sys
 import time
 from collections import Counter, defaultdict
@@ -14,7 +18,7 @@ from collections import Counter, defaultdict
 CONSUMED = {0x557: 'DAS lanes+lead', 0x559: 'DAS objects', 0x659: 'DAS status+steering', 0x554: 'DAS switches'}   # tesla firmware: expanded inside the panda
 
 
-def summarize(sent, rx, errs0, errs1, secs):
+def summarize(sent, rx, errs0, errs1, secs, fwd0=None, fwd1=None):
   """sent: Counter{(bus, addr): n}; rx: Counter{(bus, addr): n}; -> list of text lines"""
   out = []
   secs = max(secs, 1e-6)
@@ -38,12 +42,15 @@ def summarize(sent, rx, errs0, errs1, secs):
   out.append('')
   for b in sorted(txbus):
     if rxbus[b] == 0:
-      out.append('SUSPECT bus %d: %.1f frames/s are sent to it but NOTHING is received from it - no device is acknowledging, so its transmit queue fills.' % (b, txbus[b] / secs))
+      out.append('SUSPECT bus %d: %.1f frames/s are sent to it but NOTHING is received from it - if no device acknowledges there, its transmit queue fills (canFwdErrs).' % (b, txbus[b] / secs))
   if errs0 is not None and errs1 is not None:
     d = errs1 - errs0
-    out.append('canSendErrs: %d -> %d  (+%d in %.0f s = %.0f/s)%s' % (errs0, errs1, d, secs, d / secs, '   <- not rising now' if d == 0 else ''))
+    out.append('canSendErrs (frames the panda could not queue for the host): %d -> %d  (+%d in %.0f s = %.0f/s)%s' % (errs0, errs1, d, secs, d / secs, '   <- not rising now' if d == 0 else '   <- boardd is not draining the panda fast enough'))
   else:
     out.append('canSendErrs: no health message received')
+  if fwd0 is not None and fwd1 is not None:
+    d = fwd1 - fwd0
+    out.append('canFwdErrs  (frames the panda could not queue onto a bus):  %d -> %d  (+%d in %.0f s = %.0f/s)%s' % (fwd0, fwd1, d, secs, d / secs, '   <- not rising now' if d == 0 else '   <- a bus transmit queue is full: see the SUSPECT lines'))
   return out
 
 
@@ -54,7 +61,7 @@ def main():
   cn = messaging.sub_sock('can', timeout=50)
   hl = messaging.sub_sock('health', conflate=True, timeout=50)
   sent, rx = Counter(), Counter()
-  errs0 = errs1 = None
+  errs0 = errs1 = fwd0 = fwd1 = None
   t0 = time.time()
   while time.time() - t0 < secs:
     for ev in messaging.drain_sock(sc):
@@ -64,12 +71,12 @@ def main():
       for c in ev.can:
         rx[(c.src, c.address)] += 1
     for ev in messaging.drain_sock(hl):
-      e = ev.health.canSendErrs
+      e, f = ev.health.canSendErrs, ev.health.canFwdErrs
       if errs0 is None:
-        errs0 = e
-      errs1 = e
+        errs0, fwd0 = e, f
+      errs1, fwd1 = e, f
     time.sleep(0.02)
-  print('\n'.join(summarize(sent, rx, errs0, errs1, time.time() - t0)))
+  print('\n'.join(summarize(sent, rx, errs0, errs1, time.time() - t0, fwd0, fwd1)))
   return 0
 
 

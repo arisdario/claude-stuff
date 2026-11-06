@@ -13,11 +13,16 @@ class Tx(unittest.TestCase):
     self.assertNotIn('SUSPECT bus 0', s)
     self.assertIn('consumed inside the panda firmware', s)
     self.assertIn('+500 in 10 s = 50/s', s)
+    self.assertIn('could not queue for the host', s)
     self.assertNotIn('0x659  ', s.split('consumed')[0])          # the consumed addresses are not counted as bus traffic
 
   def test_not_rising(self):
     s = '\n'.join(T.summarize(Counter({(0, 0x488): 10}), Counter({(0, 0x118): 10}), 5, 5, 10))
     self.assertIn('not rising now', s)
+
+  def test_fwd_counter(self):
+    s = '\n'.join(T.summarize(Counter({(0, 0x488): 10}), Counter({(0, 0x118): 10}), 5, 5, 10, 100, 130))
+    self.assertIn('canFwdErrs', s); self.assertIn('+30 in 10 s', s); self.assertIn('transmit queue is full', s)
 
   def test_no_health(self):
     self.assertIn('no health message', '\n'.join(T.summarize(Counter(), Counter(), None, None, 10)))
