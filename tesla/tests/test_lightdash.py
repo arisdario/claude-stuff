@@ -60,13 +60,23 @@ class T(unittest.TestCase):
 
   def test_switch_flag(self):
     m = L.PandaMirror(); self.assertIsNone(m.emu)
-    m.feed(0x554, bytes([0x20, 0, 0, 0, 0, 0, 0, 0]), 1.0); self.assertTrue(m.emu)
-    m.feed(0x554, bytes([0x00, 0, 0, 0, 0, 0, 0, 0]), 1.0); self.assertFalse(m.emu)
+    m.feed(0x554, bytes([0x20, 0, 0]), 1.0); self.assertTrue(m.emu)          # 3 bytes: the length teslacan.py really sends
+    m.feed(0x554, bytes([0x00, 0, 0]), 1.0); self.assertFalse(m.emu)
+    m.feed(0x554, bytes([0x20, 0, 0, 0, 0, 0, 0, 0]), 1.0); self.assertTrue(m.emu)   # longer payloads still work
 
   def test_never_opens_the_panda(self):
     src = open(L.__file__).read()
     for bad in ('import usb', 'from panda', 'import panda', 'libusb', 'Panda('):
       self.assertNotIn(bad, src)
+
+
+class WireLengths(unittest.TestCase):
+  def test_0x554_is_three_bytes_in_the_car_code(self):
+    """the bug the dashboard had: it ignored payloads under 8 bytes, but teslacan.py packs 0x554 as 3. Guards the shared assumption."""
+    import re
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'teslacan.py')).read()
+    i = src.index('msg_id = 0x554')
+    self.assertEqual(re.search(r'msg_len = (\d+)', src[i:i + 80]).group(1), '3')
 
 
 if __name__ == '__main__':

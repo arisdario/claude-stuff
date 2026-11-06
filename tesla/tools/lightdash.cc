@@ -65,6 +65,10 @@ struct Mirror {
   bool stale(double now) const { return t659 == 0 || now - t659 > PANDA_STALE_S; }
 
   void feed(uint32_t addr, const uint8_t *d, size_t n, double now) {       // mirrors tesla_tx_hook for the frames openpilot sends
+    if (addr == 0x554) {                                                  // switches: only 3 bytes on the wire (the others are 8)
+      if (n >= 1) emu = (d[0] >> 5) & 1;
+      return;
+    }
     if (n < 8) return;
     uint32_t lo, hi; memcpy(&lo, d, 4); memcpy(&hi, d + 4, 4);
     if (addr == 0x557) {
@@ -83,8 +87,6 @@ struct Mirror {
       if (t659 != 0 && now - t659 > PANDA_STALE_S) reset();
       t659 = now;
       op = d[0] & 0x0F; lng = d[0] >> 7 & 1; cc = d[3] >> 6 & 3; alca = d[3] & 0x1F; hands = d[2] & 7; acc = d[1];
-    } else if (addr == 0x554) {
-      emu = (d[0] >> 5) & 1;
     }
   }
 
@@ -245,9 +247,13 @@ static int selftest() {
   m.lanesFrame(b);
   bool ok2 = (b[0] & 3) == 3 && b[1] == 28 && b[2] == 0x6E;
   printf("lane frame after a 0x557 with both lines seen: left=%d right=%d range=%d C0byte=0x%02x -> %s\n", b[0] & 1, b[0] >> 1 & 1, b[1], b[2], ok2 ? "OK" : "MISMATCH");
+  const uint8_t g554[3] = {0x20, 0, 0};                                      // as the car packs it: 3 bytes
+  m.feed(0x554, g554, 3, 1.0);
+  bool ok4 = m.emu == 1;
+  printf("0x554 with 3 bytes sets the emulation flag: emu=%d -> %s\n", m.emu, ok4 ? "OK" : "MISMATCH");
   std::string s = snapshot(m, Extra(), 1.5); bool ok3 = s.find("\"present\":true") != std::string::npos && s.find("\"op\":5") != std::string::npos;
   printf("snapshot json: %zu bytes -> %s\n", s.size(), ok3 ? "OK" : "MISMATCH");
-  return (ok && ok2 && ok3) ? 0 : 1;
+  return (ok && ok2 && ok3 && ok4) ? 0 : 1;
 }
 
 static void fill_model(Extra &x, cereal::ModelData::Reader mm) {

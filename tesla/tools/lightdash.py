@@ -51,7 +51,11 @@ class PandaMirror(object):
     self.status = {'op': 1, 'cc': 0, 'alca': 5, 'hands': 0, 'acc': 0, 'long': 0}
 
   def feed(self, addr, d, now):
-    """addr, d = payload bytes (8). Mirrors tesla_tx_hook for the frames openpilot sends."""
+    """addr, d = payload bytes. Mirrors tesla_tx_hook for the frames openpilot sends. 0x554 (switches) is only 3 bytes long on the wire; the others are 8."""
+    if addr == 0x554:
+      if len(d) >= 1:
+        self.emu = bool(d[0] >> 5 & 1)
+      return
     if len(d) < 8:
       return
     lo, hi = struct.unpack('<II', bytes(d[:8]))
@@ -77,8 +81,6 @@ class PandaMirror(object):
       self.t_659 = now
       self.status = {'op': b[0] & 0x0F, 'long': b[0] >> 7 & 1, 'cc': b[3] >> 6 & 3, 'alca': b[3] & 0x1F, 'hands': b[2] & 7,
                      'acc': b[1]}
-    elif addr == 0x554:
-      self.emu = bool(d[0] >> 5 & 1)
 
   def stale(self, now):
     return (not self.t_659) or now - self.t_659 > PANDA_STALE_S
@@ -219,7 +221,7 @@ def poll_demo(hz=10.):
     mirror.feed(0x559, tc.create_DAS_LR_object_msg(0, 0, 7, lead, 0.3, -1.5 * math.sin(t * 0.5), 0, 0, 0, 0, 0)[2], now)
     mirror.feed(0x559, tc.create_DAS_LR_object_msg(1, 0, 9, 26, 3.7, 1., 0, 0, 0, 0, 0)[2], now)
     mirror.feed(0x659, bytes([5 if t % 30 > 4 else 2, 90, 0, 0xC0 | 8, 0, 0, 0, 0]), now)
-    mirror.feed(0x554, bytes([0x20, 0, 0, 0, 0, 0, 0, 0]), now)
+    mirror.feed(0x554, bytes([0x20, 0, 0]), now)
     snap = mirror.snapshot(now); mirror.lane_idx = (mirror.lane_idx + 1) % 16
     xs = list(range(0, 100, 4))
     snap.update({'v': 24 + 4 * math.sin(t * 0.2), 'ang': 300 * k, 'en': t % 30 > 4, 't': round(time.time(), 2), 'model': {
