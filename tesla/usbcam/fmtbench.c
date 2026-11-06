@@ -4,7 +4,7 @@
  *   ./fmtbench run <mjpeg|yuyv|h264> [seconds]   stream that format alone (default 20 s) and report:
  *        negotiated frame rate and the USB bandwidth the camera RESERVES (dwMaxPayloadTransferSize) vs the bytes actually delivered per second
  *        delivered fps, frame-interval jitter, late frames (>1.5 intervals), sequence gaps (dropped frames), frame sizes
- *        decode time per frame (MJPEG: libjpeg like camerad; YUYV: conversion to RGB; H.264: not decoded - no decoder on the EON image, delivery numbers only)
+ *        decode time per frame (MJPEG: libjpeg like camerad; YUYV: conversion to RGB; H.264: not decoded - no decoder on the EON image, delivery numbers only; FMT_SAVE=file keeps the raw stream so a decoder can be timed on it)
  *        age of each frame when it reaches the callback (now - the camera's capture time estimate)
  *        CPU of this process (user+system) as % of one core
  *   ./fmtbench all [seconds]                     the three runs one after the other + a comparison table
@@ -36,7 +36,7 @@ static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t
 static double wall_s(void) { struct timeval t; gettimeofday(&t, NULL); return t.tv_sec + t.tv_usec * 1e-6; }
 
 typedef struct { int fmt; double t0, nominal; long n, bytes, sizemin, sizemax, gaps, late; uint32_t lastseq; int haveseq; double last_arrival;
-  double iv[MAXF], age[MAXF], dec[MAXF]; int niv, nage, ndec; uint8_t *rgb; int decode; } Stats;
+  double iv[MAXF], age[MAXF], dec[MAXF]; int niv, nage, ndec; uint8_t *rgb; int decode; FILE *save; } Stats;
 static Stats S;
 
 #ifdef HAVE_JPEG
@@ -70,6 +70,7 @@ static void cb(uvc_frame_t *f, void *ptr) {
   }
   s->last_arrival = t;
   s->n++; s->bytes += f->data_bytes;
+  if (s->save) fwrite(f->data, 1, f->data_bytes, s->save);          // FMT_SAVE=file with `run h264`: the raw H.264 stream, to time a decoder on it
   if (s->sizemin == 0 || (long)f->data_bytes < s->sizemin) s->sizemin = f->data_bytes;
   if ((long)f->data_bytes > s->sizemax) s->sizemax = f->data_bytes;
   if (s->haveseq && f->sequence > s->lastseq + 1) s->gaps += f->sequence - s->lastseq - 1;
@@ -106,11 +107,13 @@ static int run(uvc_device_handle_t *devh, const char *name, double seconds, Row 
   memset(&S, 0, sizeof S);
   S.fmt = fmt; S.nominal = ctrl.dwFrameInterval * 1e-7; S.decode = 1;
   S.rgb = (uint8_t *)malloc((size_t)W * H * 3);
+  { const char *sp = getenv("FMT_SAVE"); if (sp && fmt == UVC_FRAME_FORMAT_H264) { S.save = fopen(sp, "wb"); if (S.save) printf("saving the raw H.264 stream to %s\n", sp); } }
   struct rusage a, b; getrusage(RUSAGE_SELF, &a); double w0 = now_s();
   r = uvc_start_streaming(devh, &ctrl, cb, NULL, 0);
-  if (r < 0) { printf("start failed: %s\n", uvc_strerror(r)); free(S.rgb); return 0; }
+  if (r < 0) { printf("start failed: %s\n", uvc_strerror(r)); if (S.save) { fclose(S.save); S.save = NULL; } free(S.rgb); return 0; }
   while (now_s() - w0 < seconds) usleep(100000);
   uvc_stop_streaming(devh);
+  if (S.save) { fclose(S.save); S.save = NULL; }
   double wall = now_s() - w0; getrusage(RUSAGE_SELF, &b);
   double cpu = ((b.ru_utime.tv_sec - a.ru_utime.tv_sec) + (b.ru_utime.tv_usec - a.ru_utime.tv_usec) * 1e-6 + (b.ru_stime.tv_sec - a.ru_stime.tv_sec) + (b.ru_stime.tv_usec - a.ru_stime.tv_usec) * 1e-6) / wall * 100;
   double fps = S.n / wall, mbit = S.bytes * 8.0 / wall / 1e6;
