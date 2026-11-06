@@ -209,6 +209,11 @@ rs();conn();</script></body></html>)LIGHTDASHPAGE";
 
 struct Client { int fd; bool sse; };
 
+struct Stats {                                         // LIGHTDASH_STATS=1: timings printed to stderr every 5 s (off by default)
+  bool on = false; double last_print = 0, last_tick = 0;
+  double tick_gap_max = 0, accept_ms_max = 0, drain_ms_max = 0, drain_ms_sum = 0, tick_ms_max = 0; long drain_msgs_max = 0, drain_msgs_sum = 0, ticks = 0, dropped = 0, conns = 0;
+};
+static Stats g_st;
 static volatile sig_atomic_t g_quit = 0;
 static void on_sig(int) { g_quit = 1; }
 
@@ -221,11 +226,12 @@ static bool send_all(int fd, const char *p, size_t n) {
   return true;
 }
 
-static void reply(int fd, int code, const char *ctype, const std::string &body) {
+static std::string http_reply(int code, const char *ctype, const std::string &body) {
   char h[256];
   int n = snprintf(h, sizeof h, "HTTP/1.1 %d OK\r\nContent-Type: %s\r\nContent-Length: %zu\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", code, ctype, body.size());
-  send_all(fd, h, n); send_all(fd, body.data(), body.size());
+  return std::string(h, n) + body;
 }
+struct Conn { int fd; double t0; std::string in, out; size_t off; bool stream, unused; };
 
 static int selftest() {
   Mirror m; uint8_t b[8]; m.lanesFrame(b);
@@ -270,6 +276,7 @@ static bool read_event(Message *msg, kj::Array<capnp::word> &buf, capnp::FlatArr
 int main(int argc, char **argv) {
   if (argc > 1 && !strcmp(argv[1], "--selftest")) return selftest();
   signal(SIGINT, on_sig); signal(SIGTERM, on_sig); signal(SIGPIPE, SIG_IGN);
+  g_st.on = getenv("LIGHTDASH_STATS") != nullptr;
   const char *pe = getenv("LIGHTDASH_PORT"), *be = getenv("LIGHTDASH_BIND");
   int port = pe ? atoi(pe) : 8090; const char *bind_addr = be ? be : "0.0.0.0";
   int ls = socket(AF_INET, SOCK_STREAM, 0); int one = 1; setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
@@ -284,35 +291,67 @@ int main(int argc, char **argv) {
   if (!sc || !sm || !scs || !sct) { fprintf(stderr, "lightdash: cannot subscribe to openpilot messages (is openpilot running?)\n"); return 1; }
   printf("lightdash (C++) on http://%s:%d/  (sendcan + model; never opens the panda)\n", bind_addr, port); fflush(stdout);
 
-  Mirror mirror; Extra extra; std::vector<Client> clients; std::string last = "{}"; double want_until = 0, next_tick = 0;
+  Mirror mirror; Extra extra; std::vector<Client> clients; std::vector<Conn> pend; std::string last = "{}"; double want_until = 0, next_tick = 0;
   kj::Array<capnp::word> buf;
   while (!g_quit) {
     double now = now_s();
     bool active = !clients.empty() || now < want_until;
     std::vector<pollfd> pf; pf.push_back({ls, POLLIN, 0});
+    for (auto &c : pend) pf.push_back({c.fd, (short)(c.out.empty() ? POLLIN : POLLOUT), 0});
+    for (auto &c : clients) pf.push_back({c.fd, POLLIN, 0});            // POLLIN/HUP only: notice a closed browser tab at once
     int timeout = active ? (int)((next_tick > now ? next_tick - now : 0) * 1000) + 1 : 300;
+    if (!pend.empty() && timeout > 50) timeout = 50;
     poll(pf.data(), pf.size(), timeout);
-    // new connections
+    now = now_s();
+    // new connections: never wait for a request, each one is a small state machine serviced by poll
     for (;;) {
       int c = accept(ls, nullptr, nullptr); if (c < 0) break;
-      fcntl(c, F_SETFL, O_NONBLOCK);
-      char req[2048]; ssize_t n = 0; for (int tries = 0; tries < 20 && n <= 0; tries++) { n = recv(c, req, sizeof req - 1, 0); if (n <= 0) usleep(5000); }
-      if (n <= 0) { close(c); continue; }
-      req[n] = 0;
-      if (!strncmp(req, "GET /stream", 11)) {
-        const char *h = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n\r\nretry: 1500\n\n";
-        if (send_all(c, h, strlen(h))) clients.push_back({c, true}); else close(c);
-      } else if (!strncmp(req, "GET /s ", 7) || !strncmp(req, "GET /s?", 7)) {
-        want_until = now + 3; reply(c, 200, "application/json", last); close(c);
-      } else if (!strncmp(req, "GET /health", 11)) { reply(c, 200, "text/plain", "ok"); close(c); }
-      else if (!strncmp(req, "GET / ", 6) || !strncmp(req, "GET /index.html", 15) || !strncmp(req, "GET /?", 6)) { reply(c, 200, "text/html; charset=utf-8", PAGE); close(c); }
-      else { reply(c, 404, "text/plain", "not found"); close(c); }
+      g_st.conns++; fcntl(c, F_SETFL, O_NONBLOCK);
+      if (pend.size() >= 16) { close(c); g_st.dropped++; continue; }    // flood guard
+      pend.push_back(Conn{c, now, std::string(), std::string(), 0, false, false});
+    }
+    // clients: a readable SSE socket is a close (or junk): drop it
+    for (size_t i = 0; i < clients.size();) {
+      char tmp[64]; ssize_t n = recv(clients[i].fd, tmp, sizeof tmp, 0);
+      if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) { close(clients[i].fd); clients.erase(clients.begin() + i); g_st.dropped++; } else i++;
+    }
+    for (size_t i = 0; i < pend.size();) {
+      Conn &c = pend[i]; bool done = false, to_stream = false;
+      if (c.out.empty()) {
+        char tmp[1024]; ssize_t n = recv(c.fd, tmp, sizeof tmp, 0);
+        if (n > 0) c.in.append(tmp, n);
+        else if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) done = true;
+        if (!done && c.in.find('\n') != std::string::npos) {         // request line complete
+          const char *req = c.in.c_str();
+          if (!strncmp(req, "GET /stream", 11)) {
+            c.out = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n\r\nretry: 1500\n\n"; c.stream = true;
+          } else if (!strncmp(req, "GET /s ", 7) || !strncmp(req, "GET /s?", 7)) { want_until = now + 3; c.out = http_reply(200, "application/json", last); }
+          else if (!strncmp(req, "GET /health", 11)) c.out = http_reply(200, "text/plain", "ok");
+          else if (!strncmp(req, "GET / ", 6) || !strncmp(req, "GET /index.html", 15) || !strncmp(req, "GET /?", 6)) c.out = http_reply(200, "text/html; charset=utf-8", PAGE);
+          else c.out = http_reply(404, "text/plain", "not found");
+        } else if (c.in.size() > 2048) done = true;
+      }
+      if (!done && !c.out.empty()) {                                  // write what the socket takes now, the rest on POLLOUT
+        while (c.off < c.out.size()) {
+          ssize_t k = send(c.fd, c.out.data() + c.off, c.out.size() - c.off, MSG_NOSIGNAL);
+          if (k > 0) c.off += k; else if (k < 0 && errno == EINTR) continue; else break;
+        }
+        if (c.off >= c.out.size()) { if (c.stream) to_stream = true; else done = true; }
+      }
+      if (now - c.t0 > 3) { done = true; g_st.dropped++; }            // slow-loris / idle / stuck reader: 3 s max
+      if (to_stream) { clients.push_back({c.fd, true}); pend.erase(pend.begin() + i); }
+      else if (done) { double ms = (now_s() - c.t0) * 1000; if (ms > g_st.accept_ms_max) g_st.accept_ms_max = ms; close(c.fd); pend.erase(pend.begin() + i); }
+      else i++;
     }
     now = now_s();
     if (!(!clients.empty() || now < want_until) || now < next_tick) continue;
     next_tick = now + 0.1;                                              // 10 Hz
+    double t_tick0 = now_s(); if (g_st.last_tick > 0 && t_tick0 - g_st.last_tick > g_st.tick_gap_max) g_st.tick_gap_max = t_tick0 - g_st.last_tick; g_st.last_tick = t_tick0;
+    long nd = 0;
     // drain sendcan (every frame matters), conflated latest for the rest
-    while (Message *msg = sc->receive(true)) {
+    while (nd < 4096) {                                                 // bounded: a flood cannot starve the tick
+      Message *msg = sc->receive(true); if (!msg) break;
+      nd++;
       capnp::FlatArrayMessageReader *rd; if (read_event(msg, buf, rd)) {
         auto ev = rd->getRoot<cereal::Event>();
         if (ev.which() == cereal::Event::SENDCAN) for (auto c : ev.getSendcan()) {
@@ -323,6 +362,7 @@ int main(int argc, char **argv) {
       }
       delete msg;
     }
+    { double ms = (now_s() - t_tick0) * 1000; g_st.drain_ms_sum += ms; if (ms > g_st.drain_ms_max) g_st.drain_ms_max = ms; g_st.drain_msgs_sum += nd; if (nd > g_st.drain_msgs_max) g_st.drain_msgs_max = nd; g_st.ticks++; }
     if (Message *msg = scs->receive(true)) {
       capnp::FlatArrayMessageReader *rd; if (read_event(msg, buf, rd)) { auto ev = rd->getRoot<cereal::Event>();
         if (ev.which() == cereal::Event::CAR_STATE) { extra.v = ev.getCarState().getVEgo(); extra.ang = ev.getCarState().getSteeringAngle(); }
@@ -345,7 +385,13 @@ int main(int argc, char **argv) {
     mirror.laneIdx = (mirror.laneIdx + 1) % 16;
     std::string frame = "data: " + last + "\n\n";
     for (size_t i = 0; i < clients.size();) {
-      if (!send_all(clients[i].fd, frame.data(), frame.size())) { close(clients[i].fd); clients.erase(clients.begin() + i); } else i++;
+      if (!send_all(clients[i].fd, frame.data(), frame.size())) { close(clients[i].fd); clients.erase(clients.begin() + i); g_st.dropped++; } else i++;
+    }
+    { double ms = (now_s() - t_tick0) * 1000; if (ms > g_st.tick_ms_max) g_st.tick_ms_max = ms; }
+    if (g_st.on && now - g_st.last_print >= 5) {
+      fprintf(stderr, "stats: ticks %ld  tick gap max %.0f ms  tick work max %.1f ms  sendcan drain: %.2f ms avg, %.1f ms max, %.1f msgs/tick avg, %ld max  connection open max %.0f ms  conns %ld  dropped clients %ld\n",
+              g_st.ticks, g_st.tick_gap_max * 1000, g_st.tick_ms_max, g_st.ticks ? g_st.drain_ms_sum / g_st.ticks : 0., g_st.drain_ms_max, g_st.ticks ? (double)g_st.drain_msgs_sum / g_st.ticks : 0., g_st.drain_msgs_max, g_st.accept_ms_max, g_st.conns, g_st.dropped);
+      g_st.last_print = now; g_st.tick_gap_max = g_st.accept_ms_max = g_st.drain_ms_max = g_st.tick_ms_max = 0; g_st.drain_msgs_max = 0; g_st.ticks = 0; g_st.drain_ms_sum = 0; g_st.drain_msgs_sum = 0;
     }
   }
   for (auto &c : clients) close(c.fd);
