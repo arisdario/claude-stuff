@@ -220,7 +220,7 @@ void on_frame(uvc_frame_t *f, void *) {
 
 #ifdef EXT_HAVE_AVCODEC
 // ---- H.264 input (opt-in). Its own callback: on_frame above (MJPEG) is untouched. Everything after the decode is the same as in on_frame
-// (tests/test_h264_tail.py compares the two tails text for text, so they cannot drift apart).
+// (tests/test_camera_h264_isolation.py compares the two tails text for text, so they cannot drift apart).
 h264::Decoder g_dec;
 volatile int64_t g_dec_ns_sum = 0;
 volatile long g_dec_n = 0;
@@ -496,8 +496,9 @@ void *capture_thread(void *) {
       usleep(100000);
 #ifdef EXT_HAVE_AVCODEC
       if (g_h264 && tick % 300 == 299 && g_dec_n > 0) {                                  // every 30 s while H.264 runs: what decoding costs and how the decoder is doing
-        fprintf(stderr, "external camera: H.264 decode %.1f ms per frame on average (%ld frames), decoder errors %ld, frames dropped waiting for a keyframe %ld\n", g_dec_ns_sum / 1e6 / (double)g_dec_n, g_dec_n, g_dec.errors(), g_dec.dropped());
-        g_dec_ns_sum = 0; g_dec_n = 0;
+        fprintf(stderr, "external camera: H.264 %.1f ms per frame in total (libavcodec %.1f + YUV->RGB %.1f), %ld frames; decoder errors %ld, dropped waiting for a keyframe %ld\n",
+                g_dec_ns_sum / 1e6 / (double)g_dec_n, g_dec.dec_ms(), g_dec.conv_ms(), g_dec_n, g_dec.errors(), g_dec.dropped());
+        g_dec_ns_sum = 0; g_dec_n = 0; g_dec.stats_reset();
       }
 #endif
       if (++tick % 10 == 0) {
@@ -537,8 +538,17 @@ static int selftest_once(int timeout_ms) {
   g_frames = 0;
   if (!ext_open()) return 0;
   int waited = 0;
-  while (g_frames < 3 && waited < timeout_ms) { usleep(50000); waited += 50; }
+  int limit = timeout_ms;
+#ifdef EXT_HAVE_AVCODEC
+  if (g_h264_try && limit < 8000) limit = 8000;                    // H.264 needs a keyframe before the first picture, and the camera decides when that comes
+#endif
+  while (g_frames < 3 && waited < limit) { usleep(50000); waited += 50; }
   int ok = g_frames >= 3;
+#ifdef EXT_HAVE_AVCODEC
+  if (!ok && g_h264_try)                                           // why: nothing from the camera, no keyframe yet, or a decoder problem (read before ext_close frees the decoder)
+    fprintf(stderr, "external camera: H.264 self-test: %ld frames from the camera, %ld decoded, decoder errors %ld, dropped waiting for a keyframe %ld (waited %d ms)\n",
+            g_dec.rx(), g_dec.decoded(), g_dec.errors(), g_dec.dropped(), waited);
+#endif
   ext_close();
   return ok;
 }
@@ -550,6 +560,8 @@ int ext_c920_selftest(int timeout_ms) {
   if (!ok && g_h264_try) {                                          // H.264 was chosen and failed (no stream, or no picture): the camera itself may be fine, so MJPEG gets one try before the C920 is given up on
     g_force_mjpeg = 1;
     fprintf(stderr, "external camera: H.264 self-test failed: trying MJPEG\n");
+    sleep(1);
+    for (int w = 0; w < 16 && !ext_c920_present() && !do_exit; w++) usleep(500000);   // the camera may have dropped off USB: give it up to 8 s to come back
     ok = selftest_once(timeout_ms);
   }
 #endif
