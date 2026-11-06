@@ -150,6 +150,12 @@ class Live(unittest.TestCase):
     out = buf.getvalue()
     self.assertEqual(rc, 0); self.assertIn('0x2e5', out); self.assertIn('2 reading point(s), 2 distinct', out); self.assertIn("inside': (21.0, 27.0)", out)
 
+  def test_read_number_ignores_stray_keys(self):
+    self.assertEqual(F.read_number('?', reader=lambda p: '\x1b[B22'), 22.0)          # a down-arrow typed during the capture
+    self.assertEqual(F.read_number('?', reader=lambda p: ' 23,5 '), 23.5)
+    self.assertIsNone(F.read_number('?', reader=lambda p: ''))
+    self.assertIsNone(F.read_number('?', reader=lambda p: '\x1b[A'))
+
   def test_parse_readings(self):
     self.assertEqual(F.parse_readings('outside=9,inside=23.5'), {'outside': 9.0, 'inside': 23.5})
     self.assertEqual(F.parse_readings('inside=23.5..26'), {'inside': (23.5, 26.0)})

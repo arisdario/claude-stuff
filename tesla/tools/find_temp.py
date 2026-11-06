@@ -202,6 +202,22 @@ def parse_spec(spec):
   return path, rd
 
 
+def read_number(prompt, reader=None):
+  """asks for a number; keys typed during the capture (arrow keys etc.) are discarded first and anything that is not part of a number is ignored"""
+  import re
+  try:
+    import termios
+    termios.tcflush(sys.stdin, termios.TCIFLUSH)
+  except Exception:
+    pass
+  try:
+    text = (reader or input)(prompt)
+  except EOFError:
+    return None
+  m = re.search(r'-?\d+(?:[.,]\d+)?', text.replace('\x1b[A', '').replace('\x1b[B', '').replace('\x1b[C', '').replace('\x1b[D', ''))
+  return float(m.group(0).replace(',', '.')) if m else None
+
+
 def live_capture(seconds, bus):
   import cereal.messaging as messaging
   sock = messaging.sub_sock('can', timeout=50)
@@ -230,12 +246,9 @@ def main(argv=None, capture=None):
     per, frames = (capture or live_capture)(a.live, a.bus)
     print('captured %d frames from %d addresses on bus %d' % (frames, len(per), a.bus))
     if a.ask_end and isinstance(rd.get('inside'), float):
-      try:
-        end = input('inside temperature on the display NOW (Enter to skip): ').strip()
-      except EOFError:
-        end = ''
-      if end:
-        rd['inside'] = (rd['inside'], float(end))
+      end = read_number('inside temperature on the display NOW (Enter to skip): ')
+      if end is not None:
+        rd['inside'] = (rd['inside'], end)
     specs = [('live capture', per, frames, rd)]
   else:
     for spec in a.logs:
