@@ -28,7 +28,7 @@ import sys
 NICE_SCALES = [1.0, 0.5, 0.25, 0.1, 0.125, 0.0625, 0.05, 0.2, 2.0, 0.01]
 NICE_OFFSETS = [0.0, -40.0, -50.0, -30.0, -20.0, -10.0, -25.0, -60.0, -100.0, 10.0, -273.15]
 WIDTHS = (8, 10, 11, 12, 16)
-STEADY = 0.9            # fraction of samples within +-3 raw units of the median
+STEADY = 0.9            # fraction of samples within +-3 raw units of the most common value (lower it with --steady 0.5 for a message that alternates between frame types)
 CAP = 60                # samples per address per log (slow signals need no more)
 
 
@@ -83,9 +83,15 @@ def fields(ints):
 
 
 def stats(vals):
+  """-> (value, fraction of samples within +-3 of it). Two measures, the better one wins: the MEDIAN (a field that drifts slowly, like a temperature while the heating runs) and the MOST COMMON
+  value (a message that alternates between frame types, where only some frames carry the field)."""
+  from collections import Counter
   s = sorted(vals)
   med = s[len(s) // 2]
-  return med, sum(1 for x in vals if abs(x - med) <= 3) / float(len(vals))
+  st_med = sum(1 for x in vals if abs(x - med) <= 3) / float(len(vals))
+  mode = Counter(vals).most_common(1)[0][0]
+  st_mode = sum(1 for x in vals if abs(x - mode) <= 3) / float(len(vals))
+  return (mode, st_mode) if st_mode > st_med else (med, st_med)
 
 
 def trivial(key, med):
@@ -228,14 +234,17 @@ def live_capture(seconds, bus):
 
 
 def main(argv=None, capture=None):
+  global STEADY
   ap = argparse.ArgumentParser(description='find the outside/inside temperature in CAN logs or the live CAN stream (read-only)')
   ap.add_argument('logs', nargs='+', help='FILE.jsonl:outside=5,inside=20 (one per log); with --live: outside=9 inside=23.5')
   ap.add_argument('--top', type=int, default=10)
   ap.add_argument('--tol', type=float, default=0.75, help='allowed error in degrees C (the display rounds)')
   ap.add_argument('--live', type=int, default=0, metavar='SECONDS', help='listen to the live CAN stream instead of reading a log (openpilot must be running)')
   ap.add_argument('--bus', type=int, default=0, help='CAN bus to listen to in --live mode (0 = chassis)')
+  ap.add_argument('--steady', type=float, default=STEADY, help='how steady a field must be (0..1, default %(default)s); 0.5 finds fields of messages that alternate between frame types')
   ap.add_argument('--ask-end', action='store_true', help='--live: ask for the inside temperature shown at the end, as the END of inside=START..END')
   a = ap.parse_args(argv)
+  STEADY = a.steady
   logs = []
   specs = []
   if a.live:

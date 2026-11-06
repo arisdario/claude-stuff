@@ -156,6 +156,23 @@ class Live(unittest.TestCase):
     self.assertIsNone(F.read_number('?', reader=lambda p: ''))
     self.assertIsNone(F.read_number('?', reader=lambda p: '\x1b[A'))
 
+  def test_a_message_that_alternates_between_frame_types(self):
+    """0x283-like: 60% of the frames carry the temperature in byte 7, 40% are filler. Default threshold drops it, --steady 0.5 finds it."""
+    rnd = random.Random(9)
+    ints = []
+    for i in range(100):
+      b = bytes([0x0f, 0xff, 0x10, 0x00, 0x04, 0xff, 0x60, 0x62]) if rnd.random() < 0.6 else bytes([0x02] + [0x55] * 7)
+      ints.append(int.from_bytes(b, 'little'))
+    old = F.STEADY
+    try:
+      F.STEADY = 0.9
+      self.assertNotIn((0x283, ('I', 8, 56, False)), F.scan({0x283: ints}))
+      F.STEADY = 0.5
+      sc = F.scan({0x283: ints})
+      self.assertEqual(sc[(0x283, ('I', 8, 56, False))][0], 0x62)             # the value of the frame type that carries it, not the filler
+    finally:
+      F.STEADY = old
+
   def test_parse_readings(self):
     self.assertEqual(F.parse_readings('outside=9,inside=23.5'), {'outside': 9.0, 'inside': 23.5})
     self.assertEqual(F.parse_readings('inside=23.5..26'), {'inside': (23.5, 26.0)})
