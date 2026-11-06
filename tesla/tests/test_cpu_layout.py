@@ -45,8 +45,12 @@ class Discover(unittest.TestCase):
 
 class Recommend(unittest.TestCase):
   def test_recommends_no_change_when_nothing_beats_floating(self):
-    v, w, rows = C.recommend({'modeld': 30, 'controlsd': 30, 'camerad': 10}, 20, [3, 0, 0, 0])
-    self.assertIn('NO CHANGE', v)
+    v, w, rows = C.recommend({'modeld': 30, 'controlsd': 30, 'camerad': 10}, 20, [3, 0, 0, 0], measured_peak=36)
+    self.assertIn('NO CHANGE', v)                                       # adapted projects 35%: not 3 points under the 36% the scheduler really achieves
+
+  def test_recommends_a_candidate_when_the_measured_peak_is_high(self):
+    v, w, rows = C.recommend({'modeld': 62, 'controlsd': 61, 'camerad': 20, 'plannerd': 10, 'radard': 8}, 30, [2, 0, 0, 0], measured_peak=88)
+    self.assertIn('candidate:', v); self.assertIn('measured now', v)
 
   def test_flags_overload_and_c920_warning(self):
     v, w, rows = C.recommend(LOADS, 60, [11, 0, 0, 0])

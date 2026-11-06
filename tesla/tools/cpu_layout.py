@@ -76,7 +76,8 @@ CANDIDATES = [
 
 def recommend(loads, other, irq, measured_peak=None):
   """-> (verdict text, warnings list, rows [(name, eval)]). Picks the candidate with the lowest projected peak among those with no overloaded core, but only
-  if it beats the floating baseline by at least 3 points; otherwise recommends no change (pinning also takes away the scheduler's freedom to rebalance)."""
+  if it beats the MEASURED peak (what the real scheduler achieves; my greedy float projection is cruder than the kernel) by at least 3 points; otherwise it
+  recommends no change (pinning also takes away the scheduler's freedom to rebalance)."""
   rows = [(n, evaluate(loads, lay, other, irq)) for n, lay in CANDIDATES]
   base = rows[0][1]
   ok = [(n, e) for n, e in rows[1:] if not e['overloaded']]
@@ -84,13 +85,14 @@ def recommend(loads, other, irq, measured_peak=None):
   if loads.get('camerad', 0) > 30:
     warnings.append('camerad costs %.0f%% of a core (software JPEG decode of the C920): it cannot share a core with modeld' % loads['camerad'])
   warnings.append('projection ignores cache effects, memory bandwidth and the time-varying load; interrupts are taken as measured now (the `system` plan would move them)')
-  if measured_peak is not None:
-    warnings.append('the scheduler measured peak was %.0f%% (the float row is a projection of the same load)' % measured_peak)
+  ref = measured_peak if measured_peak is not None else base['peak']
+  if measured_peak is not None and abs(measured_peak - base['peak']) > 10:
+    warnings.append('my float projection (%.0f%%) differs from the measured peak (%.0f%%) by more than 10 points: treat all projected numbers as rough' % (base['peak'], measured_peak))
   best = min(ok, key=lambda r: r[1]['peak']) if ok else None
-  if best and best[1]['peak'] <= base['peak'] - 3.0:
-    verdict = 'candidate: %s  (projected peak %.0f%% against %.0f%% floating, headroom %.0f%%)' % (best[0], best[1]['peak'], base['peak'], best[1]['headroom'])
+  if best and best[1]['peak'] <= ref - 3.0:
+    verdict = 'candidate: %s  (projected peak %.0f%% against %.0f%% %s, headroom %.0f%%)' % (best[0], best[1]['peak'], ref, 'measured now' if measured_peak is not None else 'floating', best[1]['headroom'])
   else:
-    verdict = 'NO CHANGE recommended: no candidate beats floating by 3 points or more (floating peak %.0f%%, headroom %.0f%%)' % (base['peak'], base['headroom'])
+    verdict = 'NO CHANGE recommended: no candidate beats the %s peak by 3 points or more (%.0f%%, headroom %.0f%%)' % ('measured' if measured_peak is not None else 'floating', ref, 100.0 - ref)
   return verdict, warnings, rows
 
 
