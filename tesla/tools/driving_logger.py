@@ -7,6 +7,10 @@ READ-ONLY / OBSERVATIONAL ONLY. This subscribes to openpilot's own cereal messag
 lightdash.py and mapcurve_launcher.py do. It never opens the panda, never calls can_send, never
 publishes anything, and never imports or touches carcontroller/carstate/safety code at runtime -
 it only reads what openpilot already decided and already sent. It cannot change how the car drives.
+The one exception, and it changes nothing either: it also imports steer_limits.py - by its own
+docstring "Pure functions, no openpilot imports" - purely to compute what that OFF-by-default layer
+WOULD have output at a couple of candidate strengths, side by side with what actually happened. The
+result is logged, never sent, never fed back into anything. See "STEER_LIMITS HYPOTHETICALS" below.
 
   cd /data/openpilot && PYTHONPATH=/data/openpilot python3 /data/claude-stuff/tesla/tools/driving_logger.py \
       --out /data/drivelog_$(date +%Y%m%d_%H%M%S).jsonl [--hz 20] [--duration 1800]
@@ -85,6 +89,21 @@ wiggle correlates with a torque blip, a commanded/measured angle mismatch, or ne
 Two further signals exist on the bus but are not yet published to cereal by this fork (steer_error
 from EPAS_steeringFault, steer_not_allowed from EPAS_eacStatus - both internal-only in interface.py):
 not added here to keep this change minimal; flag if you want them exposed too.
+
+--------------------------------------------------------------------------------------------------
+STEER_LIMITS HYPOTHETICALS (sl20_angle / sl25_angle) - NEVER applied, logged only
+--------------------------------------------------------------------------------------------------
+carcontroller.py has an opt-in rate/clip layer, steer_limits.py (off by default: /data/steer_limits_on
+must exist). It needs (request, last_request, measured_angle, v_ego, strength) - "request" and "last"
+are carcontroller's own apply_angle this frame and the frame before, which aren't published anywhere.
+This logger approximates them with das_commanded_angle (this sample) and the previous sample's
+das_commanded_angle, at this logger's own ~20 Hz sampling instead of controlsd's real ~100 Hz loop -
+scaled by passing the actual elapsed time between the two 0x659 frames as call_dt, so the rate limit
+is at least scaled correctly for the cadence actually sampled. This is an APPROXIMATION for comparing
+candidate strengths over a whole drive, not a bit-exact replay of what the layer would have output
+frame by frame. Logs sl20_angle and sl25_angle (strength 0.20 and 0.25) next to the real
+steering_angle/das_commanded_angle, so you can see which one would have tracked closer without
+over-damping - without ever turning the layer on or changing a single frame actually sent to the car.
 """
 import argparse
 import json
@@ -198,9 +217,36 @@ def lead_dict(lead):
   return out
 
 
+def sl_hypotheticals(sl, request, prev_request, measured, v_ego, t_659=None, prev_t_659=None):
+  """pure wrapper around steer_limits.limit_angle() for the two candidate strengths; see module
+  docstring (STEER_LIMITS HYPOTHETICALS). None in, None out - never raises, never applied anywhere."""
+  if request is None or prev_request is None:
+    return {'sl20_angle': None, 'sl25_angle': None}
+  call_dt = (t_659 - prev_t_659) if (t_659 is not None and prev_t_659 is not None and t_659 > prev_t_659) else 0.01
+  return {
+    'sl20_angle': round(sl.limit_angle(request, prev_request, measured, v_ego, 0.20, call_dt), 2),
+    'sl25_angle': round(sl.limit_angle(request, prev_request, measured, v_ego, 0.25, call_dt), 2),
+  }
+
+
+def _load_steer_limits():
+  """from selfdrive.car.tesla on-car; falls back to a path-relative load off-car (same trick as
+  lightdash.py's car_packers()). steer_limits.py has no openpilot imports, so either way works."""
+  try:
+    from selfdrive.car.tesla import steer_limits as sl
+    return sl
+  except Exception:
+    import importlib.util
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'steer_limits.py')
+    spec = importlib.util.spec_from_file_location('steer_limits_dl', p)
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    return mod
+
+
 # ---------------------------------------------------------------------------------------- the live loop
 def run(out_path, hz=20.0, duration=None, log=print):
   import cereal.messaging as messaging  # local import: keeps this file importable/testable off-car
+  sl = _load_steer_limits()
 
   topics = ('controlsState', 'carState', 'radarState', 'model')
   subs = {t: messaging.sub_sock(t, conflate=True) for t in topics}
@@ -210,6 +256,7 @@ def run(out_path, hz=20.0, duration=None, log=print):
   last_ctrl = last_long = last_steer = None
   last_das = decode_0x659(None)
   t_ctrl = t_659 = None
+  prev_request, prev_t_659 = None, None     # for the steer_limits hypotheticals, see module docstring
   reported_fields = False
 
   f = open(out_path, 'a')
@@ -282,6 +329,13 @@ def run(out_path, hz=20.0, duration=None, log=print):
           'cruise_enabled_UNRELIABLE': bool(g('cruiseState', None) and cs_.cruiseState.enabled),  # hardcoded True - see docstring
           'cruise_speed': round(float(cs_.cruiseState.speed), 2) if g('cruiseState', None) else None,
         })
+
+        # STEER_LIMITS HYPOTHETICALS - see module docstring. Never applied; logged only.
+        request = sample.get('das_commanded_angle')
+        sample.update(sl_hypotheticals(sl, request, prev_request, sample['steering_angle'], sample['v_ego'],
+                                        t_659, prev_t_659))
+        if request is not None:
+          prev_request, prev_t_659 = request, t_659
 
       if rad is not None:
         try:

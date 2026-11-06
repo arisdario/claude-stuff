@@ -128,6 +128,32 @@ class TestClassifier(unittest.TestCase):
     self.assertEqual(c.update(5.0, True, 5.0, True, 0.0, True, 0.0), 'UNKNOWN')
 
 
+class TestSteerLimitsHypotheticals(unittest.TestCase):
+  def setUp(self):
+    self.sl = DL._load_steer_limits()
+
+  def test_none_request_or_prev_is_none_out(self):
+    self.assertEqual(DL.sl_hypotheticals(self.sl, None, 5.0, 5.0, 10.0), {'sl20_angle': None, 'sl25_angle': None})
+    self.assertEqual(DL.sl_hypotheticals(self.sl, 5.0, None, 5.0, 10.0), {'sl20_angle': None, 'sl25_angle': None})
+
+  def test_matches_the_real_module_directly(self):
+    d = DL.sl_hypotheticals(self.sl, 10.0, 8.0, 9.0, 15.0, t_659=1.0, prev_t_659=0.95)
+    expect20 = round(self.sl.limit_angle(10.0, 8.0, 9.0, 15.0, 0.20, 0.05), 2)
+    expect25 = round(self.sl.limit_angle(10.0, 8.0, 9.0, 15.0, 0.25, 0.05), 2)
+    self.assertEqual(d['sl20_angle'], expect20); self.assertEqual(d['sl25_angle'], expect25)
+
+  def test_falls_back_to_default_call_dt_without_timestamps(self):
+    d = DL.sl_hypotheticals(self.sl, 10.0, 8.0, 9.0, 15.0)   # no t_659/prev_t_659
+    expect = round(self.sl.limit_angle(10.0, 8.0, 9.0, 15.0, 0.20, 0.01), 2)
+    self.assertEqual(d['sl20_angle'], expect)
+
+  def test_25_limits_at_least_as_much_as_20_for_a_big_jump(self):
+    d = DL.sl_hypotheticals(self.sl, 30.0, 0.0, 0.0, 0.0, t_659=1.0, prev_t_659=0.95)
+    # higher strength pulls FURTHER from the raw request toward the rate/clip-limited value, so its
+    # output deviates from the raw 30 deg request by at least as much as the weaker strength does
+    self.assertGreaterEqual(abs(d['sl25_angle'] - 30.0), abs(d['sl20_angle'] - 30.0) - 1e-9)
+
+
 class TestLeadDict(unittest.TestCase):
   class FakeLead(object):
     status = True
