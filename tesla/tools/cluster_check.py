@@ -6,7 +6,7 @@
     python3 /data/claude-stuff/tesla/tools/cluster_check.py --no-panda # skip pandatool (e.g. while openpilot runs)
 
 It collects, prints and saves (/data/cluster_check_YYYYmmdd_HHMMSS.txt) three things, then gives a verdict:
-  1. the enable_* switches in /data/bb_openpilot.cfg (enable_das_emulation must be True)
+  1. the enable_*/use_*/uses_* switches in /data/bb_openpilot.cfg (enable_das_emulation must be True; uses_a_pillar_harness tells the harness type)
   2. `pandatool.py status` (read-only): does the flashed firmware match the source built from the tree?
   3. the CAN-dump check of CLUSTER.md on the newest drive log: are the cluster frames on the bus, and do they follow openpilot?
 It changes nothing, sends nothing on CAN, and never flashes. No secrets are printed (only the enable_* lines).
@@ -75,7 +75,7 @@ def read_cfg():
   out = []
   try:
     for line in open(CFG):
-      if re.match(r'^\s*(enable_|use_)[a-z_]*\s*=', line):
+      if re.match(r'^\s*(enable_|use_|uses_)[a-z_]*\s*=', line):
         out.append(line.strip())
   except Exception as e:
     out.append('cannot read %s: %s' % (CFG, e))
@@ -99,7 +99,7 @@ def main():
   a = ap.parse_args()
   lines = ['cluster_check %s' % time.strftime('%Y-%m-%d %H:%M:%S')]
   lines.append('\n=== 1. switches in %s' % CFG)
-  lines += read_cfg() or ['(no enable_/use_ lines found)']
+  lines += read_cfg() or ['(no enable_/use_/uses_ lines found)']
   cfg_text = '\n'.join(read_cfg())
   emu = re.search(r'enable_das_emulation\s*=\s*(\w+)', cfg_text)
   lines.append('=> enable_das_emulation = %s' % (emu.group(1) if emu else 'not set (default False)'))
