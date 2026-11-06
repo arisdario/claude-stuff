@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""lightdash - ONE small read-only web page that shows what the panda tells the instrument cluster (lanes, lead cars, status).
+"""lightdash (Python version) - the C++ twin lightdash.cc is much lighter (~0.3% of a core, 6 MB; build: sh build_lightdash.sh) and is the one to run on the EON;
+this file stays as the readable reference / off-car --demo.
+
+lightdash - ONE small read-only web page that shows what the panda tells the instrument cluster (lanes, lead cars, status).
 
   PYTHONPATH=/data/openpilot nohup nice -n 19 python3 /data/claude-stuff/tesla/tools/lightdash.py > /data/lightdash.log 2>&1 &
   open  http://<EON-IP>:8090/        (stop: pkill -f lightdash.py)       off-car test: python3 lightdash.py --demo
