@@ -183,6 +183,24 @@ function P(x,y){ // real metres (x ahead, y left) -> screen
  var K=H*0.9,d=x+5;return [W/2-y*K/d,H*0.38+2.5*K/d]}
 function line(pts,col,w,dash){if(pts.length<2)return;g.beginPath();g.setLineDash(dash||[]);g.strokeStyle=col;g.lineWidth=w;pts.forEach(function(p,i){i?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1])});g.stroke();g.setLineDash([])}
 function poly(c,x){return c[0]+c[1]*x+c[2]*x*x+c[3]*x*x*x}
+function rr(x,y,w,h,r){g.beginPath();g.moveTo(x+r,y);g.lineTo(x+w-r,y);g.quadraticCurveTo(x+w,y,x+w,y+r);g.lineTo(x+w,y+h-r);g.quadraticCurveTo(x+w,y+h,x+w-r,y+h);g.lineTo(x+r,y+h);g.quadraticCurveTo(x,y+h,x,y+h-r);g.lineTo(x,y+r);g.quadraticCurveTo(x,y,x+r,y);g.closePath()}
+function carBack(cx,y0,w,rel){ // a car seen from behind; y0 = where its tyres touch the road, w = 1.8 m of real width
+ var h=w*0.8,body=rel?'#b8484b':'#7d8792',dark='#12161b',glass='#1b2733';
+ if(w<14){g.fillStyle=body;g.fillRect(cx-w/2,y0-h,w,h);return}
+ g.save();g.translate(cx,y0);g.scale(1,0.12);g.fillStyle='rgba(0,0,0,.45)';g.beginPath();g.arc(0,0,w*0.56,0,6.2832);g.fill();g.restore();
+ g.fillStyle=dark;rr(cx-w*0.46,y0-h*0.30,w*0.17,h*0.30,w*0.03);g.fill();rr(cx+w*0.29,y0-h*0.30,w*0.17,h*0.30,w*0.03);g.fill();
+ g.fillStyle=body;rr(cx-w/2,y0-h*0.58,w,h*0.40,w*0.07);g.fill();
+ g.beginPath();g.moveTo(cx-w*0.41,y0-h*0.56);g.lineTo(cx-w*0.30,y0-h);g.lineTo(cx+w*0.30,y0-h);g.lineTo(cx+w*0.41,y0-h*0.56);g.closePath();g.fill();
+ g.fillStyle=glass;g.beginPath();g.moveTo(cx-w*0.35,y0-h*0.61);g.lineTo(cx-w*0.26,y0-h*0.93);g.lineTo(cx+w*0.26,y0-h*0.93);g.lineTo(cx+w*0.35,y0-h*0.61);g.closePath();g.fill();
+ g.fillStyle=rel?'#ff5a5f':'#9a4a4d';rr(cx-w*0.47,y0-h*0.50,w*0.21,h*0.10,w*0.02);g.fill();rr(cx+w*0.26,y0-h*0.50,w*0.21,h*0.10,w*0.02);g.fill();
+ g.fillStyle='#cfd6dd';g.fillRect(cx-w*0.10,y0-h*0.33,w*0.20,h*0.07);
+ g.fillStyle='rgba(0,0,0,.35)';rr(cx-w/2,y0-h*0.23,w,h*0.05,w*0.02);g.fill()}
+function carTop(cx,yr,w,l,rel){ // seen from above, rear edge at screen y=yr, nose pointing up (4.5 m long, 1.8 m wide)
+ var body=rel?'#b8484b':'#7d8792',dark='#12161b',glass='#1b2733';
+ g.fillStyle=dark;rr(cx-w*0.53,yr-l*0.84,w*0.10,l*0.18,w*0.03);g.fill();rr(cx+w*0.43,yr-l*0.84,w*0.10,l*0.18,w*0.03);g.fill();rr(cx-w*0.53,yr-l*0.20,w*0.10,l*0.18,w*0.03);g.fill();rr(cx+w*0.43,yr-l*0.20,w*0.10,l*0.18,w*0.03);g.fill();
+ g.fillStyle=body;rr(cx-w/2,yr-l,w,l,w*0.30);g.fill();
+ g.fillStyle=glass;rr(cx-w*0.38,yr-l*0.66,w*0.76,l*0.22,w*0.10);g.fill();rr(cx-w*0.36,yr-l*0.30,w*0.72,l*0.13,w*0.08);g.fill();
+ g.fillStyle=rel?'#ff5a5f':'#9a4a4d';rr(cx-w*0.46,yr-l*0.06,w*0.22,l*0.04,w*0.02);g.fill();rr(cx+w*0.24,yr-l*0.06,w*0.22,l*0.04,w*0.02);g.fill()}
 function draw(){g.fillStyle='#0b0d10';g.fillRect(0,0,W,H);if(!S||!S.lanes){g.fillStyle='#9aa4af';g.fillText('waiting for data...',20,30);return}
  var L=S.lanes,R=Math.min(110,L.range*SC),pw=[],i;
  // grid
@@ -198,7 +216,10 @@ function draw(){g.fillStyle='#0b0d10';g.fillRect(0,0,W,H);if(!S||!S.lanes){g.fil
  line(cc,'rgba(255,255,255,.18)',1,[6,8]);
  line(lf,L.left?'#ffd23f':'#555e68',L.left?5:2,L.left?null:[10,10]);line(rt,L.right?'#ffd23f':'#555e68',L.right?5:2,L.right?null:[10,10]);
  // lead / side vehicles
- S.obj.forEach(function(o){var p=P(o.dx,o.dy),w=Math.max(10,40*(tdv?H/900:1/Math.max(.25,o.dx/25)));g.fillStyle=o.relevant?'#e5383b':'#8b949e';g.fillRect(p[0]-w/2,p[1]-w*.6,w,w*.6);g.fillStyle='#e8edf2';g.fillText(o.slot+' '+Math.round(o.dx)+' m',p[0]-w/2,p[1]-w*.6-4)});
+ S.obj.slice().sort(function(a,b){return b.dx-a.dx}).forEach(function(o){var p=P(o.dx,o.dy),w,h;
+  if(tdv){h=Math.max(26,4.5*H*0.8/110*1.6);w=Math.max(12,h/2.2);carTop(p[0],p[1],w,h,o.relevant)}   // an icon with car proportions: the top view stretches the sideways scale 4x, so true scale would look squashed
+  else{w=Math.max(12,1.8*H*0.9/(o.dx+5));h=w*0.8;carBack(p[0],p[1],w,o.relevant)}
+  g.fillStyle='#e8edf2';g.textAlign='center';g.fillText(o.slot+' '+Math.round(o.dx)+' m',p[0],p[1]-h-6);g.textAlign='left'});
  // header
  var st=S.status,y0=22;g.font='15px system-ui';g.fillStyle='#e8edf2';
  g.fillText('openpilot '+(S.en?'ENGAGED':'off')+'   speed '+Math.round((S.v||0)*3.6)+' km/h   wheel '+(S.ang||0).toFixed(1)+' deg',16,y0);
