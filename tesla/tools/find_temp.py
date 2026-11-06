@@ -6,6 +6,9 @@ You tell it what the car's own display showed while each log was recorded; it sc
   python3 find_temp.py LOG1.jsonl:outside=5,inside=19.5  LOG2.jsonl:outside=11,inside=23  LOG3.jsonl:outside=12,inside=27  [--top 10] [--tol 0.75]
   python3 find_temp.py LOG.jsonl:outside=9,inside=23.5..26      ONE log in which the inside temperature changed from 23.5 (start) to 26 (end): see below. (Do NOT write > : the shell would send the output to a file)
 
+TWO CAPTURES (the practical way to get an inside temperature that really changes): capture now, warm (or cool) the cabin by 3 degrees or more, capture again, then search both:
+  python3 find_temp.py --live 60 outside=9 inside=21 --save /data/capA.jsonl ; (change the cabin) ; python3 find_temp.py --live 60 outside=9 inside=24 --save /data/capB.jsonl
+  python3 find_temp.py /data/capA.jsonl:outside=9,inside=21 /data/capB.jsonl:outside=9,inside=24 --steady 0.5
 LIVE MODE (no log file needed; openpilot must be running and the car awake): it listens to the CAN messages boardd already publishes for N seconds, then searches exactly as below.
   cd /data/openpilot && python3 /data/find_temp.py --live 180 outside=9 inside=23.5 --ask-end
 While it listens, change the cabin temperature (heating or A/C, fan up). At the end, --ask-end asks for the inside value the car shows NOW, so the search has two points. Reads messages only.
@@ -224,6 +227,16 @@ def read_number(prompt, reader=None):
   return float(m.group(0).replace(',', '.')) if m else None
 
 
+def save_capture(per, path):
+  """writes a live capture as a maplog-like jsonl (row i = the i-th sample of every address), so it can be searched later together with other captures"""
+  n = max(len(v) for v in per.values()) if per else 0
+  with open(path, 'w') as f:
+    for i in range(n):
+      raw = {'0x%x' % a: v[i].to_bytes(8, 'little').hex() for a, v in per.items() if i < len(v)}
+      f.write(json.dumps({'t': i, 'raw': raw}) + '\n')
+  return n
+
+
 def live_capture(seconds, bus):
   import cereal.messaging as messaging
   sock = messaging.sub_sock('can', timeout=50)
@@ -242,6 +255,7 @@ def main(argv=None, capture=None):
   ap.add_argument('--live', type=int, default=0, metavar='SECONDS', help='listen to the live CAN stream instead of reading a log (openpilot must be running)')
   ap.add_argument('--bus', type=int, default=0, help='CAN bus to listen to in --live mode (0 = chassis)')
   ap.add_argument('--steady', type=float, default=STEADY, help='how steady a field must be (0..1, default %(default)s); 0.5 finds fields of messages that alternate between frame types')
+  ap.add_argument('--save', metavar='FILE', help='--live: also write the capture to FILE, to search later together with another capture (FILE:outside=9,inside=24)')
   ap.add_argument('--ask-end', action='store_true', help='--live: ask for the inside temperature shown at the end, as the END of inside=START..END')
   a = ap.parse_args(argv)
   STEADY = a.steady
@@ -254,6 +268,8 @@ def main(argv=None, capture=None):
       print(e); return 2
     per, frames = (capture or live_capture)(a.live, a.bus)
     print('captured %d frames from %d addresses on bus %d' % (frames, len(per), a.bus))
+    if a.save:
+      print('saved %d rows to %s' % (save_capture(per, a.save), a.save))
     if a.ask_end and isinstance(rd.get('inside'), float):
       end = read_number('inside temperature on the display NOW (Enter to skip): ')
       if end is not None:

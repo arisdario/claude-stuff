@@ -150,6 +150,29 @@ class Live(unittest.TestCase):
     out = buf.getvalue()
     self.assertEqual(rc, 0); self.assertIn('0x2e5', out); self.assertIn('2 reading point(s), 2 distinct', out); self.assertIn("inside': (21.0, 27.0)", out)
 
+  def test_two_saved_captures_find_the_field(self):
+    """capture A at inside 21, capture B at inside 25, each saved; the combined file search finds the hidden field and rejects the noise"""
+    import io, contextlib
+    d = tempfile.mkdtemp(prefix='ft3_')
+    def cap(inside, seed):
+      rnd = random.Random(seed); per = {}
+      for i in range(80):
+        for a in range(0x100, 0x130):
+          per.setdefault(a, []).append(int.from_bytes(bytes(rnd.randrange(256) for _ in range(8)), 'little'))
+        per.setdefault(0x2e5, []).append(int.from_bytes(bytes([1, 2, 3, 4, 5, int(round(inside * 5)), 7, 8]), 'little'))
+      return per
+    paths = []
+    for n, (inside, seed) in enumerate([(21.0, 1), (25.0, 2)]):
+      p = os.path.join(d, 'cap%d.jsonl' % n); paths.append(p)
+      buf = io.StringIO()
+      with contextlib.redirect_stdout(buf):
+        rc = F.main(['--live', '5', 'inside=%g' % inside, '--save', p], capture=lambda secs, bus, per=cap(inside, seed): (per, 1000))
+      self.assertIn('saved', buf.getvalue()); self.assertTrue(os.path.exists(p))
+    rows, n, distinct = F.search([(F.scan(F.load(paths[0])[0]), {'inside': 21.0}), (F.scan(F.load(paths[1])[0]), {'inside': 25.0})], 'inside')
+    self.assertEqual((n, distinct), (2, 2))
+    self.assertEqual(rows[0]['addr'], 0x2e5); self.assertEqual(rows[0]['key'][2], 40); self.assertEqual((rows[0]['scale'], rows[0]['offset']), (0.2, 0.0))
+    self.assertEqual(set(r['addr'] for r in rows), {0x2e5})                   # nothing else survives two different temperatures
+
   def test_read_number_ignores_stray_keys(self):
     self.assertEqual(F.read_number('?', reader=lambda p: '\x1b[B22'), 22.0)          # a down-arrow typed during the capture
     self.assertEqual(F.read_number('?', reader=lambda p: ' 23,5 '), 23.5)
