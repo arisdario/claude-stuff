@@ -6,6 +6,9 @@ You tell it what the car's own display showed while each log was recorded; it sc
   python3 find_temp.py LOG1.jsonl:outside=5,inside=19.5  LOG2.jsonl:outside=11,inside=23  LOG3.jsonl:outside=12,inside=27  [--top 10] [--tol 0.75]
   python3 find_temp.py LOG.jsonl:outside=9,inside=23.5..26      ONE log in which the inside temperature changed from 23.5 (start) to 26 (end): see below. (Do NOT write > : the shell would send the output to a file)
 
+LIVE MODE (no log file needed; openpilot must be running and the car awake): it listens to the CAN messages boardd already publishes for N seconds, then searches exactly as below.
+  cd /data/openpilot && python3 /data/find_temp.py --live 180 outside=9 inside=23.5 --ask-end
+While it listens, change the cabin temperature (heating or A/C, fan up). At the end, --ask-end asks for the inside value the car shows NOW, so the search has two points. Reads messages only.
 LOG = a maplog file (/data/maplog/map_*.jsonl: one row per second with the latest payload of every address under "raw"). A reading is optional per log (give only outside, only inside, or both).
 HOW MANY LOGS: with ONE log the tool can only list fields that CAN be a temperature (many random fields fit one number): treat those as hints. With TWO logs at clearly different
 temperatures most chance matches disappear; with THREE or more, a field that fits all of them through a round scale (0.5, 0.1, 1 ... and offset 0, -40, -50 ...) is very likely real.
@@ -141,6 +144,47 @@ def search(logs, target, tol=0.75):
   return rows, len(used), distinct
 
 
+def parse_readings(tail):
+  """'outside=9,inside=23.5..26' -> {'outside': 9.0, 'inside': (23.5, 26.0)}"""
+  rd = {}
+  for part in tail.split(','):
+    k, _, v = part.partition('=')
+    if k.strip() not in ('outside', 'inside'):
+      raise ValueError('%r: only outside= and inside= are known' % part)
+    if '..' in v or '>' in v:
+      a, _, b = v.partition('..') if '..' in v else v.partition('>')
+      rd[k.strip()] = (float(a), float(b))
+    else:
+      rd[k.strip()] = float(v)
+  return rd
+
+
+def collect_live(drain, seconds, bus=0, now=None, sleep=None, cap=CAP, progress=None):
+  """drain() -> list of events with .can = [objects with .src .address .dat]; returns ({address: [64-bit ints in arrival order]}, frames seen)"""
+  import time
+  now = now or time.time
+  sleep = sleep or time.sleep
+  per = {}
+  frames = 0
+  t0 = now()
+  last_tick = t0
+  while now() - t0 < seconds:
+    for ev in drain():
+      for c in ev.can:
+        if c.src != bus:
+          continue
+        frames += 1
+        per.setdefault(c.address, []).append(int.from_bytes(bytes(c.dat)[:8].ljust(8, b'\0'), 'little'))
+    if progress and now() - last_tick >= 10:
+      last_tick = now(); progress(int(now() - t0), seconds, frames)
+    sleep(0.02)
+  for a, v in per.items():
+    if len(v) > cap:
+      step = len(v) / float(cap)
+      per[a] = [v[int(i * step)] for i in range(cap)]
+  return per, frames
+
+
 def parse_spec(spec):
   path, _, tail = spec.rpartition(':')
   if not path or '=' not in tail:
@@ -158,19 +202,50 @@ def parse_spec(spec):
   return path, rd
 
 
-def main(argv=None):
-  ap = argparse.ArgumentParser(description='find the outside/inside temperature in CAN logs (read-only)')
-  ap.add_argument('logs', nargs='+', help='FILE.jsonl:outside=5,inside=20 (one per log)')
+def live_capture(seconds, bus):
+  import cereal.messaging as messaging
+  sock = messaging.sub_sock('can', timeout=50)
+  def progress(done, total, frames):
+    print('   ... %d / %d s, %d frames' % (done, total, frames)); sys.stdout.flush()
+  print('listening to bus %d for %d s: change the cabin temperature now (heating or A/C, fan up) ...' % (bus, seconds)); sys.stdout.flush()
+  return collect_live(lambda: messaging.drain_sock(sock), seconds, bus, progress=progress)
+
+
+def main(argv=None, capture=None):
+  ap = argparse.ArgumentParser(description='find the outside/inside temperature in CAN logs or the live CAN stream (read-only)')
+  ap.add_argument('logs', nargs='+', help='FILE.jsonl:outside=5,inside=20 (one per log); with --live: outside=9 inside=23.5')
   ap.add_argument('--top', type=int, default=10)
   ap.add_argument('--tol', type=float, default=0.75, help='allowed error in degrees C (the display rounds)')
+  ap.add_argument('--live', type=int, default=0, metavar='SECONDS', help='listen to the live CAN stream instead of reading a log (openpilot must be running)')
+  ap.add_argument('--bus', type=int, default=0, help='CAN bus to listen to in --live mode (0 = chassis)')
+  ap.add_argument('--ask-end', action='store_true', help='--live: ask for the inside temperature shown at the end, as the END of inside=START..END')
   a = ap.parse_args(argv)
   logs = []
-  for spec in a.logs:
+  specs = []
+  if a.live:
     try:
-      path, rd = parse_spec(spec)
+      rd = parse_readings(','.join(a.logs).replace(' ', ''))
     except ValueError as e:
       print(e); return 2
-    per, rows = load(path)
+    per, frames = (capture or live_capture)(a.live, a.bus)
+    print('captured %d frames from %d addresses on bus %d' % (frames, len(per), a.bus))
+    if a.ask_end and isinstance(rd.get('inside'), float):
+      try:
+        end = input('inside temperature on the display NOW (Enter to skip): ').strip()
+      except EOFError:
+        end = ''
+      if end:
+        rd['inside'] = (rd['inside'], float(end))
+    specs = [('live capture', per, frames, rd)]
+  else:
+    for spec in a.logs:
+      try:
+        path, rd = parse_spec(spec)
+      except ValueError as e:
+        print(e); return 2
+      per, rows = load(path)
+      specs.append((path, per, rows, rd))
+  for path, per, rows, rd in specs:
     sc = scan(per)
     print('%s: %d rows, %d addresses, %d steady fields; readings %s' % (path, rows, len(per), len(sc), rd))
     moving = [t for t, v in rd.items() if isinstance(v, tuple)]

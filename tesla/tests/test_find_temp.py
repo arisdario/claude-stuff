@@ -106,5 +106,55 @@ class OneLogMoving(unittest.TestCase):
     self.assertEqual(rc, 0); self.assertIn('0x2e5', out); self.assertIn('2 reading point(s), 2 distinct', out)
 
 
+class Live(unittest.TestCase):
+  class C:
+    def __init__(self, src, address, dat): self.src, self.address, self.dat = src, address, dat
+
+  class Ev:
+    def __init__(self, can): self.can = can
+
+  def test_collect_live_keeps_one_bus_and_arrival_order(self):
+    C, Ev = self.C, self.Ev
+    clock = [0.0]
+    batches = [[Ev([C(0, 0x2e5, bytes([0, 0, 0, 90, 0, 0, 0, 0])), C(1, 0x2e5, bytes(8)), C(0, 0x100, bytes([1] * 8))])],
+               [Ev([C(0, 0x2e5, bytes([0, 0, 0, 92, 0, 0, 0, 0]))])]]
+    def drain():
+      return batches.pop(0) if batches else []
+    def sleep(_): clock[0] += 1.0
+    per, frames = F.collect_live(drain, 5, bus=0, now=lambda: clock[0], sleep=sleep)
+    self.assertEqual(frames, 3)                                           # the bus-1 frame is ignored
+    self.assertEqual([(v >> 24) & 0xFF for v in per[0x2e5]], [90, 92])    # arrival order kept (first/last fifth depend on it)
+    self.assertNotIn(0x2e5 | 0x10000, per)
+
+  def test_live_search_finds_the_hidden_field_with_start_and_end(self):
+    C, Ev = self.C, self.Ev
+    rnd = random.Random(3)
+    per = {}
+    for i in range(100):                                                  # a fake live capture: noise, a clock, and 0x2e5 byte 5 = inside*5 rising 21 -> 27
+      for a in range(0x100, 0x120):
+        per.setdefault(a, []).append(int.from_bytes(bytes(rnd.randrange(256) for _ in range(8)), 'little'))
+      per.setdefault(0x318, []).append(int.from_bytes(bytes([0x9a, 0x0b, i % 60, 0x12, 4, 1, 0x40, 1]), 'little'))
+      per.setdefault(0x2e5, []).append(int.from_bytes(bytes([1, 2, 3, 4, 5, int(round((21 + 6 * i / 99.0) * 5)), 7, 8]), 'little'))
+    import io, contextlib
+    answers = iter(['27'])
+    old_input = __builtins__['input'] if isinstance(__builtins__, dict) else __builtins__.input
+    try:
+      if isinstance(__builtins__, dict): __builtins__['input'] = lambda prompt='': next(answers)
+      else: __builtins__.input = lambda prompt='': next(answers)
+      buf = io.StringIO()
+      with contextlib.redirect_stdout(buf):
+        rc = F.main(['--live', '10', 'inside=21', '--ask-end'], capture=lambda secs, bus: (per, 3200))
+    finally:
+      if isinstance(__builtins__, dict): __builtins__['input'] = old_input
+      else: __builtins__.input = old_input
+    out = buf.getvalue()
+    self.assertEqual(rc, 0); self.assertIn('0x2e5', out); self.assertIn('2 reading point(s), 2 distinct', out); self.assertIn("inside': (21.0, 27.0)", out)
+
+  def test_parse_readings(self):
+    self.assertEqual(F.parse_readings('outside=9,inside=23.5'), {'outside': 9.0, 'inside': 23.5})
+    self.assertEqual(F.parse_readings('inside=23.5..26'), {'inside': (23.5, 26.0)})
+    with self.assertRaises(ValueError): F.parse_readings('speed=3')
+
+
 if __name__ == '__main__':
   unittest.main()
