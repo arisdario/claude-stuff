@@ -13,12 +13,15 @@ import analyze_drivelog as AD  # noqa: E402
 
 
 def sample(t, state, a_ego=0., lead_present=True, standstill=False, torque=0., rate=0.,
-           cmd=0., meas=0., steer_en=True, sl20=None, sl25=None):
+           cmd=0., meas=0., steer_en=True, sl20=None, sl25=None, lat=None, lon=None,
+           left_lane_prob=None, right_lane_prob=None):
   return {
     't': t, 'state': state, 'a_ego': a_ego, 'standstill': standstill,
     'lead1': {'status': lead_present}, 'steering_torque': torque, 'steering_rate': rate,
     'das_commanded_angle': cmd, 'steering_angle': meas, 'das_steer_enabled': steer_en,
     'sl20_angle': cmd if sl20 is None else sl20, 'sl25_angle': cmd if sl25 is None else sl25,
+    'gps': {'latitude': lat, 'longitude': lon},
+    'model': {'left_lane_prob': left_lane_prob, 'right_lane_prob': right_lane_prob},
   }
 
 
@@ -126,6 +129,46 @@ class TestSteering(unittest.TestCase):
     write_jsonl(p, [sample(0.0, 'OPENPILOT_ENGAGED', cmd=10.0, sl20=8.0, sl25=7.0)])
     a = AD.analyze(p)
     self.assertEqual(a.sl20_dev, [2.0]); self.assertEqual(a.sl25_dev, [3.0])
+
+
+class TestGpsAndModel(unittest.TestCase):
+  def test_no_gps_reported_cleanly(self):
+    d = tempfile.mkdtemp(); p = os.path.join(d, 'x.jsonl')
+    write_jsonl(p, [sample(0.0, 'HUMAN_DRIVING')])
+    a = AD.analyze(p)
+    self.assertEqual(a.gps_n, 0)
+    self.assertIn('no GPS fix', a.report())
+
+  def test_gps_bounding_box(self):
+    d = tempfile.mkdtemp(); p = os.path.join(d, 'x.jsonl')
+    rows = [sample(0.0, 'HUMAN_DRIVING', lat=44.40, lon=26.10),
+            sample(1.0, 'HUMAN_DRIVING', lat=44.45, lon=26.05)]
+    write_jsonl(p, rows)
+    a = AD.analyze(p)
+    self.assertEqual(a.gps_n, 2)
+    self.assertAlmostEqual(a.lat_min, 44.40); self.assertAlmostEqual(a.lat_max, 44.45)
+    self.assertAlmostEqual(a.lon_min, 26.05); self.assertAlmostEqual(a.lon_max, 26.10)
+    r = a.report()
+    self.assertIn('44.400000', r); self.assertIn('26.100000', r)
+
+  def test_lane_prob_recorded_at_oscillation(self):
+    d = tempfile.mkdtemp(); p = os.path.join(d, 'x.jsonl')
+    rows = [sample(i * 0.1, 'OPENPILOT_ENGAGED', rate=(3.0 if i % 2 == 0 else -3.0),
+                    left_lane_prob=0.2, right_lane_prob=0.3) for i in range(10)]
+    write_jsonl(p, rows)
+    a = AD.analyze(p)
+    self.assertGreater(a.osc_events, 0)
+    self.assertTrue(a.lane_prob_at_osc)
+    self.assertTrue(all(v == 0.2 for v in a.lane_prob_at_osc))   # min(0.2, 0.3)
+
+  def test_osc_locations_captured(self):
+    d = tempfile.mkdtemp(); p = os.path.join(d, 'x.jsonl')
+    rows = [sample(i * 0.1, 'OPENPILOT_ENGAGED', rate=(3.0 if i % 2 == 0 else -3.0),
+                    lat=44.4, lon=26.1) for i in range(10)]
+    write_jsonl(p, rows)
+    a = AD.analyze(p)
+    self.assertTrue(a.osc_locations)
+    self.assertEqual(a.osc_locations[0][1:], (44.4, 26.1))
 
 
 class TestReport(unittest.TestCase):

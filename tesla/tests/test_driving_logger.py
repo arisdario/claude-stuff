@@ -154,6 +154,74 @@ class TestSteerLimitsHypotheticals(unittest.TestCase):
     self.assertGreaterEqual(abs(d['sl25_angle'] - 30.0), abs(d['sl20_angle'] - 30.0) - 1e-9)
 
 
+class TestModelDict(unittest.TestCase):
+  class FakePathData(object):
+    def __init__(self, n=100, start=0.0):
+      self.points = [start + i * 0.1 for i in range(n)]
+      self.prob = 0.9
+
+  class FakeModel(object):
+    def __init__(self):
+      self.path = TestModelDict.FakePathData(start=0.0)
+      self.leftLane = TestModelDict.FakePathData(start=1.0)
+      self.rightLane = TestModelDict.FakePathData(start=-1.0)
+
+  def test_none_model_is_all_none(self):
+    d = DL.model_dict(None)
+    self.assertIsNone(d['path']); self.assertIsNone(d['left_lane']); self.assertIsNone(d['right_lane'])
+    self.assertIsNone(d['left_lane_prob']); self.assertIsNone(d['right_lane_prob'])
+
+  def test_real_model_decoded_every_4th_point(self):
+    d = DL.model_dict(self.FakeModel())
+    self.assertEqual(len(d['path']), 25)  # 0, 4, 8, ... 96 -> 25 points
+    self.assertAlmostEqual(d['path'][0], 0.0)
+    self.assertAlmostEqual(d['path'][1], 0.4)   # index 4 of a 0.1-step array
+    self.assertAlmostEqual(d['left_lane_prob'], 0.9)
+
+  def test_too_few_points_is_none_not_a_crash(self):
+    m = self.FakeModel()
+    m.path = self.FakePathData(n=10)   # fewer than 100 points
+    d = DL.model_dict(m)
+    self.assertIsNone(d['path'])
+    self.assertIsNotNone(d['left_lane'])   # the other fields still decode independently
+
+  def test_missing_fields_entirely_is_all_none_not_a_crash(self):
+    class Empty(object):
+      pass
+    d = DL.model_dict(Empty())
+    self.assertIsNone(d['path']); self.assertIsNone(d['left_lane_prob'])
+
+
+class TestGpsDict(unittest.TestCase):
+  class FakeGps(object):
+    latitude = 44.4268
+    longitude = 26.1025
+    altitude = 85.3
+    accuracy = 3.2
+    speed = 12.5
+    bearingDeg = 180.0
+
+  def test_none_gps_is_all_none(self):
+    d = DL.gps_dict(None)
+    self.assertEqual(set(d.keys()), set(DL.GPS_FIELDS))
+    self.assertTrue(all(v is None for v in d.values()))
+
+  def test_real_gps_fields_pulled_through(self):
+    d = DL.gps_dict(self.FakeGps())
+    self.assertEqual(d['latitude'], 44.4268); self.assertEqual(d['longitude'], 26.1025)
+    self.assertEqual(d['accuracy'], 3.2)
+
+  def test_missing_field_on_schema_is_none_not_a_crash(self):
+    class Partial(object):
+      latitude = 44.0
+      longitude = 26.0
+      # altitude/accuracy/speed/bearingDeg intentionally absent
+    d = DL.gps_dict(Partial())
+    self.assertEqual(d['latitude'], 44.0)
+    for f in ('altitude', 'accuracy', 'speed', 'bearingDeg'):
+      self.assertIsNone(d[f])
+
+
 class TestLeadDict(unittest.TestCase):
   class FakeLead(object):
     status = True

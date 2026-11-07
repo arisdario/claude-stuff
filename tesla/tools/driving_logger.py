@@ -92,6 +92,17 @@ actuator_steer_angle_neg) as ground truth for which sign convention matches what
 - see "STEER_LIMITS HYPOTHETICALS" note below for why das_commanded_angle's sign can legitimately
 differ from steering_angle's while openpilot is actively steering.
 
+--------------------------------------------------------------------------------------------------
+MODEL PATH / GPS
+--------------------------------------------------------------------------------------------------
+Every sample also logs model.path/left_lane/right_lane (25 points, every 4 m to 100 m, same decode
+lightdash.py's build_model() already runs against this 'model' message) plus left/right lane
+probability, and the car's own GPS (latitude/longitude/altitude/accuracy/speed/bearingDeg) from
+gpsLocationExternal - carcontroller.py's publish of the car's MCU_locationStatus CAN signals, NOT
+the EON's own GPS: liveLocationKalman never gets a fix on this car (see mapcurved.py's notes). Both
+are held at their last known value between publishes (same "sticky" pattern as das_commanded_angle)
+since model/GPS don't necessarily arrive every tick of this logger's own ~20 Hz poll.
+
 Two further signals exist on the bus but are not yet published to cereal by this fork (steer_error
 from EPAS_steeringFault, steer_not_allowed from EPAS_eacStatus - both internal-only in interface.py):
 not added here to keep this change minimal; flag if you want them exposed too.
@@ -209,6 +220,44 @@ class Classifier(object):
 LEAD_FIELDS = ('status', 'dRel', 'vRel', 'yRel', 'aRel', 'vLeadK', 'aLeadK')
 
 
+def model_dict(mm):
+  """model path/lane points, every 4 m out to 100 m (25 points) - same decode lightdash.py's
+  build_model() already uses and has been running against this exact 'model' message. Returns None
+  for p/l/r if the message doesn't have the expected 100+ points (an older/different model build),
+  never raises."""
+  def pts(pd):
+    try:
+      p = list(pd.points)
+      return [round(p[i], 2) for i in range(0, min(len(p), 100), 4)] if len(p) >= 100 else None
+    except Exception:
+      return None
+  try:
+    return {
+      'path': pts(mm.path), 'left_lane': pts(mm.leftLane), 'right_lane': pts(mm.rightLane),
+      'left_lane_prob': round(mm.leftLane.prob, 3), 'right_lane_prob': round(mm.rightLane.prob, 3),
+    }
+  except Exception:
+    return {'path': None, 'left_lane': None, 'right_lane': None, 'left_lane_prob': None, 'right_lane_prob': None}
+
+
+GPS_FIELDS = ('latitude', 'longitude', 'altitude', 'accuracy', 'speed', 'bearingDeg')
+
+
+def gps_dict(g):
+  """the car's own GPS (MCU_locationStatus on CAN, see carstate.py), published as gpsLocationExternal
+  by carcontroller.py - NOT the EON's own GPS: liveLocationKalman never gets a fix on this car (see
+  mapcurved.py's own notes). Read defensively; a missing field is None, never a crash."""
+  if g is None:
+    return {f: None for f in GPS_FIELDS}
+  out = {}
+  for f in GPS_FIELDS:
+    try:
+      out[f] = round(float(getattr(g, f)), 7 if f in ('latitude', 'longitude') else 2)
+    except Exception:
+      out[f] = None
+  return out
+
+
 def lead_dict(lead):
   """getattr-defensive: a field this live schema doesn't have becomes None, never an exception."""
   if lead is None:
@@ -254,7 +303,7 @@ def run(out_path, hz=20.0, duration=None, log=print):
   import cereal.messaging as messaging  # local import: keeps this file importable/testable off-car
   sl = _load_steer_limits()
 
-  topics = ('controlsState', 'carState', 'radarState', 'model', 'carControl')
+  topics = ('controlsState', 'carState', 'radarState', 'model', 'carControl', 'gpsLocationExternal')
   subs = {t: messaging.sub_sock(t, conflate=True) for t in topics}
   sc = messaging.sub_sock('sendcan')    # drained in full every tick, like lightdash - a flood here never starves us
 
@@ -262,6 +311,8 @@ def run(out_path, hz=20.0, duration=None, log=print):
   last_ctrl = last_long = last_steer = None
   last_das = decode_0x659(None)
   last_actuator_angle = None
+  last_model = model_dict(None)
+  last_gps = gps_dict(None)
   t_ctrl = t_659 = None
   prev_request, prev_t_659 = None, None     # for the steer_limits hypotheticals, see module docstring
   reported_fields = False
@@ -304,6 +355,19 @@ def run(out_path, hz=20.0, duration=None, log=print):
           last_actuator_angle = float(cc.carControl.actuators.steerAngle)
         except Exception:
           last_actuator_angle = None
+
+      mm = messaging.recv_one_or_none(subs['model'])
+      if mm is not None:
+        try:
+          last_model = model_dict(mm.model)
+        except Exception:
+          pass
+      gp = messaging.recv_one_or_none(subs['gpsLocationExternal'])
+      if gp is not None:
+        try:
+          last_gps = gps_dict(gp.gpsLocationExternal)
+        except Exception:
+          pass
 
       state = clf.update(now_mono, last_ctrl, None if t_ctrl is None else now_mono - t_ctrl,
                           last_long, None if t_659 is None else now_mono - t_659,
@@ -364,6 +428,9 @@ def run(out_path, hz=20.0, duration=None, log=print):
           sample['lead1'] = sample['lead2'] = lead_dict(None)
       else:
         sample['lead1'] = sample['lead2'] = lead_dict(None)
+
+      sample['model'] = last_model
+      sample['gps'] = last_gps
 
       if not reported_fields and car is not None and rad is not None:
         f.write(json.dumps({'meta': 'fields_seen_once', 't': time.time(),

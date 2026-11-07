@@ -2,8 +2,11 @@
 """
 analyze_drivelog.py - turns a driving_logger.py JSONL file into a compact text report: time spent
 in each engagement state, acceleration/deceleration profile split by state and lead-present/absent,
-and steering wiggle diagnostics (torque/rate/commanded-vs-measured, plus the steer_limits strength
-comparison). Stdlib only, single streaming pass (safe on a multi-hundred-MB file on the EON itself).
+steering wiggle diagnostics (torque/rate/commanded-vs-measured, plus the steer_limits strength
+comparison and model lane-confidence at each oscillation event), and GPS coverage (the car's own
+GPS via gpsLocationExternal - needs a driving_logger.py capture that includes the 'model'/'gps'
+fields; an older capture simply reports "no GPS fix" and skips the lane-confidence line). Stdlib
+only, single streaming pass (safe on a multi-hundred-MB file on the EON itself).
 
 Run THIS ON THE EON, on the actual log file - don't try to copy a multi-MB jsonl through chat:
 
@@ -62,6 +65,15 @@ class Analysis(object):
     self._rate_hist = []           # (t, rate) ring for oscillation detection
     self.lead_null_n = 0
     self.last_t = None
+    # GPS (the car's own, via gpsLocationExternal - see driving_logger.py docstring)
+    self.gps_n = 0
+    self.lat_min = self.lat_max = self.lon_min = self.lon_max = None
+    self.osc_locations = []        # (t, lat, lon) for each oscillation event that had a GPS fix
+    # model lane confidence at the moment each oscillation event fires, vs the overall baseline
+    self.lane_prob_all = []        # min(left_lane_prob, right_lane_prob) every sample that has one
+    self.lane_prob_at_osc = []     # same, but only at the instant an oscillation event triggers
+    self._last_lane_prob = None
+    self._last_gps = (None, None)
 
   def state_bucket(self, state):
     # collapse LONGITUDINAL_ONLY/LATERAL_ONLY/ENGAGED into one "OPENPILOT" bucket for the accel/decel
@@ -105,6 +117,22 @@ class Analysis(object):
       elif a_ego < -0.1:
         self.decel.setdefault(key, []).append(a_ego)
 
+    model = s.get('model') or {}
+    lp, rp = model.get('left_lane_prob'), model.get('right_lane_prob')
+    if lp is not None and rp is not None:
+      self._last_lane_prob = min(lp, rp)
+      self.lane_prob_all.append(self._last_lane_prob)
+
+    gps = s.get('gps') or {}
+    lat, lon = gps.get('latitude'), gps.get('longitude')
+    if lat is not None and lon is not None:
+      self.gps_n += 1
+      self._last_gps = (lat, lon)
+      self.lat_min = lat if self.lat_min is None else min(self.lat_min, lat)
+      self.lat_max = lat if self.lat_max is None else max(self.lat_max, lat)
+      self.lon_min = lon if self.lon_min is None else min(self.lon_min, lon)
+      self.lon_max = lon if self.lon_max is None else max(self.lon_max, lon)
+
     torque, rate = s.get('steering_torque'), s.get('steering_rate')
     if torque is not None:
       self.torque.append(torque)
@@ -112,7 +140,7 @@ class Analysis(object):
       self.rate.append(rate)
       self._rate_hist.append((t, rate))
       self._rate_hist[:] = [(rt, rr) for rt, rr in self._rate_hist if t - rt <= 1.0]
-      self._check_oscillation()
+      self._check_oscillation(t)
 
     cmd, meas, steer_en = s.get('das_commanded_angle'), s.get('steering_angle'), s.get('das_steer_enabled')
     if cmd is not None and meas is not None and steer_en:
@@ -123,7 +151,7 @@ class Analysis(object):
     if sl25 is not None and cmd is not None:
       self.sl25_dev.append(abs(sl25 - cmd))
 
-  def _check_oscillation(self):
+  def _check_oscillation(self, t):
     """an 'event' = the rate crosses zero at least 3 times within the trailing 1 s window, with each
     excursion exceeding 1 deg/s - a simple, conservative stand-in for 'wiggling back and forth', not a
     claim about root cause."""
@@ -141,6 +169,11 @@ class Analysis(object):
       prev_sign = sign
     if crossings >= 3:
       self.osc_events += 1
+      if self._last_lane_prob is not None:
+        self.lane_prob_at_osc.append(self._last_lane_prob)
+      lat, lon = self._last_gps
+      if lat is not None:
+        self.osc_locations.append((t, lat, lon))
 
   def report(self):
     out = []
@@ -155,6 +188,13 @@ class Analysis(object):
     for state in sorted(self.state_dt, key=lambda k: -self.state_dt[k]):
       d = self.state_dt[state]
       out.append('  %-28s %7.1f s  (%5.1f%%)  %d samples' % (str(state), d, pct(d, dur), self.state_n[state]))
+    out.append('')
+    out.append('--- GPS (the car\'s own, not the EON\'s - see driving_logger.py docstring) ---')
+    if self.gps_n:
+      out.append('  fix on %d/%d samples (%.1f%%)   bounding box: lat [%.6f, %.6f]  lon [%.6f, %.6f]' % (
+          self.gps_n, self.n, pct(self.gps_n, self.n), self.lat_min, self.lat_max, self.lon_min, self.lon_max))
+    else:
+      out.append('  no GPS fix in this file (either an older capture from before gpsLocationExternal was logged, or no fix all drive)')
     out.append('')
     out.append('--- acceleration / deceleration, human vs openpilot, with/without a lead ---')
     out.append('  (a_ego in m/s2; only non-standstill samples with a known lead status; +accel / -decel bucketed separately)')
@@ -181,6 +221,14 @@ class Analysis(object):
           len(self.rate), mean(self.rate), stdev(self.rate) or 0., percentile(self.rate, 5), percentile(self.rate, 95),
           max(abs(x) for x in self.rate)))
     out.append('  oscillation events (rate sign flips >=3x within 1 s, each >1 deg/s): %d' % self.osc_events)
+    if self.lane_prob_all and self.lane_prob_at_osc:
+      out.append('  model lane confidence (min of left/right prob): overall mean=%.2f   at the instant an oscillation fires: mean=%.2f n=%d'
+                  '  (lower here than overall = wiggle correlates with the model losing lane confidence)' % (
+                      mean(self.lane_prob_all), mean(self.lane_prob_at_osc), len(self.lane_prob_at_osc)))
+    if self.osc_locations:
+      out.append('  oscillation event locations (first %d of %d, for mapping):' % (min(5, len(self.osc_locations)), len(self.osc_locations)))
+      for t, lat, lon in self.osc_locations[:5]:
+        out.append('    t=%.1f  %.6f, %.6f' % (t, lat, lon))
     if self.cmd_vs_meas:
       out.append('  |measured - commanded| while steering engaged: n=%d mean=%.3f p90=%.3f max=%.3f  (big values = tracking lag or the wiggle itself)' % (
           len(self.cmd_vs_meas), mean(self.cmd_vs_meas), percentile(self.cmd_vs_meas, 90), max(self.cmd_vs_meas)))
