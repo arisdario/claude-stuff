@@ -22,6 +22,7 @@ from selfdrive.car.tesla.AHB_module import AHBController
 from selfdrive.car.tesla.uds_relay import UdsRelay
 from selfdrive.car.tesla import ic_raw_lanes   # IC raw-lanes view (display only, off unless /data/ic_raw_lanes exists)
 from selfdrive.car.tesla import steer_limits   # opt-in angle-limit layer (off unless /data/steer_limits_on exists)
+from selfdrive.car.tesla import sign_detect_reader   # optional vision stop-sign display (off unless camerad's own /data/sign_detect_on is set; see camerad/cameras/SIGN_DETECT.md)
 import cereal.messaging as messaging
 
 # Steer angle limits
@@ -220,6 +221,7 @@ class CarController():
     self.roadSignType_last = 0xFF
 
     self.roadSignDistanceWarning = 50.
+    self._vision_sign_last_type = 0xFF   # resend-on-change tracking for applyVisionSignDetect(), independent of roadSignType_last above
 
     self.alca_enabled = False
     self.ldwStatus = 0
@@ -515,6 +517,7 @@ class CarController():
         if trafficeventsMsgs is not None:
           can_messages = self.handleTrafficEvents(trafficEventsMsgs = trafficeventsMsgs)
           can_sends.extend(can_messages)
+        can_sends.extend(self.applyVisionSignDetect())   # independent of trafficeventsMsgs above - see its own docstring
 
     op_status = 0x02
     hands_on_state = 0x00
@@ -884,6 +887,28 @@ class CarController():
       if not ((self.roadSignType_last == self.roadSignType) and (self.roadSignType == 0xFF)):
           messages.append(teslacan.create_fake_DAS_sign_msg(self.roadSignType,self.roadSignStopDist,self.roadSignColor,self.roadSignControlActive))
     return messages
+
+  def applyVisionSignDetect(self):
+    """Optional, additive, and fully separate from handleTrafficEvents/checkWhichSign above (which stay
+    untouched): reads camerad's own stop-sign detector output (sign_detect_reader.py - pure function,
+    see that file and camerad/cameras/SIGN_DETECT.md), and sends the cluster's existing sign-display
+    CAN message only on a stop-sign detection with real distance + confidence. Off unless camerad's
+    /data/sign_detect_on flag is set and a file actually exists - a missing/stale/malformed file reads
+    as 'nothing detected' (sign_detect_reader.EMPTY), so this is a true no-op on every car that hasn't
+    opted in, same as ic_raw_lanes/steer_limits. Never touches roadSignType/stopSign_distance/etc or
+    any other state handleTrafficEvents uses, so it cannot interact with that (currently dormant) path."""
+    try:
+      picked = sign_detect_reader.pick_ic_sign(sign_detect_reader.read_detection())
+    except Exception:
+      picked = None
+    road_sign_type = picked[0] if picked else 0xFF
+    if road_sign_type == self._vision_sign_last_type and road_sign_type == 0xFF:
+      return []
+    self._vision_sign_last_type = road_sign_type
+    if picked is None:
+      return [teslacan.create_fake_DAS_sign_msg(0xFF, 1000., 0, 0)]   # clear whatever vision sign was showing
+    _, dist_m, color, control_active = picked
+    return [teslacan.create_fake_DAS_sign_msg(road_sign_type, dist_m, color, control_active)]
 
   def _should_ldw(self, CS, frame):
     if not CS.enableLdw:

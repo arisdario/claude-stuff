@@ -195,7 +195,11 @@ def create_fake_DAS_sign_msg(roadSignType,roadSignStopDist,roadSignColor,roadSig
   orientation = 0x00 #unknown
   arrow = 0x04 #unknown
   source = 0x02 #vision
-  roadSignStopDist_t = (((roadSignStopDist + 20) / 0.2) & 0x3FF)
+  roadSignStopDist_t = int((roadSignStopDist + 20) / 0.2) & 0x3FF   # BUGFIX: this crashed (TypeError) on any float
+  # distance (e.g. 15.0) before this int() cast - & requires an int. Never hit before because nothing in this repo
+  # ever actually called this function: handleTrafficEvents only runs when a trafficEvents message arrives, and
+  # nothing publishes that topic (confirmed by grep). Found by actually exercising it for the first time, wiring
+  # up sign_detect_reader.py's vision stop-sign detection (carcontroller.py's applyVisionSignDetect).
   sign1 = ((roadSignType & 0x03) << 6) +(roadSignColor << 3) + 0x04
   sign2 = ((roadSignStopDist_t & 0x03) << 6) + int((roadSignType >> 2) & 0xFF)
   sign3 = int(roadSignStopDist_t >> 2)

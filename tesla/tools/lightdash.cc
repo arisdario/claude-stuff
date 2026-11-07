@@ -1,7 +1,8 @@
 // lightdash.cc - C++ twin of tesla/tools/lightdash.py: ONE small read-only web page showing what the panda tells the instrument cluster.
 // Same page, same JSON, same byte-for-byte replay of the firmware's 0x557/0x559/0x659 -> 0x239/0x309 expansion (safety_tesla.h, v1.7.3).
-// Reads ONLY openpilot messages (sendcan, model, carState, controlsState) - it never opens USB or the panda, sends nothing, writes no file,
-// and does no work while no browser is connected. Single thread, poll(), no outside libraries beyond cereal's own (capnp, zmq/msgq).
+// Reads openpilot messages (sendcan, model, carState, controlsState) and, optionally, camerad's own sign/light detector output
+// (/data/sign_detect.json, if that opt-in feature is built and enabled - see camerad/cameras/SIGN_DETECT.md) - it never opens USB or the
+// panda, sends nothing, and writes no file of its own. Single thread, poll(), no outside libraries beyond cereal's own (capnp, zmq/msgq).
 //
 //   build on the EON:  sh /data/claude-stuff/tesla/tools/build_lightdash.sh        (compiles against /data/openpilot, its generated cereal)
 //   run:               nohup nice -n 19 /data/lightdash > /data/lightdash.log 2>&1 &       then open http://<EON-IP>:8090/
@@ -19,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -110,6 +112,50 @@ struct CarState {
 };
 static const double CAR_HOLD_S = 3.0;                                  // 0x30A comes every 1 s: hold the last value across one lost frame
 
+// OPTIONAL: camerad's own stop-sign/traffic-light detector output (see camerad/cameras/SIGN_DETECT.md).
+// Read-only, read fresh every tick (the file is tiny) - never opens the camera or any process, just
+// one open()/stat() on a file that may not exist. No JSON library: this repo controls both the writer
+// (sign_detect_io.cc) and this reader, so a few strstr()/atof() calls on the known fixed format is the
+// simplest thing that's still exactly as robust as a parser here, consistent with how this file already
+// avoids pulling in dependencies beyond cereal's own.
+struct SignState {
+  bool stop = false; double stop_dist = -1, stop_conf = 0;
+  bool light = false; int light_color = -1; double light_conf = 0;
+  bool fresh = false;   // false if the file is missing or its mtime is older than SIGN_HOLD_S
+};
+static const double SIGN_HOLD_S = 2.0;                                 // the detector writes at ~2.5 Hz when enabled
+static const char *SIGN_DETECT_FILE = "/data/sign_detect.json";
+
+static double jfield(const char *s, const char *key) {
+  const char *p = strstr(s, key);
+  return p ? atof(p + strlen(key)) : 0.0;
+}
+static bool jbool(const char *s, const char *key) {
+  const char *p = strstr(s, key);
+  return p && !strncmp(p + strlen(key), "true", 4);
+}
+
+static SignState read_sign_state() {
+  SignState s;
+  struct stat st;
+  if (stat(SIGN_DETECT_FILE, &st) != 0) return s;                     // not built/enabled - common case, cheap
+  if (time(nullptr) - st.st_mtime > (time_t)SIGN_HOLD_S) return s;    // stale - camerad stopped writing
+  FILE *f = fopen(SIGN_DETECT_FILE, "r");
+  if (!f) return s;
+  char buf[512] = {0};
+  size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+  fclose(f);
+  if (n == 0) return s;
+  s.fresh = true;
+  s.stop = jbool(buf, "\"stop_sign\":");
+  s.stop_dist = jfield(buf, "\"stop_sign_dist_m\":");
+  s.stop_conf = jfield(buf, "\"stop_sign_confidence\":");
+  s.light = jbool(buf, "\"light_present\":");
+  s.light_color = (int)jfield(buf, "\"light_color\":");
+  s.light_conf = jfield(buf, "\"light_confidence\":");
+  return s;
+}
+
 static void json_lanes(std::string &s, const uint8_t *b) {          // DAS_lanes 0x239, DBC scaling
   appendf(s, "\"lanes\":{\"width\":%.4f,\"left\":%d,\"right\":%d,\"range\":%d,\"c\":[%.3f,%.5f,%.7f,%.9f],\"use\":[%d,%d],\"counter\":%d}",
           2 + 0.3125 * (b[0] >> 4), b[0] & 1, b[0] >> 1 & 1, b[1], b[2] * 0.035 - 3.5, b[3] * 0.0016 - 0.2, b[4] * 2e-5 - 0.0025,
@@ -157,6 +203,10 @@ static std::string snapshot(const Mirror &m, const Extra &x, double now, const C
   s += "\"car\":{";
   if (cs.t30a != 0 && now - cs.t30a <= CAR_HOLD_S) appendf(s, "\"hb\":%d,\"fl\":%d,", cs.hb, cs.fl); else s += "\"hb\":null,\"fl\":null,";
   if (cs.out_ok && cs.t283 != 0 && now - cs.t283 <= 5.0) appendf(s, "\"out\":%.1f},", cs.out); else s += "\"out\":null},";
+  SignState sg = read_sign_state();
+  s += "\"sign\":{";
+  if (sg.fresh && sg.stop) appendf(s, "\"stop\":true,\"stop_dist\":%.1f,", sg.stop_dist); else s += "\"stop\":false,\"stop_dist\":null,";
+  if (sg.fresh && sg.light) appendf(s, "\"light\":true,\"light_color\":%d},", sg.light_color); else s += "\"light\":false,\"light_color\":null},";
   if (x.have_model) {
     s += "\"model\":{";
     auto arr = [&](const char *k, const std::vector<float> &a) {
@@ -284,6 +334,13 @@ function drawDrive(){
  cruiseIcon(px+pw*0.14,py+ph*0.46,15,ic);wheelIcon(px+pw*0.86,py+ph*0.46,16,ic);
  var cr=S.car||{};if(cr.hb||cr.fl)beamIcon(px+pw*0.14,py+ph*0.46+34,9,cr.hb?'rgba(64,156,255,1)':'rgba(235,240,248,.85)');
  if(cr.out!==null&&cr.out!==undefined){g.fillStyle='#aab4c2';g.font='500 14px system-ui';g.textAlign='center';g.fillText(cr.out.toFixed(1)+' \u00b0C',px+pw*0.86,py+ph*0.46+38);g.textAlign='left'}
+ var sg=S.sign||{};if(sg.stop||sg.light){g.font='600 12px system-ui';var parts=[];
+  if(sg.stop)parts.push({t:'STOP '+(sg.stop_dist!=null?Math.round(sg.stop_dist)+'m':''),bg:'rgba(180,30,30,.85)',col:'#fff'});
+  if(sg.light){var lc=['rgba(220,40,40,.9)','rgba(230,180,20,.9)','rgba(40,180,70,.9)'][sg.light_color]||'rgba(140,140,140,.9)';parts.push({t:'●',bg:lc,col:'#fff'})}
+  var tw=0;for(var k=0;k<parts.length;k++)tw+=g.measureText(parts[k].t).width+20+(k?6:0);
+  var cx0=W/2-tw/2,cy0=py+ph+8;
+  for(var k=0;k<parts.length;k++){var w=chip(cx0,cy0,parts[k].t,parts[k].col,parts[k].bg);cx0+=w+6}
+ }
  g.fillStyle='#f3f6fa';g.font='300 58px system-ui';g.textAlign='center';g.fillText(Math.round((S.v||0)*3.6),W/2,py+62);g.fillStyle='#8590a0';g.font='500 13px system-ui';g.fillText('km/h',W/2,py+84);
  g.fillStyle=S.present?'rgba(130,150,170,.55)':'rgba(255,120,120,.9)';g.font='11px system-ui';
  g.fillText((S.present?'panda live':'PANDA STALE')+'  ·  cluster '+S.status.text+'  ·  emulation '+(S.emu===null?'?':S.emu?'on':'off')+(S.default?'  ·  no lane data':'')+'  ·  tap: next view',W/2,H-12);g.textAlign='left'}

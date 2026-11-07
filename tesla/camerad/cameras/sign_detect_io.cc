@@ -18,10 +18,16 @@ long frame_counter = 0;
 bool flag_cached = false;
 double flag_checked_at = -1e9;
 
-double now_s() {
+double now_s() {   // monotonic: internal rate-limiting/flag-recheck only, robust to wall-clock jumps
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+double wall_now_s() {   // CLOCK_REALTIME: for the JSON "t" field specifically - sign_detect_reader.py
+  struct timespec ts;   // compares it against Python's time.time() (also wall-clock/Unix-epoch). Using
+  clock_gettime(CLOCK_REALTIME, &ts);   // CLOCK_MONOTONIC here would make every detection look billions
+  return ts.tv_sec + ts.tv_nsec * 1e-9;   // of seconds old to the Python side and silently reject all of them.
 }
 
 bool file_exists(const char *path) {
@@ -44,7 +50,7 @@ void write_result(const SignResult &r) {
   fprintf(f,
           "{\"t\":%.3f,\"stop_sign\":%s,\"stop_sign_dist_m\":%.2f,\"stop_sign_confidence\":%.2f,"
           "\"light_present\":%s,\"light_color\":%d,\"light_confidence\":%.2f}\n",
-          now_s(), r.stop_sign ? "true" : "false", r.stop_sign_dist_m, r.stop_sign_confidence,
+          wall_now_s(), r.stop_sign ? "true" : "false", r.stop_sign_dist_m, r.stop_sign_confidence,
           r.light_present ? "true" : "false", r.light_color, r.light_confidence);
   fclose(f);
   rename(OUT_TMP, OUT_FILE);   // atomic: a reader never sees a partial write

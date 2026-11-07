@@ -46,6 +46,28 @@ class CarState(object):
     live = self.t30a and now - self.t30a <= CAR_HOLD_S
     return {'hb': self.hb if live else None, 'fl': self.fl if live else None,
             'out': round(self.out, 1) if (self.out is not None and self.t283 and now - self.t283 <= 5.) else None}
+
+SIGN_DETECT_FILE = '/data/sign_detect.json'
+SIGN_HOLD_S = 2.0             # the detector writes at ~2.5 Hz when enabled
+
+
+def read_sign_state():
+  """OPTIONAL: camerad's own stop-sign/traffic-light detector output, read fresh every call (see
+  camerad/cameras/SIGN_DETECT.md). Read-only: never opens the camera or any process, just a file that
+  may not exist. Mirrors lightdash.cc's read_sign_state() (C++ twin) field-for-field."""
+  try:
+    st = os.stat(SIGN_DETECT_FILE)
+    if time.time() - st.st_mtime > SIGN_HOLD_S:
+      return {'stop': False, 'stop_dist': None, 'light': False, 'light_color': None}
+    with open(SIGN_DETECT_FILE) as f:
+      d = json.load(f)
+  except Exception:
+    return {'stop': False, 'stop_dist': None, 'light': False, 'light_color': None}
+  return {
+    'stop': bool(d.get('stop_sign')), 'stop_dist': d.get('stop_sign_dist_m') if d.get('stop_sign') else None,
+    'light': bool(d.get('light_present')), 'light_color': d.get('light_color') if d.get('light_present') else None,
+  }
+
 PANDA_STALE_S = 2.0          # firmware: no 0x659 for 2 s -> reset_DAS_data()
 X_IDXS = [0., 0.1875, 0.75, 1.6875, 3., 4.6875, 6.75, 9.1875, 12., 15.1875, 18.75, 22.6875, 27., 31.6875, 36.75, 42.1875, 48., 54.1875,
           60.75, 67.6875, 75., 82.6875, 90.75, 99.1875, 108.]
@@ -210,7 +232,7 @@ def poll_cereal(hz=10.):
       try: model = build_model(m.model)
       except Exception: model = None
     snap = mirror.snapshot(now); mirror.lane_idx = (mirror.lane_idx + 1) % 16
-    snap.update(extra); snap['car'] = car.snapshot(now); snap['model'] = model; snap['t'] = round(time.time(), 2)
+    snap.update(extra); snap['car'] = car.snapshot(now); snap['model'] = model; snap['sign'] = read_sign_state(); snap['t'] = round(time.time(), 2)
     publish(snap)
     time.sleep(1. / hz)
 
@@ -355,6 +377,13 @@ function drawDrive(){
  cruiseIcon(px+pw*0.14,py+ph*0.46,15,ic);wheelIcon(px+pw*0.86,py+ph*0.46,16,ic);
  var cr=S.car||{};if(cr.hb||cr.fl)beamIcon(px+pw*0.14,py+ph*0.46+34,9,cr.hb?'rgba(64,156,255,1)':'rgba(235,240,248,.85)');
  if(cr.out!==null&&cr.out!==undefined){g.fillStyle='#aab4c2';g.font='500 14px system-ui';g.textAlign='center';g.fillText(cr.out.toFixed(1)+' \u00b0C',px+pw*0.86,py+ph*0.46+38);g.textAlign='left'}
+ var sg=S.sign||{};if(sg.stop||sg.light){g.font='600 12px system-ui';var parts=[];
+  if(sg.stop)parts.push({t:'STOP '+(sg.stop_dist!=null?Math.round(sg.stop_dist)+'m':''),bg:'rgba(180,30,30,.85)',col:'#fff'});
+  if(sg.light){var lc=['rgba(220,40,40,.9)','rgba(230,180,20,.9)','rgba(40,180,70,.9)'][sg.light_color]||'rgba(140,140,140,.9)';parts.push({t:'●',bg:lc,col:'#fff'})}
+  var tw=0;for(var k=0;k<parts.length;k++)tw+=g.measureText(parts[k].t).width+20+(k?6:0);
+  var cx0=W/2-tw/2,cy0=py+ph+8;
+  for(var k=0;k<parts.length;k++){var w=chip(cx0,cy0,parts[k].t,parts[k].col,parts[k].bg);cx0+=w+6}
+ }
  g.fillStyle='#f3f6fa';g.font='300 58px system-ui';g.textAlign='center';g.fillText(Math.round((S.v||0)*3.6),W/2,py+62);g.fillStyle='#8590a0';g.font='500 13px system-ui';g.fillText('km/h',W/2,py+84);
  g.fillStyle=S.present?'rgba(130,150,170,.55)':'rgba(255,120,120,.9)';g.font='11px system-ui';
  g.fillText((S.present?'panda live':'PANDA STALE')+'  ·  cluster '+S.status.text+'  ·  emulation '+(S.emu===null?'?':S.emu?'on':'off')+(S.default?'  ·  no lane data':'')+'  ·  tap: next view',W/2,H-12);g.textAlign='left'}
