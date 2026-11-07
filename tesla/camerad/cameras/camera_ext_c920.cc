@@ -16,6 +16,9 @@
 #include "camera_profile.h"
 #include "camera_h264.h"      // optional H.264 input: compiled in only when the build defines EXT_WANT_AVCODEC (see SConscript); libavcodec is loaded at run time, never linked
 #include "libuvc/libuvc.h"
+#ifdef EXT_WANT_SIGN_DETECT
+#include "sign_detect_io.h"   // optional stop-sign/traffic-light detection: compiled in only when the build's OpenCV trial-compile succeeds (see SConscript) AND only acts when /data/sign_detect_on exists; see SIGN_DETECT.md
+#endif
 
 #ifndef EXT_C920_TEST
 #include "common/buffering.h"
@@ -194,6 +197,9 @@ void on_frame(uvc_frame_t *f, void *) {
     uint8_t *a = g_rgb, *z = g_rgb + (size_t)SRC_W * SRC_H * 3 - 3;
     for (; a < z; a += 3, z -= 3) { for (int k = 0; k < 3; k++) { uint8_t t = a[k]; a[k] = z[k]; z[k] = t; } }
   }
+#ifdef EXT_WANT_SIGN_DETECT
+  sign_detect_tick(g_rgb, SRC_W, SRC_H);                                        // optional, off unless /data/sign_detect_on exists - see SIGN_DETECT.md
+#endif
   if (g_frames % 20 == 0) {                                                     // ~1 per second at 20 fps: a sparse sample of the lower 55% (the road), after the flip
     long sum = 0, n = 0;
     for (int y = SRC_H * 45 / 100; y < SRC_H * 90 / 100; y += 12)
@@ -274,6 +280,9 @@ void on_frame_h264(uvc_frame_t *f, void *) {
     uint8_t *a = g_rgb, *z = g_rgb + (size_t)SRC_W * SRC_H * 3 - 3;
     for (; a < z; a += 3, z -= 3) { for (int k = 0; k < 3; k++) { uint8_t t = a[k]; a[k] = z[k]; z[k] = t; } }
   }
+#ifdef EXT_WANT_SIGN_DETECT
+  sign_detect_tick(g_rgb, SRC_W, SRC_H);                                        // optional, off unless /data/sign_detect_on exists - see SIGN_DETECT.md
+#endif
   if (g_frames % 20 == 0) {                                                     // ~1 per second at 20 fps: a sparse sample of the lower 55% (the road), after the flip
     long sum = 0, n = 0;
     for (int y = SRC_H * 45 / 100; y < SRC_H * 90 / 100; y += 12)

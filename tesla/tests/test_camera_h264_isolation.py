@@ -9,7 +9,7 @@ CC = open(os.path.join(ROOT, 'cameras', 'camera_ext_c920.cc')).read()
 HDR = open(os.path.join(ROOT, 'cameras', 'camera_h264.h')).read()
 SC = open(os.path.join(ROOT, 'SConscript')).read()
 INST = open(os.path.join(ROOT, 'install_external_camera.sh')).read()
-FROZEN_SHA = '546fdc9b84a9bff847471454146f2b172f703e054f53a6bfab3d06ee35e855b6'
+FROZEN_SHA = '94943ab2bcaa3b81050e3c7b329c0cfa6cda06b8dfa4564589604d3611211050'  # updated: sign_detect_tick() added to the tail, see SIGN_DETECT.md (gated by EXT_WANT_SIGN_DETECT; identical in both on_frame and on_frame_h264 - test_tails_are_identical still passes)
 
 
 def func(src, head):
