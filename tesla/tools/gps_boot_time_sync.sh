@@ -98,34 +98,57 @@ set_clock() {
   return 0
 }
 
-# --- the one non-bash step: wait up to TIMEOUT_S for a usable gpsNMEA timestamp, print it, exit ---
-# Prints nothing (and exits nonzero) if no sane fix arrives in time. Validation happens twice - once
-# here (so a clearly-bad reading doesn't even get printed) and again in is_sane_epoch after we read
-# it back, since env-var floor/ceiling overrides in tests must be honored on the bash side too.
+# --- the one non-bash step: wait up to TIMEOUT_S for a usable gpsNMEA timestamp. The chosen epoch is
+# the ONLY thing printed to stdout (so the shell can capture it with $(...)); all progress and
+# diagnostics go to stderr so you can see it is alive and WHY it is or isn't getting a fix. It fails
+# FAST (does not burn the whole timeout) when gpsd is not publishing at all. Exit codes:
+#   0 found a usable time   2 cereal not importable   3 gpsd silent (no msgs)   1 msgs but no time lock
+GPS_SILENT_GRACE_S="${GPS_SILENT_GRACE_S:-8}"   # if not one gpsNMEA msg arrives in this long, give up early
 poll_gps_epoch() {
   floor="$1"
-  "$PY_CMD" - "$floor" "$TIMEOUT_S" "$MAX_SKEW_YEARS" <<'PYEOF'
-import sys, time
+  GPS_SILENT_GRACE_S="$GPS_SILENT_GRACE_S" "$PY_CMD" - "$floor" "$TIMEOUT_S" "$MAX_SKEW_YEARS" <<'PYEOF'
+import os, sys, time
 floor = int(sys.argv[1])
 timeout_s = float(sys.argv[2])
 max_skew_years = float(sys.argv[3])
+grace_s = float(os.environ.get("GPS_SILENT_GRACE_S", "8"))
 ceiling = floor + max_skew_years * 365 * 86400
+
+def err(m):
+    sys.stderr.write(m + "\n"); sys.stderr.flush()
 
 try:
     import cereal.messaging as messaging
-except ImportError:
-    sys.exit(1)
+except Exception as e:
+    err("gpsNMEA: cannot import cereal (%s)" % e)
+    err("         -> run this from /data/openpilot with PYTHONPATH set, with openpilot built.")
+    sys.exit(2)
 
 sm = messaging.SubMaster(['gpsNMEA'])
-deadline = time.monotonic() + timeout_s
+start = time.monotonic()
+deadline = start + timeout_s
+seen = 0
+last_report = -2.0
 while time.monotonic() < deadline:
     sm.update(1000)
+    el = time.monotonic() - start
     if sm.updated['gpsNMEA']:
-        ts_ms = sm['gpsNMEA'].timestamp
-        epoch_s = ts_ms // 1000
+        seen += 1
+        epoch_s = sm['gpsNMEA'].timestamp // 1000
         if floor <= epoch_s <= ceiling:
-            print(int(epoch_s))
-            sys.exit(0)
+            err("gpsNMEA: usable fix after %ds (epoch %d)" % (int(el), epoch_s))
+            print(int(epoch_s)); sys.exit(0)
+    # heartbeat every ~2s so it never looks frozen
+    if el - last_report >= 2.0:
+        last_report = el
+        err("  ...%ds/%ds  gpsNMEA msgs: %d  (none with satellite time lock yet)" % (int(el), int(timeout_s), seen))
+    # fail fast: if gpsd never emits a single message, there's nothing to wait for
+    if seen == 0 and el >= grace_s:
+        err("gpsNMEA: 0 messages in %ds -> gpsd is NOT publishing." % int(grace_s))
+        err("         Is openpilot running? gpsd is started by manager. (ps | grep gpsd)")
+        sys.exit(3)
+err("gpsNMEA: saw %d msgs but none had a usable time in %ds -> GPS chip has no satellite time lock." % (seen, int(timeout_s)))
+err("         Needs a clear sky view / antenna. Indoors on a bench it will never lock.")
 sys.exit(1)
 PYEOF
 }
