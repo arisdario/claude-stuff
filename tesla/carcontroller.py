@@ -245,8 +245,9 @@ class CarController():
     self.should_ldw = False
     self.ldw_numb_frame_end = 0
 
-    self.steer_reengage_frame_end = 0
+    self.steer_reengage_frame_end = -1  # -1, not 0: frame starts at 0, so 0 would read as "active" on the very first tick
     self.steer_reengage_stable_since = None
+    self.steer_reengage_active = False
 
     self.isMetric = (self.params.get("IsMetric") == "1")
 
@@ -429,6 +430,11 @@ class CarController():
 
     # STEER-REENGAGE (see the module-level comment above STEER_REENGAGE_SMALL_ANGLE_DEG): a human-
     # initiated lane change just ended (stalk went back to 0) - start (or restart) the hold-off.
+    # steer_reengage_was_active MUST be read from the persisted self.steer_reengage_active left over
+    # from the previous call, not recomputed as frame <= self.steer_reengage_frame_end using this
+    # call's frame - that comparison already reflects the POST-transition state the instant frame_end
+    # stops changing, so it can never observe an edge (caught by test_steer_reengage.py).
+    steer_reengage_was_active = self.steer_reengage_active
     if CS.prev_turn_signal_stalk_state > 0 and CS.turn_signal_stalk_state == 0:
       self.steer_reengage_frame_end = frame + int(100 * CS.steerReengageNumbPeriod)
       self.steer_reengage_stable_since = None
@@ -440,9 +446,18 @@ class CarController():
           self.steer_reengage_frame_end = frame  # steady in the lane - end the hold now
       else:
         self.steer_reengage_stable_since = None
+    self.steer_reengage_active = frame <= self.steer_reengage_frame_end
+
+    # fire once, exactly on the falling edge (hold just ended) - never on the rising edge (a fresh
+    # lane change restarting the hold), and never repeated every frame afterwards. Mirrors
+    # HSO_module.py's one real example of this call; the exact meaning of its 3rd/4th args isn't
+    # independently confirmed (UIEV_module.py isn't in this repo) - verify this looks right on the
+    # actual IC before trusting the duration/slot numbers.
+    if steer_reengage_was_active and not self.steer_reengage_active:
+      CS.UE.custom_alert_message(3, "Lane Centering Resumed", 30, 5)
 
     human_lane_changing = ((CS.turn_signal_stalk_state > 0 and not self.alca_enabled)
-                            or frame <= self.steer_reengage_frame_end)
+                            or self.steer_reengage_active)
     enable_steer_control = (enabled
                             and not human_lane_changing
                             and not human_control 
