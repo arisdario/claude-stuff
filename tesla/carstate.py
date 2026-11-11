@@ -237,6 +237,7 @@ class CarState(CarStateBase):
     self.spinnerText = ""
     self.hsoNumbPeriod = 1.5
     self.ldwNumbPeriod = 1.5
+    self.steerReengageNumbPeriod = 12.0
     self.tapBlinkerExtension = 2
     self.ahbOffDuration = 5
     self.roadCameraID = ""

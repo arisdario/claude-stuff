@@ -309,6 +309,15 @@ class ConfigFile():
       )
       file_changed |= didUpdate
 
+      #steer_reengage_numb_period -> steerReengageNumbPeriod
+      into.steerReengageNumbPeriod, didUpdate = self.read_config_entry(
+        config, configr, prev_file_contents, section = pref_section,
+        entry = 'steer_reengage_numb_period', entry_type = float,
+        default_value = 12.0,
+        comment = 'Max seconds to hold off full lane-centering steering after a human-initiated lane change (blinker goes back off); ends early once the commanded steering angle has stayed small for about a second, whichever comes first.'
+      )
+      file_changed |= didUpdate
+
       #tap_blinker_extension -> tapBlinkerExtension
       into.tapBlinkerExtension, didUpdate = self.read_config_entry(
         config, configr, prev_file_contents, section = pref_section,
@@ -515,6 +524,7 @@ class CarSettings():
   shouldLogCanErrors = None
   hsoNumbPeriod = None
   ldwNumbPeriod = None
+  steerReengageNumbPeriod = None
   tapBlinkerExtension = None
   ahbOffDuration = None
   usesApillarHarness = None

@@ -32,6 +32,19 @@ ANGLE_MAX_V = [410., 92., 36.]
 ANGLE_DELTA_BP = [0., 5., 15.]
 ANGLE_DELTA_V = [5., .8, .25]     # windup limit
 ANGLE_DELTA_VU = [5., 3.5, 0.8]   # unwind limit
+
+# STEER-REENGAGE: after a human-initiated lane change (blinker goes back to 0), hold off full
+# lane-centering steering until the car looks steady in the new lane, instead of resuming the instant
+# the stalk auto-cancels (which it does well before the car has actually recentered). "Steady" is
+# approximated by the commanded angle staying small for a bit - carcontroller/interface.py are only
+# given the already-computed actuators.steerAngle, not pathPlan's raw lPoly/rPoly lateral offsets
+# (those are consumed upstream in controlsd.py, a core file not in this repo); getting the real lane
+# position here would mean a new live cereal subscription inside the control loop, a bigger, riskier
+# change than this. CS.steerReengageNumbPeriod (config: steer_reengage_numb_period) is a backstop
+# MAXIMUM only, in case the road itself never lets the commanded angle settle (e.g. a continuous
+# curve) - in ordinary driving the steady-angle check should end the hold well before that.
+STEER_REENGAGE_SMALL_ANGLE_DEG = 3.0
+STEER_REENGAGE_STABLE_FRAMES = 100  # ~1s at 100Hz of a small commanded angle counts as "steady"
 # LANEWIGGLE: the 0.8.3 model's path jitters much more when it cannot see lane lines (measured on a night drive: path
 # y@30m jitter 0.24 with a visible lane vs 1.52 without - 6x). That jitter reaches the wheel as a wiggle. We slew-rate
 # limit the steering command by lane confidence (max of lProb/rProb): no extra limit when a lane is visible, tightening
@@ -228,9 +241,12 @@ class CarController():
     self.prev_ldwStatus = 0
 
     self.radarVin_idx = 0
-    self.LDW_ENABLE_SPEED = 16 
+    self.LDW_ENABLE_SPEED = 16
     self.should_ldw = False
     self.ldw_numb_frame_end = 0
+
+    self.steer_reengage_frame_end = 0
+    self.steer_reengage_stable_since = None
 
     self.isMetric = (self.params.get("IsMetric") == "1")
 
@@ -410,7 +426,23 @@ class CarController():
     apply_angle = -actuators.steerAngle  # Tesla is reversed vs OP.
     # Update HSO module info.
     human_control = self.HSO.update_stat(self,CS, enabled, actuators, frame)
-    human_lane_changing = CS.turn_signal_stalk_state > 0 and not self.alca_enabled
+
+    # STEER-REENGAGE (see the module-level comment above STEER_REENGAGE_SMALL_ANGLE_DEG): a human-
+    # initiated lane change just ended (stalk went back to 0) - start (or restart) the hold-off.
+    if CS.prev_turn_signal_stalk_state > 0 and CS.turn_signal_stalk_state == 0:
+      self.steer_reengage_frame_end = frame + int(100 * CS.steerReengageNumbPeriod)
+      self.steer_reengage_stable_since = None
+    if frame <= self.steer_reengage_frame_end:
+      if abs(actuators.steerAngle) < STEER_REENGAGE_SMALL_ANGLE_DEG:
+        if self.steer_reengage_stable_since is None:
+          self.steer_reengage_stable_since = frame
+        elif frame - self.steer_reengage_stable_since >= STEER_REENGAGE_STABLE_FRAMES:
+          self.steer_reengage_frame_end = frame  # steady in the lane - end the hold now
+      else:
+        self.steer_reengage_stable_since = None
+
+    human_lane_changing = ((CS.turn_signal_stalk_state > 0 and not self.alca_enabled)
+                            or frame <= self.steer_reengage_frame_end)
     enable_steer_control = (enabled
                             and not human_lane_changing
                             and not human_control 
