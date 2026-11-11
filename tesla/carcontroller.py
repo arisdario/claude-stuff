@@ -422,7 +422,10 @@ class CarController():
       CS.v_cruise_pcm = self.PCC.pedal_speed_kph * speed_uom_kph
     else:
       CS.v_cruise_pcm = max(0., CS.v_ego * CV.MS_TO_KPH) * speed_uom_kph
-    self.alca_enabled = self.ALCA.update(enabled, CS, actuators, self.alcaStateData, frame, self.blinker)
+    # ALCA_module.update() returns a bool (laneChange_enabled > 1) normally, but the tuple (0, False) on
+    # its cancel/stop paths - and a non-empty tuple is truthy, so that frame read as "ALCA steering".
+    # Only a real True means an ALCA lane change is in progress.
+    self.alca_enabled = self.ALCA.update(enabled, CS, actuators, self.alcaStateData, frame, self.blinker) is True
     self.should_ldw = self._should_ldw(CS, frame)
     apply_angle = -actuators.steerAngle  # Tesla is reversed vs OP.
     # Update HSO module info.

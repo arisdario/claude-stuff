@@ -227,5 +227,11 @@ class TestAlcaIsNeverBlocked(unittest.TestCase):
     sim.step(1, 0.0, frames=5)
     self.assertTrue(sim.step(0, 8.0, frames=1))
 
+
+class TestAlcaReturnValueIsNormalized(unittest.TestCase):
+  def test_tuple_return_on_cancel_is_not_read_as_alca_active(self):
+    # ALCA_module.update() returns (0, False) on cancel - truthy as a tuple. carcontroller must use `is True`.
+    self.assertIn('self.ALCA.update(enabled, CS, actuators, self.alcaStateData, frame, self.blinker) is True', CC)
+
 if __name__ == '__main__':
   unittest.main()
