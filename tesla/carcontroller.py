@@ -446,6 +446,12 @@ class CarController():
           self.steer_reengage_frame_end = frame  # steady in the lane - end the hold now
       else:
         self.steer_reengage_stable_since = None
+    if self.alca_enabled:
+      # ALCA (tap or hold) is steering the lane change itself and needs lateral control: this hold-off
+      # is only for DRIVER-steered lane changes, so cancel it silently (no "Lane Centering Resumed").
+      self.steer_reengage_frame_end = -1
+      self.steer_reengage_stable_since = None
+      steer_reengage_was_active = False
     self.steer_reengage_active = frame <= self.steer_reengage_frame_end
 
     # fire once, exactly on the falling edge (hold just ended) - never on the rising edge (a fresh

@@ -192,5 +192,40 @@ class TestResumeAlertFiresOnceOnRelease(unittest.TestCase):
     self.assertEqual(sim.cs.UE.calls, [])
 
 
+
+class TestAlcaIsNeverBlocked(unittest.TestCase):
+  """tap-ALCA: the stalk is released almost immediately, but ALCA then steers the lane change itself.
+  The hold-off must not block it (it is only for driver-steered lane changes)."""
+
+  def test_tap_alca_lane_change_is_not_blocked(self):
+    sim = Sim()
+    sim.s.alca_enabled = True
+    sim.step(1, 0.0, frames=5)                    # short tap
+    self.assertFalse(sim.step(0, 8.0, frames=1))   # ALCA steering, stalk already released
+    self.assertFalse(sim.step(0, 8.0, frames=200))
+    self.assertFalse(sim.s.steer_reengage_active)
+
+  def test_no_resumed_alert_for_an_alca_lane_change(self):
+    sim = Sim()
+    sim.s.alca_enabled = True
+    sim.step(1, 0.0, frames=5)
+    sim.step(0, 8.0, frames=50)
+    sim.s.alca_enabled = False                     # ALCA done
+    sim.step(0, 0.0, frames=300)
+    self.assertEqual(sim.cs.UE.calls, [])
+
+  def test_alca_starting_mid_hold_cancels_it_silently(self):
+    sim = Sim()
+    sim.step(1, 0.0, frames=5)
+    self.assertTrue(sim.step(0, 8.0, frames=1))    # driver lane change ended: held
+    sim.s.alca_enabled = True
+    self.assertFalse(sim.step(0, 8.0, frames=1))   # ALCA takes over: released, no alert
+    self.assertEqual(sim.cs.UE.calls, [])
+
+  def test_driver_lane_change_still_held_when_alca_is_off(self):
+    sim = Sim()
+    sim.step(1, 0.0, frames=5)
+    self.assertTrue(sim.step(0, 8.0, frames=1))
+
 if __name__ == '__main__':
   unittest.main()
