@@ -15,7 +15,6 @@ Rules mirrored from the code (ALCA_module.py / carcontroller.py / carstate.py):
 """
 import configparser
 import os
-import subprocess
 import sys
 import time
 
@@ -56,7 +55,8 @@ def setup_checks():
     report(ign == 'True', 'config alca_ignore_ic_toggle = True',
            'is %s (with IC integration, False = ALCA follows the car display toggle)' % ign)
   hso = cfg_get(cp, 'enable_hso')
-  report(hso == 'True', 'config enable_hso = True', 'is %s (releases steering while the stalk is latched)' % hso)
+  print('INFO enable_hso = %s (optional: hands the wheel to you when you steer by hand; the latched-stalk'
+        ' release and the hold work either way)' % hso)
   print('     steer_reengage_numb_period = %s s, tap_blinker_extension = %s, hso_numb_period = %s s'
         % (cfg_get(cp, 'steer_reengage_numb_period'), cfg_get(cp, 'tap_blinker_extension'), cfg_get(cp, 'hso_numb_period')))
 
@@ -77,12 +77,18 @@ def setup_checks():
   except Exception as e:
     report(False, 'deployed carstate.py', str(e))
 
-  try:
-    ps = subprocess.run(['ps'], stdout=subprocess.PIPE, universal_newlines=True).stdout
-  except Exception:
-    ps = ''
+  # read /proc directly: `ps` run from Python on NEOS may list only this terminal's processes
+  cmdlines = []
+  for pid in os.listdir('/proc'):
+    if pid.isdigit():
+      try:
+        cmdlines.append(open('/proc/%s/cmdline' % pid, 'rb').read().replace(b'\0', b' ').decode('utf-8', 'replace'))
+      except Exception:
+        pass
   for p in ('controlsd', 'boardd', '_modeld'):
-    report(p in ps, 'process %s running' % p)
+    # match the program name only (argv[0] basename, e.g. ./boardd or selfdrive.controls.controlsd),
+    # not any word in a command line
+    report(any(os.path.basename(c.split(' ')[0]).endswith(p) for c in cmdlines if c), 'process %s running' % p)
 
 
 def live():
