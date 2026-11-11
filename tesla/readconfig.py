@@ -88,6 +88,15 @@ class ConfigFile():
       )
       file_changed |= didUpdate
 
+      #alca_ignore_ic_toggle -> alcaIgnoreIcToggle
+      into.alcaIgnoreIcToggle, didUpdate = self.read_config_entry(
+        config, configr, prev_file_contents, section = main_section,
+        entry = 'alca_ignore_ic_toggle', entry_type = bool,
+        default_value = False,
+        comment = 'Only matters with has_tesla_ic_integration = True. False (stock): ALCA on/off follows the car display toggle (sent as MCU_pedalSafetyEnable). True: ignore that toggle and use enable_alca above instead.'
+      )
+      file_changed |= didUpdate
+
       #enable_das_emulation -> enableDasEmulation
       into.enableDasEmulation, didUpdate = self.read_config_entry(
         config, configr, prev_file_contents, section = main_section,
@@ -496,6 +505,7 @@ class CarSettings():
   forcePedalOverCC = None
   enableHSO = None
   enableALCA = None
+  alcaIgnoreIcToggle = None
   enableDasEmulation = None
   enableRadarEmulation = None
   enableDriverMonitor = None

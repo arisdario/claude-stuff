@@ -210,6 +210,7 @@ class CarState(CarStateBase):
     self.usesApillarHarness = False
     self.enableHSO = True
     self.enableALCA = True
+    self.alcaIgnoreIcToggle = False
     self.enableDasEmulation = True
     self.enableRadarEmulation = True
     self.enableDriverMonitor = True
@@ -567,6 +568,8 @@ class CarState(CarStateBase):
       self.apFollowTimeInS =  1 + cp.vl["MCU_chassisControl"]["MCU_fcwSensitivity"] * 0.5
       self.keepEonOff = cp.vl["MCU_chassisControl"]["MCU_ldwEnable"] == 1
       self.alcaEnabled = cp.vl["MCU_chassisControl"]["MCU_pedalSafetyEnable"] == 1
+      if self.alcaIgnoreIcToggle:   # config alca_ignore_ic_toggle: ALCA on/off from enable_alca, not the car display toggle
+        self.alcaEnabled = bool(self.enableALCA)
       self.mapAwareSpeed = cp.vl["MCU_chassisControl"]["MCU_aebEnable"] == 1 and self.useTeslaMapData
       #AHB info
       self.ahbHighBeamStalkPosition = cp.vl["STW_ACTN_RQ"]["HiBmLvr_Stat"]
