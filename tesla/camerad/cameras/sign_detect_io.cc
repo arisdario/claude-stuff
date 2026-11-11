@@ -3,9 +3,14 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
+#include <pthread.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
+#include <vector>
 
 namespace {
 const char *FLAG_FILE = "/data/sign_detect_on";
@@ -56,6 +61,37 @@ void write_result(const SignResult &r) {
   rename(OUT_TMP, OUT_FILE);   // atomic: a reader never sees a partial write
 }
 
+// Detection runs on its own background thread so camerad's capture thread (which feeds the driving
+// model) only ever pays for one memcpy of the frame. If the worker is still busy with the previous
+// frame, the new one is simply skipped.
+pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
+std::vector<uint8_t> g_buf;
+int g_w = 0, g_h = 0;
+bool g_pending = false;     // a frame is waiting for / being processed by the worker
+bool g_worker_up = false;
+
+void *worker(void *) {
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);   // lower priority than camerad/model (this thread only)
+  std::vector<uint8_t> frame;
+  for (;;) {
+    int w, h;
+    pthread_mutex_lock(&g_mu);
+    while (!g_pending) pthread_cond_wait(&g_cv, &g_mu);
+    frame.swap(g_buf);
+    w = g_w; h = g_h;
+    pthread_mutex_unlock(&g_mu);
+
+    SignResult r = detect_signs(frame.data(), w, h);
+    write_result(r);
+
+    pthread_mutex_lock(&g_mu);
+    g_pending = false;
+    pthread_mutex_unlock(&g_mu);
+  }
+  return nullptr;
+}
+
 }  // namespace
 
 void sign_detect_tick(const uint8_t *rgb, int w, int h) {
@@ -63,7 +99,19 @@ void sign_detect_tick(const uint8_t *rgb, int w, int h) {
   frame_counter++;
   if (frame_counter % SIGN_DETECT_EVERY_N_FRAMES != 0) return;
   if (!rgb || w <= 0 || h <= 0) return;
-  cv::Mat frame(h, w, CV_8UC3, const_cast<uint8_t *>(rgb));   // wraps the existing buffer, no copy
-  SignResult r = detect_signs(frame);
-  write_result(r);
+
+  if (pthread_mutex_trylock(&g_mu) != 0) return;   // never block the capture thread
+  if (!g_worker_up) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, worker, NULL) == 0) { pthread_detach(t); g_worker_up = true; }
+  }
+  if (g_worker_up && !g_pending) {
+    const size_t n = (size_t)w * h * 3;
+    g_buf.resize(n);
+    memcpy(g_buf.data(), rgb, n);
+    g_w = w; g_h = h;
+    g_pending = true;
+    pthread_cond_signal(&g_cv);
+  }
+  pthread_mutex_unlock(&g_mu);
 }

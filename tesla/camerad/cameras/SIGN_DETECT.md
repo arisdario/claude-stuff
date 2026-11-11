@@ -2,8 +2,12 @@
 
 Classical CV, not a second neural net - the Adreno GPU on this EON is already fully claimed by the
 driving model's SNPE inference, so a second real-time net alongside it isn't realistic. This runs on
-CPU: HSV color thresholding + contour shape analysis, OpenCV (already a build dependency of this
-camerad via `camera_webcam.cc`).
+CPU: HSV color thresholding + blob shape analysis, in **plain C++ with no OpenCV** (the EON's NEOS has
+no OpenCV, so the earlier OpenCV version could never be built there). Same pipeline and thresholds.
+
+**Frames are never modified.** The capture thread only does one `memcpy` of the RGB frame (every 8th
+frame, and never waits: `trylock`, skip if the worker is busy). Detection runs on a separate
+low-priority thread on that copy, at half resolution (640x360), ~12 ms/frame on a desktop CPU.
 
 **Status: validated against synthetic generated test images only (`camerad/test/ext_c920/sign_detect_test.cc`,
 18 checks, all passing), NOT yet tuned against real road footage.** The synthetic tests prove the shape
@@ -13,7 +17,7 @@ compression, real lighting, partial occlusion, weather, and non-idealized sign/l
 move the thresholds. **Before trusting this for anything beyond a display readout, capture real frames
 and re-tune the HSV ranges in `sign_detect.cc` against them** (see "Tuning" below).
 
-OFF by default everywhere: compiled in only if the build's OpenCV trial-compile succeeds (see
+OFF by default everywhere: compiled in only if the build's trial-compile of the detector succeeds (see
 camerad/SConscript's aarch64 branch - mirrors the existing `EXT_WANT_AVCODEC`/H.264 opt-in pattern
 exactly: "any doubt = camerad is built exactly as before"), and even when compiled in, runs only if
 `/data/sign_detect_on` exists. With neither, this is zero-cost: no extra code path, no extra CPU.

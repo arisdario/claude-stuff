@@ -31,28 +31,26 @@ if arch == "aarch64":
   except Exception as e:
     print("camerad: H.264 input NOT built in (%s): MJPEG only" % e)
   # OPTIONAL stop-sign/traffic-light detection (cameras/sign_detect.cc, opt-in at run time with
-  # /data/sign_detect_on - see SIGN_DETECT.md). Same philosophy as the H.264 block above: compiled in
-  # ONLY if OpenCV headers/libs exist AND a trial compile succeeds right here. Any doubt = camerad is
-  # built exactly as before, with no sign/light detection code path at all.
+  # /data/sign_detect_on - see SIGN_DETECT.md). Plain C++ now (no OpenCV - the EON has none), but the
+  # same philosophy as the H.264 block above: compiled in ONLY if a trial compile+link of the detector
+  # succeeds right here. Any doubt = camerad is built exactly as before, with no sign/light code path.
   try:
-    cv_inc = os.environ.get('EXT_OPENCV_INC', '/system/comma/usr/include/opencv4')
-    cv_lib_names = ['opencv_core', 'opencv_imgproc']
-    if os.path.exists(cv_inc + '/opencv2/opencv.hpp'):
+    sd_dir = Dir('#selfdrive/camerad/cameras').abspath
+    if os.path.exists(os.path.join(sd_dir, 'sign_detect.cc')):
       trial = env.Clone()
-      trial.Append(CPPPATH = [cv_inc], LIBS = cv_lib_names)
       conf = Configure(trial)
-      trial_src = '#include "%s"\nint main() { cv::Mat m(2, 2, CV_8UC3); return detect_signs(m).stop_sign ? 1 : 0; }\n' % os.path.join(Dir('#selfdrive/camerad/cameras').abspath, 'sign_detect.h')
+      trial_src = ('#include "%s"\n' % os.path.join(sd_dir, 'sign_detect.cc')) + \
+                  'int main() { static uint8_t px[4 * 4 * 3]; return detect_signs(px, 4, 4).stop_sign ? 1 : 0; }\n'
       trial_ok = conf.TryCompile(trial_src, '.cc') and conf.TryLink(trial_src, '.cc')
       conf.Finish()
       if trial_ok:
-        env.Append(CPPPATH = [cv_inc], CXXFLAGS = ['-DEXT_WANT_SIGN_DETECT'])
-        libs += cv_lib_names
+        env.Append(CXXFLAGS = ['-DEXT_WANT_SIGN_DETECT'])
         cameras += ['cameras/sign_detect.cc', 'cameras/sign_detect_io.cc']
         print("camerad: sign/light detection is built in (opt-in: touch /data/sign_detect_on)")
       else:
         print("camerad: sign/light detection NOT built in (the trial compile/link failed): unchanged camerad")
     else:
-      print("camerad: sign/light detection NOT built in (no OpenCV headers in %s): unchanged camerad" % cv_inc)
+      print("camerad: sign/light detection NOT built in (no cameras/sign_detect.cc): unchanged camerad")
   except Exception as e:
     print("camerad: sign/light detection NOT built in (%s): unchanged camerad" % e)
 elif arch == "larch64":
