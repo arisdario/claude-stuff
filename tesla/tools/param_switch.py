@@ -4,6 +4,8 @@
 No change to the EON UI/app: the app writes each toggle as a file in /data/params/d/<Name> ("1"/"0"). This watcher polls two of them every 2 s (idle cost ~0):
   switch_param (default /data/web_switch = the on-screen WEB button, see add_web_button.py; or a param name such as IsUploadRawEnabled = "Upload Raw Logs")        1 -> start radarweb      0 -> stop radarweb
   diag_param   (default RecordFront        = "Record and Upload Driver Camera")   1 -> start diagnostics recording   0 -> stop + build zip
+  fcw_param    (default IsUploadRawEnabled = "Upload Raw Logs")                    1 -> start the FCW shadow logger   0 -> stop it
+               (skipped if it is the same toggle as switch_param or diag_param; set fcw_param=none to disable)
 These two toggles only matter to loggerd/uploader, which are blocked on this EON (/data/no_loggerd, /data/no_uploader), so reusing them is harmless. The labels in the app will
 not match: that is the price of not touching the app. Change the names in /data/launcher.conf if your settings screen shows others (find them with --watch-names).
 
@@ -109,12 +111,15 @@ class Switch(object):
 
   def __init__(self, c, params=None):
     self.c, self.params = c, params
-    self.web = self.diag = None            # last seen value; None = not seen yet
+    self.web = self.diag = self.fcw = None            # last seen value; None = not seen yet
 
-  def step(self, start_web=launcher.start_web, stop_web=launcher.stop_web, diag=launcher.diag):
+  def step(self, start_web=launcher.start_web, stop_web=launcher.stop_web, diag=launcher.diag,
+           start_fcw=launcher.start_fcw, stop_fcw=launcher.stop_fcw):
     wn = self.c.get('switch_param', '/data/web_switch')
     dn = self.c.get('diag_param', 'RecordFront')
+    fn = self.c.get('fcw_param', 'IsUploadRawEnabled')
     w, d = rd(wn, self.params), rd(dn, self.params)
+    f = rd(fn, self.params) if fn not in ('none', '', wn, dn) else None
     acts = []
     if w is not None and w != self.web:
       if w == '1':
@@ -128,6 +133,12 @@ class Switch(object):
       elif self.diag is not None:
         acts.append(('diagnostics off', diag(self.c, 'stop')))
       self.diag = d
+    if f is not None and f != self.fcw:
+      if f == '1':
+        acts.append(('FCW logger on', start_fcw(self.c)))
+      elif self.fcw is not None:
+        acts.append(('FCW logger off', stop_fcw(self.c)))
+      self.fcw = f
     return acts
 
 
@@ -143,7 +154,8 @@ def main():
     return
   sw = Switch(launcher.conf())
   last_audio = 0.0
-  log('param_switch started: radarweb <- %s, diagnostics <- %s' % (sw.c.get('switch_param', '/data/web_switch'), sw.c.get('diag_param', 'RecordFront')))
+  log('param_switch started: radarweb <- %s, diagnostics <- %s, FCW logger <- %s' % (sw.c.get('switch_param', '/data/web_switch'),
+      sw.c.get('diag_param', 'RecordFront'), sw.c.get('fcw_param', 'IsUploadRawEnabled')))
   while True:
     try:
       sw.c = launcher.conf()

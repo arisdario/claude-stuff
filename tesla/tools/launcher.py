@@ -5,7 +5,8 @@ Purpose: keep heavy helpers (radarweb, mapcurved, the diagnostics logger) OFF wh
 
   python3 launcher.py [port]          # default 8087; open http://<EON-IP>:8087/
 
-Buttons: radarweb start/stop, diagnostics start/stop (start_diagnostics.sh / stop_diagnostics.sh), live per-process CPU + temperature.
+Buttons: radarweb start/stop, diagnostics start/stop (start_diagnostics.sh / stop_diagnostics.sh), FCW shadow logger start/stop/report
+(fcw_shadow.py - logs only, never alerts), live per-process CPU + temperature.
 It never touches openpilot's own processes (controlsd, modeld, camerad ...): stopping is done only on the processes matching the whitelisted
 names in /data/launcher.conf, and only via SIGTERM to that exact PID. No shell is exposed: the commands are fixed in the config file, not typed in the page.
 
@@ -27,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 CONF = os.environ.get('LAUNCHER_CONF', '/data/launcher.conf')
 DEFAULTS = {'radarweb_cmd': 'sh /data/startweb.sh', 'radarweb_match': 'radarweb.py', 'diag_dir': '/data/claude-stuff/tesla/diag'}
+FCW_SHADOW = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fcw_shadow.py')
 AUTH = os.environ.get('LAUNCHER_AUTH', '')
 PROTECTED = ('controlsd', 'modeld', 'camerad', 'plannerd', 'boardd', 'manager', 'radard', 'locationd', 'paramsd', 'calibrationd', 'sensord', 'thermald')
 
@@ -79,6 +81,54 @@ def stop_web(c):
   return 'radarweb stopped (%d process%s)' % (len(pids), '' if len(pids) == 1 else 'es') if not left else 'still running: %s (stop it by hand)' % left
 
 
+def find_fcw(proc='/proc'):
+  """pids of the RUNNING FCW logger only: a python process whose script argument is fcw_shadow.py, not in
+  --report mode. (A plain substring match would also hit an ssh shell or editor whose command line
+  merely mentions the file name - and stop_fcw would SIGTERM it.)"""
+  out = []
+  for d in os.listdir(proc):
+    if not d.isdigit() or int(d) == os.getpid():
+      continue
+    try:
+      argv = open('%s/%s/cmdline' % (proc, d), 'rb').read().split(b'\0')
+    except OSError:
+      continue
+    argv = [a.decode('utf8', 'replace') for a in argv if a]
+    if not argv or 'python' not in os.path.basename(argv[0]) or '--report' in argv:
+      continue
+    if any(os.path.basename(a) == 'fcw_shadow.py' for a in argv[1:3]):
+      out.append(int(d))
+  return out
+
+
+def start_fcw(c=None):
+  """FCW shadow logger (logs only, never alerts). Runs from /data/openpilot so cereal imports."""
+  if find_fcw():
+    return 'FCW logger already running'
+  if not os.path.exists(FCW_SHADOW):
+    return 'not found: %s' % FCW_SHADOW
+  env = dict(os.environ)
+  env['PYTHONPATH'] = '/data/openpilot' + ((':' + env['PYTHONPATH']) if env.get('PYTHONPATH') else '')
+  subprocess.Popen(['nice', '-n', '10', 'python3', FCW_SHADOW], cwd='/data/openpilot', env=env, stdout=subprocess.DEVNULL,
+                   stderr=open('/tmp/fcw_shadow.err', 'w'), stdin=subprocess.DEVNULL, start_new_session=True)
+  return 'FCW logger started'
+
+
+def stop_fcw(c=None):
+  pids = find_fcw()
+  for p in pids:
+    try:
+      os.kill(p, signal.SIGTERM)
+    except OSError:
+      pass
+  return 'FCW logger stopped' if pids else 'FCW logger was not running'
+
+
+def fcw_report(c=None):
+  r = subprocess.run(['python3', FCW_SHADOW, '--report'], capture_output=True, text=True, timeout=30)
+  return (r.stdout + r.stderr)[-4000:] or 'no report yet'
+
+
 def diag(c, what):
   sh = os.path.join(c['diag_dir'], 'start_diagnostics.sh' if what == 'start' else 'stop_diagnostics.sh')
   if not os.path.exists(sh):
@@ -93,7 +143,7 @@ def diag(c, what):
 def status(c):
   sysd = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'traffic')
   sys.path.insert(0, sysd)
-  out = {'radarweb': bool(find(c['radarweb_match'])), 'diag': None, 'procs': [], 'temp_c': None, 'load': open('/proc/loadavg').read().split()[:3]}
+  out = {'radarweb': bool(find(c['radarweb_match'])), 'fcw': bool(find_fcw()), 'diag': None, 'procs': [], 'temp_c': None, 'load': open('/proc/loadavg').read().split()[:3]}
   try:
     r = subprocess.run(['sh', os.path.join(c['diag_dir'], 'start_diagnostics.sh'), 'status'], capture_output=True, text=True, timeout=10)
     out['diag'] = r.stdout.strip().splitlines()[0][:200] if r.stdout.strip() else None
@@ -123,12 +173,13 @@ PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=
 .on{background:#178644}.off{background:#7a2b2b}pre{background:#161a1f;padding:10px;border-radius:8px;white-space:pre-wrap}h3{margin:16px 0 4px}</style>
 <h2>EON launcher</h2><div id=st>loading...</div>
 <h3>radarweb (web UI, CAN decode)</h3><button class=on onclick="act('web_start')">Start</button><button class=off onclick="act('web_stop')">Stop</button>
+<h3>FCW shadow logger (logs only, never warns)</h3><button class=on onclick="act('fcw_start')">Start</button><button class=off onclick="act('fcw_stop')">Stop</button><button onclick="act('fcw_report')">Report</button>
 <h3>steering diagnostics</h3><button class=on onclick="act('diag_start')">Start recording</button><button class=off onclick="act('diag_stop')">Stop + build zip</button>
 <pre id=msg></pre><h3>Busiest processes (% of one core)</h3><pre id=pr></pre>
 <script>
 function act(a){document.getElementById('msg').textContent='...';fetch('/api/'+a,{method:'POST'}).then(function(r){return r.json()}).then(function(d){document.getElementById('msg').textContent=d.msg;upd()})}
 function upd(){fetch('/api/status').then(function(r){return r.json()}).then(function(d){
- document.getElementById('st').innerHTML='radarweb: <b>'+(d.radarweb?'RUNNING':'stopped')+'</b> &middot; diagnostics: <b>'+(d.diag||'?')+'</b><br>CPU total '+(d.cpu_total_pct!=null?d.cpu_total_pct.toFixed(0)+'%':'?')+' &middot; temp '+(d.temp_c!=null?d.temp_c+' C':'?')+' &middot; load '+d.load.join(' ')+(d.stop_log?'<pre>'+d.stop_log+'</pre>':'');
+ document.getElementById('st').innerHTML='radarweb: <b>'+(d.radarweb?'RUNNING':'stopped')+'</b> &middot; FCW logger: <b>'+(d.fcw?'RUNNING':'stopped')+'</b> &middot; diagnostics: <b>'+(d.diag||'?')+'</b><br>CPU total '+(d.cpu_total_pct!=null?d.cpu_total_pct.toFixed(0)+'%':'?')+' &middot; temp '+(d.temp_c!=null?d.temp_c+' C':'?')+' &middot; load '+d.load.join(' ')+(d.stop_log?'<pre>'+d.stop_log+'</pre>':'');
  document.getElementById('pr').textContent=d.procs.map(function(p){return ('   '+p[0]).slice(-4)+'  '+p[1]}).join('\\n')})}
 upd();setInterval(upd,5000);
 </script>"""
@@ -166,7 +217,8 @@ class H(BaseHTTPRequestHandler):
     p = self.path.split('?')[0]
     try:
       msg = {'/api/web_start': lambda: start_web(c), '/api/web_stop': lambda: stop_web(c),
-             '/api/diag_start': lambda: diag(c, 'start'), '/api/diag_stop': lambda: diag(c, 'stop')}[p]()
+             '/api/diag_start': lambda: diag(c, 'start'), '/api/diag_stop': lambda: diag(c, 'stop'),
+             '/api/fcw_start': lambda: start_fcw(c), '/api/fcw_stop': lambda: stop_fcw(c), '/api/fcw_report': lambda: fcw_report(c)}[p]()
     except KeyError:
       msg = 'unknown action'
     except Exception as e:

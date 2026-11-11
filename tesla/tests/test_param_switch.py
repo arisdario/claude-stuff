@@ -68,3 +68,52 @@ def test_c920_audio_unbind_touches_only_audio_interfaces():
   assert sorted(done) == ['1-1.1:1.2', '1-1.1:1.3']
   assert '1-1.2:1.0' not in done and not any('1.0' in x or '1.1' == x[-3:] for x in done)
   assert ps.unbind_c920_audio(usb, os.path.join(root, 'nodir', 'unbind')) == []       # no unbind file: no crash, nothing reported
+
+
+def _fake(calls):
+  return dict(start_web=lambda c: calls.append('web_start') or 'ok', stop_web=lambda c: calls.append('web_stop') or 'ok',
+              diag=lambda c, w: calls.append('diag_' + w) or 'ok',
+              start_fcw=lambda c: calls.append('fcw_start') or 'ok', stop_fcw=lambda c: calls.append('fcw_stop') or 'ok')
+
+
+def test_fcw_logger_follows_its_toggle():
+  d = tempfile.mkdtemp(); calls = []
+  sw = ps.Switch({}, d)                                               # defaults: web=/data/web_switch, fcw=IsUploadRawEnabled
+  open(os.path.join(d, 'IsUploadRawEnabled'), 'w').write('1'); sw.step(**_fake(calls)); sw.step(**_fake(calls))
+  open(os.path.join(d, 'IsUploadRawEnabled'), 'w').write('0'); sw.step(**_fake(calls))
+  assert calls == ['fcw_start', 'fcw_stop'], calls
+
+
+def test_fcw_toggle_left_on_at_boot_starts_the_logger():
+  d = tempfile.mkdtemp(); calls = []
+  open(os.path.join(d, 'IsUploadRawEnabled'), 'w').write('1')
+  ps.Switch({}, d).step(**_fake(calls))
+  assert calls == ['fcw_start']
+
+
+def test_fcw_never_shares_a_toggle_with_radarweb_or_diag():
+  d = tempfile.mkdtemp(); calls = []
+  open(os.path.join(d, 'IsUploadRawEnabled'), 'w').write('1')
+  ps.Switch({'switch_param': 'IsUploadRawEnabled'}, d).step(**_fake(calls))
+  assert calls == ['web_start'], calls                               # same toggle as radarweb: FCW switch is skipped
+
+
+def test_fcw_switch_can_be_disabled():
+  d = tempfile.mkdtemp(); calls = []
+  open(os.path.join(d, 'IsUploadRawEnabled'), 'w').write('1')
+  ps.Switch({'fcw_param': 'none'}, d).step(**_fake(calls))
+  assert calls == []
+
+
+def test_find_fcw_matches_only_the_running_logger():
+  import launcher
+  root = tempfile.mkdtemp()
+  def mk(pid, *argv):
+    os.makedirs(os.path.join(root, str(pid)))
+    open(os.path.join(root, str(pid), 'cmdline'), 'wb').write(b'\0'.join(a.encode() for a in argv) + b'\0')
+  mk(101, 'python3', '/data/claude-stuff/tesla/tools/fcw_shadow.py')                 # the logger
+  mk(102, 'nice', '-n', '10', 'python3', 'fcw_shadow.py')                            # nice wrapper exec's python: this pid is not python
+  mk(103, 'python3', '/data/claude-stuff/tesla/tools/fcw_shadow.py', '--report')      # a report run
+  mk(104, '-bash', '-c', 'python3 fcw_shadow.py --report; vi fcw_shadow.py')           # an ssh shell mentioning it
+  mk(105, 'vi', 'fcw_shadow.py')
+  assert launcher.find_fcw(root) == [101]
