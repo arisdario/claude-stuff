@@ -6,7 +6,9 @@
 #     put the tunnel token (Cloudflare dashboard > Zero Trust > Networks > Tunnels > your tunnel) in /data/cloudflared_token
 #     and in that tunnel set the public hostname -> service http://localhost:8090
 #   QUICK tunnel (no account, random address that CHANGES every start, anyone with it can view): used when no token file.
-#     The address is written to /data/lightdash_url.txt.
+#     The address is written to /data/lightdash_url.txt, and - if /data/ntfy_topic exists - pushed to your phone with
+#     ntfy.sh (free, no account: install the ntfy app, subscribe to the same topic name). Use a long random topic name:
+#     anyone who knows it can read the notifications.
 #
 # Off switch: touch /data/lightdash_tunnel_off.     Log: /data/lightdash_tunnel.log
 # Auto-start: add this line to /data/openpilot/launch_chffrplus.sh next to the autoclock line:
@@ -18,6 +20,7 @@ TOKEN_FILE=/data/cloudflared_token
 OFF=/data/lightdash_tunnel_off
 LOG=/data/lightdash_tunnel.log
 URL_FILE=/data/lightdash_url.txt
+NTFY_TOPIC_FILE=/data/ntfy_topic
 
 [ -f "$OFF" ] && exit 0
 [ -x "$BIN" ] || { echo "$(date) no $BIN" >> "$LOG"; exit 1; }
@@ -37,7 +40,11 @@ while [ ! -f "$OFF" ]; do
     "$BIN" tunnel --no-autoupdate --url http://localhost:8090 2>&1 | while IFS= read -r line; do
       echo "$line" >> "$LOG"
       case "$line" in *https://*trycloudflare.com*)
-        echo "$line" | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' > "$URL_FILE";;
+        echo "$line" | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' > "$URL_FILE"
+        if [ -s "$NTFY_TOPIC_FILE" ] && [ -s "$URL_FILE" ]; then
+          curl -s -m 20 -H "Title: Tesla lightdash" -H "Click: $(cat "$URL_FILE")" -d "$(cat "$URL_FILE")" \
+            "https://ntfy.sh/$(cat "$NTFY_TOPIC_FILE")" > /dev/null 2>&1 &
+        fi;;
       esac
     done
   fi
