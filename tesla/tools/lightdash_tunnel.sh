@@ -31,6 +31,15 @@ for f in /data/cacert.pem /data/data/com.termux/files/usr/etc/tls/cert.pem; do
 done
 [ -n "${SSL_CERT_FILE:-}" ] || export SSL_CERT_DIR=/system/etc/security/cacerts
 
+# Watchdog: the tunnel is useless without lightdash behind it. lightdash is normally started once by carcontroller,
+# and can die (e.g. when msgq evicts readers) with nothing restarting it - so check every 30 s. lightdash_launcher.py
+# does nothing if it is already running, disabled (/data/lightdash_off) or not built.
+LAUNCHER=/data/claude-stuff/tesla/lightdash_launcher.py
+( while [ ! -f "$OFF" ]; do
+    [ -f "$LAUNCHER" ] && (cd /data/openpilot && python3 "$LAUNCHER" 2>&1 | grep -x launched | sed "s/^/$(date) lightdash re-/" >> "$LOG")
+    sleep 30
+  done ) &
+
 while [ ! -f "$OFF" ]; do
   echo "$(date) starting tunnel" >> "$LOG"
   if [ -s "$TOKEN_FILE" ]; then
