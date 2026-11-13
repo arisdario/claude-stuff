@@ -223,7 +223,7 @@ def build_model(mm):
   out = {'p': pts(mm.path), 'l': pts(mm.leftLane), 'r': pts(mm.rightLane), 'pl': round(mm.leftLane.prob, 2), 'pr': round(mm.rightLane.prob, 2)}
   try:
     fp = list(mm.freePath)
-    if len(fp) == 69 and fp[0] == 1.0:
+    if len(fp) >= 69 and fp[0] == 1.0:          # road edges first; 0.8.12 adapter appends model FCW after them
       out['e'] = {'x': X_IDXS, 'l': [round(x, 2) for x in fp[1:1 + len(X_IDXS)]], 'r': [round(x, 2) for x in fp[34:34 + len(X_IDXS)]]}
   except Exception:
     pass

@@ -100,6 +100,40 @@ int main() {
   near("road edge left = +6 (left positive)", re[1 + 5], 6.0, 1e-4);
   near("road edge right = -4.5", re[1 + 33 + 5], -4.5, 1e-4);
   near("road edge left std", re[1 + 66], 0.4, 1e-4);
+
+  // --- model FCW: comma's rule needs P(5 m/s2) > .05/.05/.15/.15/.15 over the last 5 frames AND P(3 m/s2) > .7 x3 ---
+  {
+    std::vector<float> b(OUTPUT_SIZE + TEMPORAL_SIZE, 0.0f); float *q = b.data();
+    auto &m2 = const_cast<op0812::ModelOutputMeta &>(reinterpret_cast<op0812::ModelOutput *>(q)->meta);
+    FcwHistory hist; float pk[MODEL_FCW_PACK_N]; int first_on = -1;
+    for (int f = 0; f < 8; f++) {
+      m2.disengage_prob[0].brake_5ms2 = logit(0.30f); m2.disengage_prob[0].brake_3ms2 = logit(0.80f);
+      model_fcw(q, hist, pk);
+      if (pk[0] == 1.0f && first_on < 0) first_on = f;
+    }
+    check(first_on == 4, "model FCW fires after 5 frames of high P (not before)", first_on, 4);
+    near("model FCW pack: P(5 m/s2)", pk[1], 0.30, 1e-4);
+    near("model FCW pack: P(3 m/s2)", pk[2], 0.80, 1e-4);
+    m2.disengage_prob[0].brake_3ms2 = logit(0.50f); model_fcw(q, hist, pk);
+    check(pk[0] == 0.0f, "model FCW drops when P(3 m/s2) < 0.7", pk[0], 0);
+    m2.disengage_prob[1].brake_5ms2 = logit(0.99f); m2.disengage_prob[0].brake_5ms2 = logit(0.01f);
+    m2.disengage_prob[0].brake_3ms2 = logit(0.99f);
+    for (int f = 0; f < 6; f++) model_fcw(q, hist, pk);
+    check(pk[0] == 0.0f, "model FCW uses horizon 0 only (like comma)", pk[0], 0);
+  }
+  // --- lane width ahead (exits / merges): lines 6 m apart -> no weight; 4.5 m -> half; 3.5 m -> untouched ---
+  {
+    for (float wide : {3.5f, 4.5f, 6.0f}) {
+      Line a, c; for (int d = 0; d < PATH_N; d++) { a.points[d] = wide / 2; c.points[d] = -wide / 2; }
+      a.prob = c.prob = 0.9f;
+      lane_width_check(o, a, c);
+      near(wide == 3.5f ? "lane width 3.5 m: probs unchanged" : wide == 4.5f ? "lane width 4.5 m: probs halved" : "lane width 6 m: probs zero",
+           a.prob, wide == 3.5f ? 0.9 : wide == 4.5f ? 0.45 : 0.0, 1e-4);
+    }
+    Line a, c; for (int d = 0; d < PATH_N; d++) { a.points[d] = d < 40 ? 1.75f : 3.5f; c.points[d] = -1.75f; }   // left line veers away at 40 m (exit)
+    a.prob = c.prob = 0.9f; lane_width_check(o, a, c);                  // plan speed 20 m/s: checks 0, 40.5, 81 m ahead
+    near("left line veering off ahead (exit): probs zero", a.prob, 0.0, 1e-4);
+  }
   float d075[8] = {0, 0, 1, 0, 0, 0, 0, 0}, d0812[8];
   desire_to_083(d075, d0812);
   check(d0812[3] == 1.0f && d0812[0] == 0.0f, "desire in: 0.7.5 index 2 -> model index 3", d0812[3], 1.0);

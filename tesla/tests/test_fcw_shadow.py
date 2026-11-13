@@ -49,6 +49,26 @@ class T(unittest.TestCase):
     self.assertIn('v2 only:     1', r)
     self.assertIn('stock only:  0', r)
 
+  def test_model_fcw_read_from_freepath(self):
+    class M: pass
+    m = M(); m.freePath = [1.0] + [0.0] * 68 + [1.0, 0.3, 0.8]
+    self.assertTrue(S.model_fcw_from(m, False))
+    self.assertFalse(S.model_fcw_from(m, True))                        # not while the driver brakes (comma controlsd)
+    m.freePath = [1.0] + [0.0] * 68
+    self.assertIsNone(S.model_fcw_from(m, False))                      # road edges only (older adapter)
+    m.freePath = [1.0] + [0.0] * 68 + [-1.0, -1.0, -1.0]
+    self.assertIsNone(S.model_fcw_from(m, False))                      # 0.8.3 adapter: not available
+
+  def test_model_fcw_events_and_report(self):
+    sc = S.ShadowCompare()
+    ev = []
+    for i in range(5):
+      ev += sc.step(i * DT, 20.0, True, 50.0, 20.0, 0.0, False, False, model_fcw=(i >= 2))
+    self.assertEqual([(e['ev'], e['who']) for e in ev], [('start', 'model')])
+    rows = [{'ev': 'start', 'who': 'model', 't': 9.0, 'v_ego': 20, 'd_rel': 12, 'v_lead': 0, 'y_rel': 0, 'a_needed_g': .5, 'blinker': False},
+            {'ev': 'start', 'who': 'stock', 't': 10.0, 'v_ego': 20, 'd_rel': 10, 'v_lead': 0, 'y_rel': 0, 'a_needed_g': .6, 'blinker': False}]
+    self.assertIn('BEFORE by 1.00 s', S.report(rows))
+
 
 if __name__ == '__main__':
   unittest.main()

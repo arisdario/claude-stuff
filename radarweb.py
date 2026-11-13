@@ -562,7 +562,7 @@ def _worker(prof=None):
                             except Exception: STATE['curve'] = None
                         try:                    # road edges from the 0.8.3 model adapter (tesla/model083), in freePath
                             fp = list(mm.freePath)
-                            if len(fp) == 69 and fp[0] == 1.0:      # [format, left y x33, right y x33, stdL, stdR], left +
+                            if len(fp) >= 69 and fp[0] == 1.0:      # [format, left y x33, right y x33, stdL, stdR, (model FCW x3)], left +
                                 STATE['model']['e'] = {'l': [round(v, 2) for v in fp[1:34]], 'r': [round(v, 2) for v in fp[34:67]],
                                                        'sl': round(fp[67], 2), 'sr': round(fp[68], 2)}
                         except Exception: pass

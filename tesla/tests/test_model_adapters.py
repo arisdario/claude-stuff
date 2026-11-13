@@ -53,6 +53,15 @@ class T(unittest.TestCase):
     self.assertIn('R.rel_vel = m[2] - v_ego;', s)                       # 0.8.12 lead v is absolute; 0.7.5 wants relative
     self.assertIn('const float *m = d, *sd = d + LEAD_MHP_VALS;', s)    # leadFuture = point 0, like comma's leadTwo
 
+  def test_driving_cc_uses_lane_width_check_and_model_fcw(self):
+    s = open(os.path.join(M, 'driving.cc')).read()
+    self.assertIn('MODEL_ADAPTER::lane_width_check(o, l, r);', s)
+    self.assertIn('MODEL_ADAPTER::model_fcw(o, fcw_history, fp + MODEL_ADAPTER::ROAD_EDGE_PACK_N);', s)
+    self.assertIn('static MODEL_ADAPTER::FcwHistory fcw_history;', s)  # history kept across frames
+    for f in ('../../radarweb.py', '../tools/lightdash.py'):            # readers accept the longer freePath
+      self.assertIn('len(fp) >= 69', open(os.path.join(M, f)).read())
+    self.assertIn('fp.size() >= 69', open(os.path.join(M, '../tools/lightdash.cc')).read())
+
 
 if __name__ == '__main__':
   unittest.main()

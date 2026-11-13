@@ -260,4 +260,40 @@ inline void road_edges(const float *out, float *pack) {
   }
 }
 
+
+// ---- model-based FCW, exactly comma's v0.8.12 modeld fill_meta (meta.hardBrakePredicted). 0.7.5 has no field for it:
+// driving.cc appends it to the freePath list after the road edges (see below). History is kept per published frame.
+const float FCW_THRESHOLD_5MS2_HIGH = 0.15f, FCW_THRESHOLD_5MS2_LOW = 0.05f, FCW_THRESHOLD_3MS2 = 0.7f;
+const int MODEL_FCW_PACK_N = 3;   // [hard brake predicted 1/0 (-1 = this model has no such output), P(brake 5 m/s2), P(brake 3 m/s2)]
+struct FcwHistory { float b5[5] = {0, 0, 0, 0, 0}; float b3[3] = {0, 0, 0}; };
+inline void model_fcw(const float *out, FcwHistory &h, float *pack) {
+  const float *dg = out + DISENGAGE_IDX;      // horizon 0: gas, brake, steer, brake 3, brake 4, brake 5 m/s2, gas pressed
+  const float p3 = sigm(dg[3]), p5 = sigm(dg[5]);
+  memmove(h.b5, h.b5 + 1, 4 * sizeof(float)); h.b5[4] = p5;
+  memmove(h.b3, h.b3 + 1, 2 * sizeof(float)); h.b3[2] = p3;
+  bool above = true;
+  for (int i = 0; i < 5; i++) above = above && h.b5[i] > (i < 2 ? FCW_THRESHOLD_5MS2_LOW : FCW_THRESHOLD_5MS2_HIGH);
+  for (int i = 0; i < 3; i++) above = above && h.b3[i] > FCW_THRESHOLD_3MS2;
+  pack[0] = above ? 1.0f : 0.0f; pack[1] = p5; pack[2] = p3;
+}
+
+// ---- comma v0.8.12 lane_planner get_d_path: lane lines that are, or within 3 s will be, too far apart (exit, merge,
+// lane split) get less weight: prob *= min over t in {0, 1.5, 3} s of interp(width at t*(v+7) m, [4, 5], [1, 0]).
+// 0.7.5's lane_planner lacks it. v = the best plan's own speed at t = 0 (the adapter has no carState).
+inline void lane_width_check(const float *out, Line &l, Line &r) {
+  const float *pl = best(out + PLAN_IDX, PLAN_MHP_N, PLAN_MHP_GROUP_SIZE, -1);
+  const double v_ego = pl[3], ts[3] = {0.0, 1.5, 3.0};
+  float mod = 1.0f;
+  for (int k = 0; k < 3; k++) {
+    double x = ts[k] * (v_ego + 7.0);
+    if (x < 0) x = 0;
+    if (x > PATH_N - 1) x = PATH_N - 1;
+    const int i0 = (int)x, i1 = i0 + 1 < PATH_N ? i0 + 1 : i0; const double f = x - i0;
+    const double w = (l.points[i0] * (1 - f) + l.points[i1] * f) - (r.points[i0] * (1 - f) + r.points[i1] * f);   // left - right (left +)
+    const float m = w <= 4.0 ? 1.0f : (w >= 5.0 ? 0.0f : (float)(5.0 - w));
+    if (m < mod) mod = m;
+  }
+  l.prob *= mod; r.prob *= mod;
+}
+
 }  // namespace m0812

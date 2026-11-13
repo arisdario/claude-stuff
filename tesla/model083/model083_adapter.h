@@ -245,4 +245,12 @@ inline void road_edges(const float *out, float *pack) {
   }
 }
 
+
+// ---- same interface as model0812_adapter.h; the 0.8.3 model has no hard-brake outputs and the 0.8.3 port keeps its
+// tested lane behaviour, so these are no-ops (model_fcw reports -1 = not available).
+const int MODEL_FCW_PACK_N = 3;
+struct FcwHistory { int unused = 0; };
+inline void model_fcw(const float *, FcwHistory &, float *pack) { pack[0] = pack[1] = pack[2] = -1.0f; }
+inline void lane_width_check(const float *, Line &, Line &) {}
+
 }  // namespace m083

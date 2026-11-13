@@ -138,6 +138,7 @@ void model_publish(PubSocket *sock, uint32_t frame_id,
   MODEL_ADAPTER::path_from_plan(o, p);
   MODEL_ADAPTER::lane_line(o, MODEL_ADAPTER::LANE_LEFT, l);
   MODEL_ADAPTER::lane_line(o, MODEL_ADAPTER::LANE_RIGHT, r);
+  MODEL_ADAPTER::lane_width_check(o, l, r);   // 0.8.12: exits / merges / lane splits (no-op with 0.8.3)
   MODEL_ADAPTER::lead(o, 0, ld);
   MODEL_ADAPTER::lead(o, 1, lf);
   MODEL_ADAPTER::longi(o, g);
@@ -163,10 +164,15 @@ void model_publish(PubSocket *sock, uint32_t frame_id,
   fill_lead(framed.initLead(), ld);
   fill_lead(framed.initLeadFuture(), lf);
 
-  // road edges ride in the unused freePath list (format in model083_adapter.h road_edges)
-  float edges[MODEL_ADAPTER::ROAD_EDGE_PACK_N];
-  MODEL_ADAPTER::road_edges(o, edges);
-  framed.setFreePath(kj::ArrayPtr<const float>(edges, MODEL_ADAPTER::ROAD_EDGE_PACK_N));
+  // the unused freePath list carries what 0.7.5 has no field for: road edges (format in model083_adapter.h road_edges),
+  // then the model FCW [hard brake predicted 1/0 or -1, P(brake 5 m/s2), P(brake 3 m/s2)] (model_fcw). Readers use the
+  // first ROAD_EDGE_PACK_N values for edges and only read the FCW values when the list is long enough.
+  const int FP_N = MODEL_ADAPTER::ROAD_EDGE_PACK_N + MODEL_ADAPTER::MODEL_FCW_PACK_N;
+  float fp[FP_N];
+  static MODEL_ADAPTER::FcwHistory fcw_history;
+  MODEL_ADAPTER::road_edges(o, fp);
+  MODEL_ADAPTER::model_fcw(o, fcw_history, fp + MODEL_ADAPTER::ROAD_EDGE_PACK_N);
+  framed.setFreePath(kj::ArrayPtr<const float>(fp, FP_N));
 
   auto meta = framed.initMeta();
   meta.setDesireState(kj::ArrayPtr<const float>(mt.desire_state, DESIRE_LEN));

@@ -506,7 +506,7 @@ static void fill_model(Extra &x, cereal::ModelData::Reader mm) {
   pts(mm.getPath(), x.p); pts(mm.getLeftLane(), x.l); pts(mm.getRightLane(), x.r);
   x.pl = mm.getLeftLane().getProb(); x.pr = mm.getRightLane().getProb();
   auto fp = mm.getFreePath(); x.have_edges = false;
-  if (fp.size() == 69 && fp[0] == 1.0f) {
+  if (fp.size() >= 69 && fp[0] == 1.0f) {               // road edges first; the 0.8.12 adapter appends model FCW after them
     x.e_l.clear(); x.e_r.clear();
     for (int i = 0; i < 25; i++) { x.e_l.push_back(fp[1 + i]); x.e_r.push_back(fp[34 + i]); }
     x.have_edges = true;
