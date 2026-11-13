@@ -100,19 +100,46 @@ def model_fcw_from(model, brake_pressed):
   return fp[69] == 1.0 and not brake_pressed
 
 
+def _err(msg):
+  sys.stderr.write('%s fcw_shadow: %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg)); sys.stderr.flush()
+
+
+def connect(messaging, names, retry_s=5.0):
+  """openpilot's message queue allows a limited number of readers per message; when one is full, connecting raises
+  MessagingError. Wait and retry instead of dying (param_switch only starts the logger when the toggle changes)."""
+  while True:
+    try:
+      return messaging.SubMaster(names)
+    except Exception as e:
+      _err('cannot subscribe to %s yet (%r) - retrying in %.0f s' % (names, e, retry_s))
+      time.sleep(retry_s)
+
+
 def run():
   import cereal.messaging as messaging
-  sm = messaging.SubMaster(['radarState', 'carState', 'plan', 'model'])
+  sm = connect(messaging, ['radarState', 'carState', 'plan'])
+  model_sock, model_next_try, last_model = None, 0.0, None   # 'model' is the busiest message: optional, retried
   sc = ShadowCompare()
   with open(LOG, 'a') as f:
     f.write(json.dumps({'ev': 'session', 't': round(time.time(), 2)}) + '\n'); f.flush()
     while True:
+      if model_sock is None and time.time() >= model_next_try:
+        try:
+          model_sock = messaging.sub_sock('model', conflate=True)
+        except Exception as e:
+          _err('model FCW unavailable for now (%r) - stock FCW and fcw_v2 still logged; retry in 30 s' % (e,))
+          model_next_try = time.time() + 30.0
+      if model_sock is not None:
+        m = messaging.recv_one_or_none(model_sock)
+        if m is not None:
+          last_model = m.model
       sm.update(1000)
       if not sm.updated['radarState']:
         continue
       l1, cs = sm['radarState'].leadOne, sm['carState']
+      mf = model_fcw_from(last_model, cs.brakePressed) if last_model is not None else None
       events = sc.step(time.time(), cs.vEgo, l1.status, l1.dRel, l1.vLead, l1.yRel,
-                       cs.leftBlinker or cs.rightBlinker, sm['plan'].fcw, model_fcw_from(sm['model'], cs.brakePressed))
+                       cs.leftBlinker or cs.rightBlinker, sm['plan'].fcw, mf)
       for e in events:
         f.write(json.dumps(e) + '\n')
       if events:

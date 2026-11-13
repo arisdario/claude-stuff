@@ -69,6 +69,24 @@ class T(unittest.TestCase):
             {'ev': 'start', 'who': 'stock', 't': 10.0, 'v_ego': 20, 'd_rel': 10, 'v_lead': 0, 'y_rel': 0, 'a_needed_g': .6, 'blinker': False}]
     self.assertIn('BEFORE by 1.00 s', S.report(rows))
 
+  def test_connect_retries_instead_of_crashing(self):
+    calls = {'n': 0}
+    class FakeMessaging:
+      @staticmethod
+      def SubMaster(names):
+        calls['n'] += 1
+        if calls['n'] < 3:
+          raise RuntimeError('MessagingError: too many readers')
+        return 'SM'
+    import io, contextlib
+    orig = S.time.sleep; S.time.sleep = lambda s: None
+    try:
+      with contextlib.redirect_stderr(io.StringIO()):
+        self.assertEqual(S.connect(FakeMessaging, ['radarState']), 'SM')
+    finally:
+      S.time.sleep = orig
+    self.assertEqual(calls['n'], 3)
+
 
 if __name__ == '__main__':
   unittest.main()
