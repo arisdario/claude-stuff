@@ -25,6 +25,7 @@
 #include <unistd.h>
 
 #include <string>
+#include <cmath>
 #include <vector>
 
 #include <capnp/serialize.h>
@@ -112,6 +113,53 @@ struct CarState {
 };
 static const double CAR_HOLD_S = 3.0;                                  // 0x30A comes every 1 s: hold the last value across one lost frame
 
+// BODY-BEGIN read-only, the car's own body/gateway frames on bus 0 (opendbc tesla_can.dbc), never sent:
+// 0x318 GTW_carState doors/frunk/trunk, 0x283 BODY_R1 lamps/light sensor/wipers/park brake/reverse/inside temp,
+// 0x238 UI_driverAssistRoadSign record 3 = map speed limit (m/s), 0x2F8 UI_gpsVehicleSpeed bit 46 = limit units (1 = km/h)
+static const double BODY_HOLD_S = 3.0;     // older than this = unknown, never "closed"/"off"
+static const double LIMIT_HOLD_S = 10.0;   // 0x238 cycles through several record types
+struct Body {
+  int fl = 0, fr = 0, rl = 0, rr = 0, trunk = 0, frunk = 0; double t318 = 0;
+  int lo = 0, hi = 0, night = 0, tunnel = 0, sens_bad = 0, wiper = 0, pbrake = 0, rev = 0, inside = 0xFF; double t283 = 0;
+  double lim_ms = 0, tlim = 0; bool kph = true;
+  void feed(uint32_t addr, const uint8_t *d, size_t n, double now) {
+    if (addr == 0x318 && n >= 8) {
+      fl = d[1] >> 4 & 3; fr = d[1] >> 6 & 3; rl = d[2] >> 6 & 3; rr = d[3] >> 5 & 3; trunk = d[5] >> 6 & 3; frunk = d[6] >> 2 & 3; t318 = now;
+    } else if (addr == 0x283 && n >= 8) {
+      lo = d[4] & 1; hi = d[4] >> 1 & 1; night = d[2] >> 6 & 1; tunnel = d[2] >> 4 & 1; sens_bad = (d[2] >> 3 & 1) | (d[2] >> 5 & 1);
+      wiper = d[3] >> 5 & 1; pbrake = d[3] >> 4 & 1; rev = d[4] >> 6 & 3; inside = d[5]; t283 = now;
+    } else if (addr == 0x238 && n >= 2 && d[0] == 3) {
+      lim_ms = d[1] * 0.25; tlim = now;
+    } else if (addr == 0x2F8 && n >= 6) {
+      kph = (d[5] >> 6 & 1) == 1;
+    }
+  }
+};
+static const char *tri(bool live, int v) { return !live ? "null" : v == 1 ? "true" : v == 0 ? "false" : "null"; }   // 0 closed 1 open 2 init 3 SNA
+static void json_body(std::string &s, const Body &b, double now) {
+  bool a = b.t318 != 0 && now - b.t318 <= BODY_HOLD_S, c = b.t283 != 0 && now - b.t283 <= BODY_HOLD_S;
+  appendf(s, "\"body\":{\"doors\":[%s,%s,%s,%s],\"frunk\":%s,\"trunk\":%s,", tri(a, b.fl), tri(a, b.fr), tri(a, b.rl), tri(a, b.rr), tri(a, b.frunk), tri(a, b.trunk));
+  if (c) appendf(s, "\"lo\":%s,\"hi\":%s,\"wiper\":%s,\"pbrake\":%s,\"rev\":%s,", b.lo ? "true" : "false", b.hi ? "true" : "false",
+                 b.wiper ? "true" : "false", b.pbrake ? "true" : "false", b.rev == 1 ? "true" : "false");
+  else s += "\"lo\":null,\"hi\":null,\"wiper\":null,\"pbrake\":null,\"rev\":null,";
+  if (!c || b.sens_bad) s += "\"light\":null,"; else appendf(s, "\"light\":\"%s\",", b.tunnel ? "tunnel" : b.night ? "night" : "day");
+  if (c && b.inside != 0xFF) appendf(s, "\"inside\":%.1f,", b.inside * 0.25); else s += "\"inside\":null,";
+  if (b.tlim != 0 && now - b.tlim <= LIMIT_HOLD_S && b.lim_ms > 0) {
+    double v = b.lim_ms * (b.kph ? 3.6 : 2.236936);
+    appendf(s, "\"limit\":%d,", (int)(std::floor(v / 5. + 0.5) * 5));          // map limits are multiples of 5 (0.25 m/s steps are noisy)
+  } else s += "\"limit\":null,";
+  appendf(s, "\"unit\":\"%s\"}", b.kph ? "km/h" : "mph");
+}
+static void json_str(std::string &s, const char *t) {                         // alert texts: escape for JSON, cap the length
+  s += '"';
+  for (int i = 0; t && t[i] && i < 80; i++) {
+    unsigned char ch = t[i];
+    if (ch == '"' || ch == '\\') { s += '\\'; s += (char)ch; } else if (ch < 0x20) s += ' '; else s += (char)ch;
+  }
+  s += '"';
+}
+// BODY-END
+
 // OPTIONAL: camerad's own stop-sign/traffic-light detector output (see camerad/cameras/SIGN_DETECT.md).
 // Read-only, read fresh every tick (the file is tiny) - never opens the camera or any process, just
 // one open()/stat() on a file that may not exist. No JSON library: this repo controls both the writer
@@ -187,10 +235,11 @@ static void json_objects(std::string &s, const Mirror &m) {         // DAS_objec
 
 struct Extra {
   double v = 0, ang = 0; bool en = false;
+  double a = 0; bool bl = false, br = false, gas = false, brk = false, act = false; std::string al1, al2; int ast = 0;
   bool have_model = false; std::vector<float> p, l, r, e_l, e_r; float pl = 0, pr = 0; bool have_edges = false;
 };
 
-static std::string snapshot(const Mirror &m, const Extra &x, double now, const CarState &cs = CarState()) {
+static std::string snapshot(const Mirror &m, const Extra &x, double now, const CarState &cs = CarState(), const Body &bd = Body()) {
   std::string s; s.reserve(1400);
   bool stale = m.stale(now);
   appendf(s, "{\"present\":%s,\"emu\":%s,", stale ? "false" : "true", m.emu < 0 ? "null" : (m.emu ? "true" : "false"));
@@ -200,6 +249,10 @@ static std::string snapshot(const Mirror &m, const Extra &x, double now, const C
   uint8_t lf[8]; m.lanesFrame(lf); json_lanes(s, lf); s += ",";
   json_objects(s, m);
   appendf(s, ",\"v\":%.3f,\"ang\":%.3f,\"en\":%s,", x.v, x.ang, x.en ? "true" : "false");
+  appendf(s, "\"a\":%.2f,\"bl\":%s,\"br\":%s,\"gas\":%s,\"brk\":%s,\"act\":%s,\"ast\":%d,\"al1\":", x.a, x.bl ? "true" : "false", x.br ? "true" : "false",
+          x.gas ? "true" : "false", x.brk ? "true" : "false", x.act ? "true" : "false", x.ast);
+  json_str(s, x.al1.c_str()); s += ",\"al2\":"; json_str(s, x.al2.c_str()); s += ",";
+  json_body(s, bd, now); s += ",";
   s += "\"car\":{";
   if (cs.t30a != 0 && now - cs.t30a <= CAR_HOLD_S) appendf(s, "\"hb\":%d,\"fl\":%d,", cs.hb, cs.fl); else s += "\"hb\":null,\"fl\":null,";
   if (cs.out_ok && cs.t283 != 0 && now - cs.t283 <= 5.0) appendf(s, "\"out\":%.1f},", cs.out); else s += "\"out\":null},";
@@ -273,7 +326,7 @@ function drawDiag(){g.fillStyle='#0b0d10';g.fillRect(0,0,W,H);if(!S||!S.lanes){g
  var L=S.lanes,R=Math.min(110,L.range*SC),pw=[],i;
  // grid
  g.strokeStyle='#1b2128';g.lineWidth=1;for(i=10;i<=100;i+=10){var a=P(i,-6),b=P(i,6);g.beginPath();g.moveTo(a[0],a[1]);g.lineTo(b[0],b[1]);g.stroke()}
- var M=S.model; // the model's own, faint
+ var M=SMD; // the model's own, faint (smoothed)
  if(M){var xs=[];for(i=0;i<25;i++)xs.push(i*4);
   if(M.l)line(M.l.map(function(y,k){return P(xs[k],y)}),'rgba(80,200,230,.35)',2);
   if(M.r)line(M.r.map(function(y,k){return P(xs[k],y)}),'rgba(80,200,230,.35)',2);
@@ -284,16 +337,17 @@ function drawDiag(){g.fillStyle='#0b0d10';g.fillRect(0,0,W,H);if(!S||!S.lanes){g
  line(cc,'rgba(255,255,255,.18)',1,[6,8]);
  line(lf,L.left?'#ffd23f':'#555e68',L.left?5:2,L.left?null:[10,10]);line(rt,L.right?'#ffd23f':'#555e68',L.right?5:2,L.right?null:[10,10]);
  // lead / side vehicles
- S.obj.slice().sort(function(a,b){return b.dx-a.dx}).forEach(function(o){var p=P(o.dx,o.dy),w,h;
+ SO.slice().sort(function(a,b){return b.dx-a.dx}).forEach(function(o){var p=P(o.dx,o.dy),w,h;g.globalAlpha=o.al;
   if(tdv){h=Math.max(26,4.5*H*0.8/110*1.6);w=Math.max(12,h/2.2);carTop(p[0],p[1],w,h,o.relevant)}   // an icon with car proportions: the top view stretches the sideways scale 4x, so true scale would look squashed
   else{w=Math.max(12,1.8*H*0.9/(o.dx+5));h=w*0.8;carBack(p[0],p[1],w,o.relevant)}
-  g.fillStyle='#e8edf2';g.textAlign='center';g.fillText(o.slot+' '+Math.round(o.dx)+' m',p[0],p[1]-h-6);g.textAlign='left'});
+  g.fillStyle='#e8edf2';g.textAlign='center';g.fillText(o.slot+' '+Math.round(o.dx)+' m',p[0],p[1]-h-6);g.textAlign='left';g.globalAlpha=1});
  // header
  var st=S.status,y0=22;g.font='15px system-ui';g.fillStyle='#e8edf2';
  g.fillText('openpilot '+(S.en?'ENGAGED':'off')+'   speed '+Math.round((S.v||0)*3.6)+' km/h   wheel '+(S.ang||0).toFixed(1)+' deg',16,y0);
  g.fillStyle=S.present?'#7bd88f':'#e5383b';g.fillText('panda data: '+(S.present?'live':('STALE ('+S.age+' s) - cluster is shown defaults')),16,y0+20);
  g.fillStyle='#e8edf2';g.fillText('cluster status: '+st.text+'   emulation: '+(S.emu===null?'?':S.emu?'on':'OFF (panda sends nothing)'),16,y0+40);
  g.fillText('lanes: width '+L.width.toFixed(2)+' m  left '+(L.left?'drawn':'not drawn')+'  right '+(L.right?'drawn':'not drawn')+'  range '+L.range+' (x'+SC+')'+(S.default?'   [DEFAULT frame - no lane data from openpilot]':''),16,y0+60);
+ var B=S.body||{};g.fillText('accel '+(S.a||0).toFixed(2)+' m/s2   blinker '+(S.bl?'L ':'')+(S.br?'R':'')+'   doors '+JSON.stringify(B.doors||null)+'   limit '+(B.limit||'-')+' '+(B.unit||'')+'   light '+(B.light||'?')+'   wipers '+(B.wiper?'on':'off')+(S.al1?'   alert: '+S.al1:''),16,y0+80);
  g.fillStyle='#9aa4af';g.font='12px system-ui';g.fillText('yellow = lane lines sent to the cluster   cyan = model lanes   green = model path   red = road edges   tap = next view (drive / top / diagnostic)',16,H-14)}
 function grad(y0,y1,st){var gr=g.createLinearGradient(0,y0,0,y1);for(var i=0;i<st.length;i++)gr.addColorStop(st[i][0],st[i][1]);return gr}
 function ribbon(a,b,fill){if(a.length<2)return;g.beginPath();a.forEach(function(p,i){i?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1])});for(var i=b.length-1;i>=0;i--)g.lineTo(b[i][0],b[i][1]);g.closePath();g.fillStyle=fill;g.fill()}
@@ -307,7 +361,7 @@ function drawDrive(){
  var eng=!!(S&&S.en),BLUE='rgba(64,156,255,0.95)';
  g.save();g.translate(W/2,H*0.72);g.scale(0.55,1);var rg=g.createRadialGradient(0,0,0,0,0,H*0.62);rg.addColorStop(0,eng?'rgba(40,120,210,.16)':'rgba(110,135,175,.10)');rg.addColorStop(1,'rgba(40,120,210,0)');g.fillStyle=rg;g.beginPath();g.arc(0,0,H*0.62,0,6.2832);g.fill();g.restore();
  if(!S||!S.lanes){g.fillStyle='#7d8792';g.font='16px system-ui';g.textAlign='center';g.fillText('waiting for data...',W/2,H/2);g.textAlign='left';return}
- var M=S.model,i,xs=[];for(i=0;i<25;i++)xs.push(i*4);
+ var M=SMD,i,xs=[];for(i=0;i<25;i++)xs.push(i*4);
  var yb=P(0,0)[1],yh=P(110,0)[1];
  if(M&&M.l&&M.r){
   var lw=Math.max(2.6,Math.min(4.4,(M.l[2]-M.r[2])||3.4));
@@ -323,7 +377,7 @@ function drawDrive(){
   g.restore();
   if(M.e){g.save();g.strokeStyle=grad(yb,yh,[[0,'rgba(170,180,195,.30)'],[1,'rgba(170,180,195,0)']]);g.lineWidth=2;[M.e.l,M.e.r].forEach(function(a){g.beginPath();a.forEach(function(y,k){var p=P(M.e.x[k],y);k?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1])});g.stroke()});g.restore()}
  }
- S.obj.slice().sort(function(a,b){return b.dx-a.dx}).forEach(function(o){var p=P(o.dx,o.dy),w=Math.max(12,1.8*H*0.9/(o.dx+5));carBack(p[0],p[1],w,o.relevant);pill(p[0],p[1]-w*0.8-14,Math.round(o.dx)+' m')});
+ SO.slice().sort(function(a,b){return b.dx-a.dx}).forEach(function(o){var p=P(o.dx,o.dy),w=Math.max(12,1.8*H*0.9/(o.dx+5));g.globalAlpha=o.al;carBack(p[0],p[1],w,o.relevant);pill(p[0],p[1]-w*0.8-14,Math.round(o.dx)+' m');g.globalAlpha=1});
  var ew=Math.min(H*0.27,W*0.2),ey=H*0.92;
  if(eng){g.save();g.translate(W/2,ey);g.scale(1,0.14);var eg=g.createRadialGradient(0,0,0,0,0,ew*0.95);eg.addColorStop(0,'rgba(64,156,255,.55)');eg.addColorStop(1,'rgba(64,156,255,0)');g.fillStyle=eg;g.beginPath();g.arc(0,0,ew*0.95,0,6.2832);g.fill();g.restore()}
  carBack(W/2,ey,ew,false);
@@ -332,7 +386,7 @@ function drawDrive(){
  g.fillStyle='rgba(8,14,20,.72)';rr(px,py,pw,ph,18);g.fill();g.strokeStyle='rgba(255,255,255,.06)';g.lineWidth=1;g.stroke();
  var ic=eng?'rgba(64,156,255,1)':'rgba(120,130,142,.9)';
  cruiseIcon(px+pw*0.14,py+ph*0.46,15,ic);wheelIcon(px+pw*0.86,py+ph*0.46,16,ic);
- var cr=S.car||{};if(cr.hb||cr.fl)beamIcon(px+pw*0.14,py+ph*0.46+34,9,cr.hb?'rgba(64,156,255,1)':'rgba(235,240,248,.85)');
+ var cr=S.car||{},bdy=S.body||{};if(cr.hb||cr.fl||bdy.lo)beamIcon(px+pw*0.14,py+ph*0.46+34,9,cr.hb?'rgba(64,156,255,1)':bdy.lo&&!cr.fl?'rgba(110,220,130,1)':'rgba(235,240,248,.85)');   // blue = high, green = low, white = flash
  if(cr.out!==null&&cr.out!==undefined){g.fillStyle='#aab4c2';g.font='500 14px system-ui';g.textAlign='center';g.fillText(cr.out.toFixed(1)+' \u00b0C',px+pw*0.86,py+ph*0.46+38);g.textAlign='left'}
  var sg=S.sign||{};if(sg.stop||sg.light){g.font='600 12px system-ui';var parts=[];
   if(sg.stop)parts.push({t:'STOP '+(sg.stop_dist!=null?Math.round(sg.stop_dist)+'m':''),bg:'rgba(180,30,30,.85)',col:'#fff'});
@@ -341,12 +395,47 @@ function drawDrive(){
   var cx0=W/2-tw/2,cy0=py+ph+8;
   for(var k=0;k<parts.length;k++){var w=chip(cx0,cy0,parts[k].t,parts[k].col,parts[k].bg);cx0+=w+6}
  }
+ extras(px,py,pw,ph);
  g.fillStyle='#f3f6fa';g.font='300 58px system-ui';g.textAlign='center';g.fillText(Math.round((S.v||0)*3.6),W/2,py+62);g.fillStyle='#8590a0';g.font='500 13px system-ui';g.fillText('km/h',W/2,py+84);
  g.fillStyle=S.present?'rgba(130,150,170,.55)':'rgba(255,120,120,.9)';g.font='11px system-ui';
  g.fillText((S.present?'panda live':'PANDA STALE')+'  ·  cluster '+S.status.text+'  ·  emulation '+(S.emu===null?'?':S.emu?'on':'off')+(S.default?'  ·  no lane data':'')+'  ·  tap: next view',W/2,H-12);g.textAlign='left'}
-function draw(){if(mode==0)drawDrive();else drawDiag()}
-function conn(){var es=new EventSource('/stream');es.onmessage=function(e){S=JSON.parse(e.data);draw()};es.onerror=function(){es.close();setTimeout(conn,1500)}}
-rs();conn();</script></body></html>)LIGHTDASHPAGE";
+var SM={},SMM={},ST=0,SO=[],SMD=null;
+function ease(dt,tau){return 1-Math.exp(-dt/tau)}
+function smooth(){ // the cars and the model's lines glide to each new 10 Hz value instead of jumping to it
+ var now=Date.now()/1000,dt=ST?Math.min(0.25,now-ST):0.1;ST=now;SO=[];if(!S)return;var k=ease(dt,0.35),seen={};
+ (S.obj||[]).forEach(function(o){var id=o.slot+':'+o.id,q=SM[id];
+  if(!q||Math.abs(q.dx-o.dx)>20||Math.abs(q.dy-o.dy)>3)q=SM[id]={dx:o.dx,dy:o.dy,al:q?q.al:0};   // a new or jumping track starts where it is
+  q.dx+=(o.dx-q.dx)*k;q.dy+=(o.dy-q.dy)*k;q.al=Math.min(1,q.al+dt*4);seen[id]=1;
+  SO.push({dx:q.dx,dy:q.dy,slot:o.slot,relevant:o.relevant,al:q.al})});
+ for(var id in SM)if(!seen[id])delete SM[id];
+ var M=S.model;if(!M){SMD=null;return}
+ ['l','r','p'].forEach(function(n){var a=M[n],b=SMM[n];if(!a){SMM[n]=null;return}if(!b||b.length!=a.length){SMM[n]=a.slice();return}for(var i=0;i<a.length;i++)b[i]+=(a[i]-b[i])*ease(dt,0.2)});
+ SMD={l:SMM.l,r:SMM.r,p:SMM.p,e:M.e,pl:M.pl,pr:M.pr}}
+function limitSign(cx,cy,r,v){g.fillStyle='#fff';g.beginPath();g.arc(cx,cy,r,0,6.2832);g.fill();g.strokeStyle='#d0202a';g.lineWidth=r*0.18;g.beginPath();g.arc(cx,cy,r*0.86,0,6.2832);g.stroke();g.fillStyle='#111';g.font='700 '+Math.round(r*0.85)+'px system-ui';g.textAlign='center';g.fillText(v,cx,cy+r*0.3);g.textAlign='left'}
+function arrow(cx,cy,s,dir,on){g.fillStyle=on?'#33d17a':'rgba(120,130,142,.22)';g.beginPath();g.moveTo(cx+dir*s,cy);g.lineTo(cx,cy-s*0.8);g.lineTo(cx,cy-s*0.35);g.lineTo(cx-dir*s*0.9,cy-s*0.35);g.lineTo(cx-dir*s*0.9,cy+s*0.35);g.lineTo(cx,cy+s*0.35);g.lineTo(cx,cy+s*0.8);g.closePath();g.fill()}
+function extras(px,py,pw,ph){var B=S.body||{},blink=(Date.now()%800)<450,i;
+ arrow(px-24,py+ph*0.46,14,-1,S.bl&&blink);arrow(px+pw+24,py+ph*0.46,14,1,S.br&&blink);
+ if(B.limit){if(px>=100)limitSign(px-72,py+ph*0.46,24,B.limit);else if(px>=56)limitSign(Math.max(23,px-62),py+ph*0.46,20,B.limit);else limitSign(W-26,py+ph+16,20,B.limit)}
+ var a=Math.max(-3,Math.min(3,S.a||0)),bw=pw*0.36,bx=px+pw/2,by=py+ph-9;   // acceleration: right/green = speeding up, left/red = slowing, full = 3 m/s2
+ g.fillStyle='rgba(255,255,255,.08)';g.fillRect(bx-bw/2,by,bw,4);g.fillStyle=a>=0?'#33d17a':'#ff5a5f';g.fillRect(a>=0?bx:bx+a/3*bw/2,by,Math.abs(a)/3*bw/2,4);
+ var ch=[],D=B.doors||[],nm=['FL','FR','RL','RR'],warn='rgba(205,120,20,.92)';
+ ch.push(S.en?{t:'openpilot ON',bg:'rgba(40,110,210,.92)'}:{t:'openpilot off',bg:'rgba(70,78,90,.85)'});
+ for(i=0;i<4;i++)if(D[i])ch.push({t:'door '+nm[i]+' open',bg:warn});
+ if(B.frunk)ch.push({t:'frunk open',bg:warn});if(B.trunk)ch.push({t:'trunk open',bg:warn});
+ if(B.pbrake)ch.push({t:'park brake',bg:'rgba(180,40,40,.92)'});if(B.rev)ch.push({t:'R',bg:'rgba(90,90,90,.92)'});
+ if(S.brk)ch.push({t:'brake',bg:'rgba(180,40,40,.92)'});if(B.wiper)ch.push({t:'wipers',bg:'rgba(60,120,170,.92)'});
+ if(B.light&&B.light!='day')ch.push({t:B.light,bg:'rgba(60,70,110,.92)'});
+ if(B.inside!=null)ch.push({t:'in '+B.inside.toFixed(1)+' \u00b0C',bg:'rgba(50,58,70,.92)'});
+ g.font='600 12px system-ui';var rows=[[]],rw=[0],maxw=W-16;   // chips wrap onto more rows on a narrow screen
+ ch.forEach(function(c){var w=g.measureText(c.t).width+20,r=rows.length-1;if(rows[r].length&&rw[r]+6+w>maxw){rows.push([]);rw.push(0);r++}rw[r]+=(rows[r].length?6:0)+w;rows[r].push(c)});
+ rows.forEach(function(row,k){var cx0=W/2-rw[k]/2,cy0=py+ph+40+k*30;row.forEach(function(c){cx0+=chip(cx0,cy0,c.t,'#fff',c.bg)+6})});
+ if(S.al1){var col=S.ast==2?'rgba(200,30,40,.93)':S.ast==1?'rgba(210,140,20,.93)':'rgba(30,40,55,.93)',bw2=Math.min(W*0.8,560),bh=S.al2?62:42,bx2=W/2-bw2/2,by2=H-bh-34;
+  g.fillStyle=col;rr(bx2,by2,bw2,bh,12);g.fill();g.fillStyle='#fff';g.textAlign='center';g.font='700 18px system-ui';g.fillText(S.al1,W/2,by2+26);
+  if(S.al2){g.font='500 14px system-ui';g.fillText(S.al2,W/2,by2+48)}g.textAlign='left'}}
+function draw(){smooth();if(mode==0)drawDrive();else drawDiag()}
+function conn(){var es=new EventSource('/stream');es.onmessage=function(e){S=JSON.parse(e.data)};es.onerror=function(){es.close();setTimeout(conn,1500)}}
+var LF=0;function loop(t){if(t-LF>=33){LF=t;draw()}requestAnimationFrame(loop)}   // ~30 fps: data arrives at 10 Hz, the smoothing fills the frames in between
+rs();conn();requestAnimationFrame(loop);</script></body></html>)LIGHTDASHPAGE";
 
 struct Client { int fd; bool sse; };
 
@@ -442,7 +531,7 @@ int main(int argc, char **argv) {
   if (!sc || !scan || !sm || !scs || !sct) { fprintf(stderr, "lightdash: cannot subscribe to openpilot messages (is openpilot running?)\n"); return 1; }
   printf("lightdash (C++) on http://%s:%d/  (sendcan + can + model; never opens the panda, never sends)\n", bind_addr, port); fflush(stdout);
 
-  Mirror mirror; CarState car; Extra extra; std::vector<Client> clients; std::vector<Conn> pend; std::string last = "{}"; double want_until = 0, next_tick = 0;
+  Mirror mirror; CarState car; Body body; Extra extra; std::vector<Client> clients; std::vector<Conn> pend; std::string last = "{}"; double want_until = 0, next_tick = 0;
   kj::Array<capnp::word> buf;
   while (!g_quit) {
     double now = now_s();
@@ -520,6 +609,7 @@ int main(int argc, char **argv) {
         if (ev.which() == cereal::Event::CAN) for (auto c : ev.getCan()) {
           uint32_t ad = c.getAddress();
           if ((ad == 0x30A || ad == 0x283) && c.getSrc() == 0) { auto d = c.getDat(); car.feed(ad, d.begin(), d.size(), now); }
+          if ((ad == 0x318 || ad == 0x283 || ad == 0x238 || ad == 0x2F8) && c.getSrc() == 0) { auto d = c.getDat(); body.feed(ad, d.begin(), d.size(), now); }
         }
         delete rd;
       }
@@ -528,13 +618,15 @@ int main(int argc, char **argv) {
     { double ms = (now_s() - t_tick0) * 1000; g_st.drain_ms_sum += ms; if (ms > g_st.drain_ms_max) g_st.drain_ms_max = ms; g_st.drain_msgs_sum += nd; if (nd > g_st.drain_msgs_max) g_st.drain_msgs_max = nd; g_st.ticks++; }
     if (Message *msg = scs->receive(true)) {
       capnp::FlatArrayMessageReader *rd; if (read_event(msg, buf, rd)) { auto ev = rd->getRoot<cereal::Event>();
-        if (ev.which() == cereal::Event::CAR_STATE) { extra.v = ev.getCarState().getVEgo(); extra.ang = ev.getCarState().getSteeringAngle(); }
+        if (ev.which() == cereal::Event::CAR_STATE) { auto cs = ev.getCarState(); extra.v = cs.getVEgo(); extra.ang = cs.getSteeringAngle();
+          extra.a = cs.getAEgo(); extra.bl = cs.getLeftBlinker(); extra.br = cs.getRightBlinker(); extra.gas = cs.getGasPressed(); extra.brk = cs.getBrakePressed(); }
         delete rd; }
       delete msg;
     }
     if (Message *msg = sct->receive(true)) {
       capnp::FlatArrayMessageReader *rd; if (read_event(msg, buf, rd)) { auto ev = rd->getRoot<cereal::Event>();
-        if (ev.which() == cereal::Event::CONTROLS_STATE) { extra.en = ev.getControlsState().getEnabled(); }
+        if (ev.which() == cereal::Event::CONTROLS_STATE) { auto ct = ev.getControlsState(); extra.en = ct.getEnabled(); extra.act = ct.getActive();
+          extra.al1 = std::string(ct.getAlertText1().cStr()); extra.al2 = std::string(ct.getAlertText2().cStr()); extra.ast = (int)ct.getAlertStatus(); }
         delete rd; }
       delete msg;
     }
@@ -544,7 +636,7 @@ int main(int argc, char **argv) {
         delete rd; }
       delete msg;
     }
-    last = snapshot(mirror, extra, now, car);
+    last = snapshot(mirror, extra, now, car, body);
     mirror.laneIdx = (mirror.laneIdx + 1) % 16;
     std::string frame = "data: " + last + "\n\n";
     for (size_t i = 0; i < clients.size();) {

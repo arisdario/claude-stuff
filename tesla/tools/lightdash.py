@@ -28,6 +28,7 @@ from socketserver import ThreadingMixIn
 IC_LANE_SCALE = 2.0
 WANT = (0x557, 0x559, 0x659, 0x554)
 CAR_HOLD_S = 3.0                                       # 0x30A comes every 1 s: hold the last value across one lost frame
+BODY_ADDRS = (0x318, 0x283, 0x238, 0x2F8)                     # read-only body frames, see class Body
 
 
 class CarState(object):
@@ -46,6 +47,48 @@ class CarState(object):
     live = self.t30a and now - self.t30a <= CAR_HOLD_S
     return {'hb': self.hb if live else None, 'fl': self.fl if live else None,
             'out': round(self.out, 1) if (self.out is not None and self.t283 and now - self.t283 <= 5.) else None}
+
+BODY_HOLD_S = 3.0             # 0x318 / 0x283 come several times a second: older than this = unknown, never "closed"/"off"
+LIMIT_HOLD_S = 10.0           # 0x238 cycles through several record types: the speed-limit record is not in every frame
+
+
+class Body(object):
+  """BODY-BEGIN read-only, the car's own body/gateway frames on bus 0 (opendbc tesla_can.dbc), never sent:
+  0x318 GTW_carState doors/frunk/trunk, 0x283 BODY_R1 lamps/light sensor/wipers/park brake/reverse/inside temp,
+  0x238 UI_driverAssistRoadSign record 3 = map speed limit (m/s), 0x2F8 UI_gpsVehicleSpeed bit 46 = limit units (1 = km/h)"""
+  def __init__(self):
+    self.t318 = self.t283 = self.tlim = 0.; self.d318 = {}; self.d283 = {}; self.lim_ms = 0.; self.kph = True
+
+  def feed(self, addr, d, now):
+    if addr == 0x318 and len(d) >= 8:
+      self.d318 = {'fl': d[1] >> 4 & 3, 'fr': d[1] >> 6 & 3, 'rl': d[2] >> 6 & 3, 'rr': d[3] >> 5 & 3, 'trunk': d[5] >> 6 & 3, 'frunk': d[6] >> 2 & 3}
+      self.t318 = now
+    elif addr == 0x283 and len(d) >= 8:
+      self.d283 = {'lo': d[4] & 1, 'hi': d[4] >> 1 & 1, 'night': d[2] >> 6 & 1, 'tunnel': d[2] >> 4 & 1, 'sens_bad': (d[2] >> 3 & 1) | (d[2] >> 5 & 1),
+                   'wiper': d[3] >> 5 & 1, 'pbrake': d[3] >> 4 & 1, 'rev': d[4] >> 6 & 3, 'inside': d[5]}
+      self.t283 = now
+    elif addr == 0x238 and len(d) >= 2 and d[0] == 3:
+      self.lim_ms = d[1] * 0.25; self.tlim = now
+    elif addr == 0x2F8 and len(d) >= 6:
+      self.kph = (d[5] >> 6 & 1) == 1
+
+  def snapshot(self, now):
+    a = self.t318 and now - self.t318 <= BODY_HOLD_S
+    b = self.t283 and now - self.t283 <= BODY_HOLD_S
+    st = lambda v: (True if v == 1 else False if v == 0 else None) if a else None     # 0 closed 1 open 2 init 3 SNA
+    o = {'doors': [st(self.d318.get(k)) for k in ('fl', 'fr', 'rl', 'rr')], 'frunk': st(self.d318.get('frunk')), 'trunk': st(self.d318.get('trunk'))}
+    for k in ('lo', 'hi', 'wiper', 'pbrake'):
+      o[k] = bool(self.d283[k]) if b else None
+    o['rev'] = (self.d283['rev'] == 1) if b else None
+    o['light'] = None if not b or self.d283['sens_bad'] else ('tunnel' if self.d283['tunnel'] else 'night' if self.d283['night'] else 'day')
+    o['inside'] = round(self.d283['inside'] * 0.25, 1) if b and self.d283['inside'] != 0xFF else None
+    lim = None
+    if self.tlim and now - self.tlim <= LIMIT_HOLD_S and self.lim_ms > 0:
+      lim = int(round(self.lim_ms * (3.6 if self.kph else 2.236936) / 5.) * 5)            # map limits are multiples of 5 (0.25 m/s steps are noisy)
+    o['limit'] = lim; o['unit'] = 'km/h' if self.kph else 'mph'
+    return o
+  # BODY-END
+
 
 SIGN_DETECT_FILE = '/data/sign_detect.json'
 SIGN_HOLD_S = 2.0             # the detector writes at ~2.5 Hz when enabled
@@ -207,7 +250,8 @@ def poll_cereal(hz=10.):
   sc = messaging.sub_sock('sendcan')
   subs = {n: messaging.sub_sock(n, conflate=True) for n in ('model', 'carState', 'controlsState')}
   scan = messaging.sub_sock('can')
-  mirror = PandaMirror(); car = CarState(); extra = {'v': 0., 'ang': 0., 'en': False}; model = None
+  mirror = PandaMirror(); car = CarState(); body = Body(); model = None
+  extra = {'v': 0., 'ang': 0., 'en': False, 'a': 0., 'bl': False, 'br': False, 'gas': False, 'brk': False, 'act': False, 'al1': '', 'al2': '', 'ast': 0}
   while True:
     if not Frame.clients:
       time.sleep(0.3); continue
@@ -220,19 +264,24 @@ def poll_cereal(hz=10.):
       for c in ev.can:
         if c.src == 0 and c.address in (0x30A, 0x283):
           car.feed(c.address, bytes(c.dat), now)
+        if c.src == 0 and c.address in BODY_ADDRS:
+          body.feed(c.address, bytes(c.dat), now)
     m = messaging.recv_one_or_none(subs['carState'])
     if m is not None:
       cs = m.carState; extra['v'] = float(cs.vEgo)
       extra['ang'] = float(getattr(cs, 'steeringAngle', getattr(cs, 'steeringAngleDeg', 0.)))
+      extra.update(a=round(float(cs.aEgo), 2), bl=bool(cs.leftBlinker), br=bool(cs.rightBlinker), gas=bool(cs.gasPressed), brk=bool(cs.brakePressed))
     m = messaging.recv_one_or_none(subs['controlsState'])
     if m is not None:
-      extra['en'] = bool(m.controlsState.enabled)
+      ct = m.controlsState
+      extra.update(en=bool(ct.enabled), act=bool(ct.active), al1=str(ct.alertText1)[:80], al2=str(ct.alertText2)[:80],
+                   ast={'normal': 0, 'userPrompt': 1, 'critical': 2}.get(str(ct.alertStatus), 0))
     m = messaging.recv_one_or_none(subs['model'])
     if m is not None:
       try: model = build_model(m.model)
       except Exception: model = None
     snap = mirror.snapshot(now); mirror.lane_idx = (mirror.lane_idx + 1) % 16
-    snap.update(extra); snap['car'] = car.snapshot(now); snap['model'] = model; snap['sign'] = read_sign_state(); snap['t'] = round(time.time(), 2)
+    snap.update(extra); snap['car'] = car.snapshot(now); snap['body'] = body.snapshot(now); snap['model'] = model; snap['sign'] = read_sign_state(); snap['t'] = round(time.time(), 2)
     publish(snap)
     time.sleep(1. / hz)
 
@@ -270,7 +319,11 @@ def poll_demo(hz=10.):
     mirror.feed(0x554, bytes([0x20, 0, 0]), now)
     snap = mirror.snapshot(now); mirror.lane_idx = (mirror.lane_idx + 1) % 16
     xs = list(range(0, 100, 4))
-    snap.update({'v': 24 + 4 * math.sin(t * 0.2), 'ang': 300 * k, 'en': t % 30 > 4, 'car': {'hb': int(t % 12 > 6), 'fl': 0, 'out': 9.5}, 't': round(time.time(), 2), 'model': {
+    snap.update({'v': 24 + 4 * math.sin(t * 0.2), 'ang': 300 * k, 'en': t % 30 > 4, 'act': t % 30 > 4, 'a': round(1.5 * math.sin(t * 0.5), 2),
+                 'bl': t % 20 < 3, 'br': False, 'gas': False, 'brk': False, 'al1': 'TAKE CONTROL' if t % 40 > 37 else '', 'al2': '', 'ast': 2,
+                 'body': {'doors': [t % 25 < 2, False, False, False], 'frunk': False, 'trunk': False, 'lo': True, 'hi': t % 12 > 6, 'wiper': t % 50 > 40,
+                          'pbrake': False, 'rev': False, 'light': 'night', 'inside': 21.5, 'limit': 50, 'unit': 'km/h'},
+                 'car': {'hb': int(t % 12 > 6), 'fl': 0, 'out': 9.5}, 't': round(time.time(), 2), 'model': {
         'p': [round(c0 + k * 3 * x ** 3 / 1e0 * 0 + 0.5 * k * 2 * x * x * 0.1, 2) for x in xs], 'pl': 0.9, 'pr': 0.8,
         'l': [round(c0 + 1.85 + 0.5 * k * 2 * x * x * 0.1, 2) for x in xs], 'r': [round(c0 - 1.85 + 0.5 * k * 2 * x * x * 0.1, 2) for x in xs]}})
     publish(snap)
@@ -316,7 +369,7 @@ function drawDiag(){g.fillStyle='#0b0d10';g.fillRect(0,0,W,H);if(!S||!S.lanes){g
  var L=S.lanes,R=Math.min(110,L.range*SC),pw=[],i;
  // grid
  g.strokeStyle='#1b2128';g.lineWidth=1;for(i=10;i<=100;i+=10){var a=P(i,-6),b=P(i,6);g.beginPath();g.moveTo(a[0],a[1]);g.lineTo(b[0],b[1]);g.stroke()}
- var M=S.model; // the model's own, faint
+ var M=SMD; // the model's own, faint (smoothed)
  if(M){var xs=[];for(i=0;i<25;i++)xs.push(i*4);
   if(M.l)line(M.l.map(function(y,k){return P(xs[k],y)}),'rgba(80,200,230,.35)',2);
   if(M.r)line(M.r.map(function(y,k){return P(xs[k],y)}),'rgba(80,200,230,.35)',2);
@@ -327,16 +380,17 @@ function drawDiag(){g.fillStyle='#0b0d10';g.fillRect(0,0,W,H);if(!S||!S.lanes){g
  line(cc,'rgba(255,255,255,.18)',1,[6,8]);
  line(lf,L.left?'#ffd23f':'#555e68',L.left?5:2,L.left?null:[10,10]);line(rt,L.right?'#ffd23f':'#555e68',L.right?5:2,L.right?null:[10,10]);
  // lead / side vehicles
- S.obj.slice().sort(function(a,b){return b.dx-a.dx}).forEach(function(o){var p=P(o.dx,o.dy),w,h;
+ SO.slice().sort(function(a,b){return b.dx-a.dx}).forEach(function(o){var p=P(o.dx,o.dy),w,h;g.globalAlpha=o.al;
   if(tdv){h=Math.max(26,4.5*H*0.8/110*1.6);w=Math.max(12,h/2.2);carTop(p[0],p[1],w,h,o.relevant)}   // an icon with car proportions: the top view stretches the sideways scale 4x, so true scale would look squashed
   else{w=Math.max(12,1.8*H*0.9/(o.dx+5));h=w*0.8;carBack(p[0],p[1],w,o.relevant)}
-  g.fillStyle='#e8edf2';g.textAlign='center';g.fillText(o.slot+' '+Math.round(o.dx)+' m',p[0],p[1]-h-6);g.textAlign='left'});
+  g.fillStyle='#e8edf2';g.textAlign='center';g.fillText(o.slot+' '+Math.round(o.dx)+' m',p[0],p[1]-h-6);g.textAlign='left';g.globalAlpha=1});
  // header
  var st=S.status,y0=22;g.font='15px system-ui';g.fillStyle='#e8edf2';
  g.fillText('openpilot '+(S.en?'ENGAGED':'off')+'   speed '+Math.round((S.v||0)*3.6)+' km/h   wheel '+(S.ang||0).toFixed(1)+' deg',16,y0);
  g.fillStyle=S.present?'#7bd88f':'#e5383b';g.fillText('panda data: '+(S.present?'live':('STALE ('+S.age+' s) - cluster is shown defaults')),16,y0+20);
  g.fillStyle='#e8edf2';g.fillText('cluster status: '+st.text+'   emulation: '+(S.emu===null?'?':S.emu?'on':'OFF (panda sends nothing)'),16,y0+40);
  g.fillText('lanes: width '+L.width.toFixed(2)+' m  left '+(L.left?'drawn':'not drawn')+'  right '+(L.right?'drawn':'not drawn')+'  range '+L.range+' (x'+SC+')'+(S.default?'   [DEFAULT frame - no lane data from openpilot]':''),16,y0+60);
+ var B=S.body||{};g.fillText('accel '+(S.a||0).toFixed(2)+' m/s2   blinker '+(S.bl?'L ':'')+(S.br?'R':'')+'   doors '+JSON.stringify(B.doors||null)+'   limit '+(B.limit||'-')+' '+(B.unit||'')+'   light '+(B.light||'?')+'   wipers '+(B.wiper?'on':'off')+(S.al1?'   alert: '+S.al1:''),16,y0+80);
  g.fillStyle='#9aa4af';g.font='12px system-ui';g.fillText('yellow = lane lines sent to the cluster   cyan = model lanes   green = model path   red = road edges   tap = next view (drive / top / diagnostic)',16,H-14)}
 function grad(y0,y1,st){var gr=g.createLinearGradient(0,y0,0,y1);for(var i=0;i<st.length;i++)gr.addColorStop(st[i][0],st[i][1]);return gr}
 function ribbon(a,b,fill){if(a.length<2)return;g.beginPath();a.forEach(function(p,i){i?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1])});for(var i=b.length-1;i>=0;i--)g.lineTo(b[i][0],b[i][1]);g.closePath();g.fillStyle=fill;g.fill()}
@@ -350,7 +404,7 @@ function drawDrive(){
  var eng=!!(S&&S.en),BLUE='rgba(64,156,255,0.95)';
  g.save();g.translate(W/2,H*0.72);g.scale(0.55,1);var rg=g.createRadialGradient(0,0,0,0,0,H*0.62);rg.addColorStop(0,eng?'rgba(40,120,210,.16)':'rgba(110,135,175,.10)');rg.addColorStop(1,'rgba(40,120,210,0)');g.fillStyle=rg;g.beginPath();g.arc(0,0,H*0.62,0,6.2832);g.fill();g.restore();
  if(!S||!S.lanes){g.fillStyle='#7d8792';g.font='16px system-ui';g.textAlign='center';g.fillText('waiting for data...',W/2,H/2);g.textAlign='left';return}
- var M=S.model,i,xs=[];for(i=0;i<25;i++)xs.push(i*4);
+ var M=SMD,i,xs=[];for(i=0;i<25;i++)xs.push(i*4);
  var yb=P(0,0)[1],yh=P(110,0)[1];
  if(M&&M.l&&M.r){
   var lw=Math.max(2.6,Math.min(4.4,(M.l[2]-M.r[2])||3.4));
@@ -366,7 +420,7 @@ function drawDrive(){
   g.restore();
   if(M.e){g.save();g.strokeStyle=grad(yb,yh,[[0,'rgba(170,180,195,.30)'],[1,'rgba(170,180,195,0)']]);g.lineWidth=2;[M.e.l,M.e.r].forEach(function(a){g.beginPath();a.forEach(function(y,k){var p=P(M.e.x[k],y);k?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1])});g.stroke()});g.restore()}
  }
- S.obj.slice().sort(function(a,b){return b.dx-a.dx}).forEach(function(o){var p=P(o.dx,o.dy),w=Math.max(12,1.8*H*0.9/(o.dx+5));carBack(p[0],p[1],w,o.relevant);pill(p[0],p[1]-w*0.8-14,Math.round(o.dx)+' m')});
+ SO.slice().sort(function(a,b){return b.dx-a.dx}).forEach(function(o){var p=P(o.dx,o.dy),w=Math.max(12,1.8*H*0.9/(o.dx+5));g.globalAlpha=o.al;carBack(p[0],p[1],w,o.relevant);pill(p[0],p[1]-w*0.8-14,Math.round(o.dx)+' m');g.globalAlpha=1});
  var ew=Math.min(H*0.27,W*0.2),ey=H*0.92;
  if(eng){g.save();g.translate(W/2,ey);g.scale(1,0.14);var eg=g.createRadialGradient(0,0,0,0,0,ew*0.95);eg.addColorStop(0,'rgba(64,156,255,.55)');eg.addColorStop(1,'rgba(64,156,255,0)');g.fillStyle=eg;g.beginPath();g.arc(0,0,ew*0.95,0,6.2832);g.fill();g.restore()}
  carBack(W/2,ey,ew,false);
@@ -375,7 +429,7 @@ function drawDrive(){
  g.fillStyle='rgba(8,14,20,.72)';rr(px,py,pw,ph,18);g.fill();g.strokeStyle='rgba(255,255,255,.06)';g.lineWidth=1;g.stroke();
  var ic=eng?'rgba(64,156,255,1)':'rgba(120,130,142,.9)';
  cruiseIcon(px+pw*0.14,py+ph*0.46,15,ic);wheelIcon(px+pw*0.86,py+ph*0.46,16,ic);
- var cr=S.car||{};if(cr.hb||cr.fl)beamIcon(px+pw*0.14,py+ph*0.46+34,9,cr.hb?'rgba(64,156,255,1)':'rgba(235,240,248,.85)');
+ var cr=S.car||{},bdy=S.body||{};if(cr.hb||cr.fl||bdy.lo)beamIcon(px+pw*0.14,py+ph*0.46+34,9,cr.hb?'rgba(64,156,255,1)':bdy.lo&&!cr.fl?'rgba(110,220,130,1)':'rgba(235,240,248,.85)');   // blue = high, green = low, white = flash
  if(cr.out!==null&&cr.out!==undefined){g.fillStyle='#aab4c2';g.font='500 14px system-ui';g.textAlign='center';g.fillText(cr.out.toFixed(1)+' \u00b0C',px+pw*0.86,py+ph*0.46+38);g.textAlign='left'}
  var sg=S.sign||{};if(sg.stop||sg.light){g.font='600 12px system-ui';var parts=[];
   if(sg.stop)parts.push({t:'STOP '+(sg.stop_dist!=null?Math.round(sg.stop_dist)+'m':''),bg:'rgba(180,30,30,.85)',col:'#fff'});
@@ -384,12 +438,47 @@ function drawDrive(){
   var cx0=W/2-tw/2,cy0=py+ph+8;
   for(var k=0;k<parts.length;k++){var w=chip(cx0,cy0,parts[k].t,parts[k].col,parts[k].bg);cx0+=w+6}
  }
+ extras(px,py,pw,ph);
  g.fillStyle='#f3f6fa';g.font='300 58px system-ui';g.textAlign='center';g.fillText(Math.round((S.v||0)*3.6),W/2,py+62);g.fillStyle='#8590a0';g.font='500 13px system-ui';g.fillText('km/h',W/2,py+84);
  g.fillStyle=S.present?'rgba(130,150,170,.55)':'rgba(255,120,120,.9)';g.font='11px system-ui';
  g.fillText((S.present?'panda live':'PANDA STALE')+'  ·  cluster '+S.status.text+'  ·  emulation '+(S.emu===null?'?':S.emu?'on':'off')+(S.default?'  ·  no lane data':'')+'  ·  tap: next view',W/2,H-12);g.textAlign='left'}
-function draw(){if(mode==0)drawDrive();else drawDiag()}
-function conn(){var es=new EventSource('/stream');es.onmessage=function(e){S=JSON.parse(e.data);draw()};es.onerror=function(){es.close();setTimeout(conn,1500)}}
-rs();conn();</script></body></html>"""
+var SM={},SMM={},ST=0,SO=[],SMD=null;
+function ease(dt,tau){return 1-Math.exp(-dt/tau)}
+function smooth(){ // the cars and the model's lines glide to each new 10 Hz value instead of jumping to it
+ var now=Date.now()/1000,dt=ST?Math.min(0.25,now-ST):0.1;ST=now;SO=[];if(!S)return;var k=ease(dt,0.35),seen={};
+ (S.obj||[]).forEach(function(o){var id=o.slot+':'+o.id,q=SM[id];
+  if(!q||Math.abs(q.dx-o.dx)>20||Math.abs(q.dy-o.dy)>3)q=SM[id]={dx:o.dx,dy:o.dy,al:q?q.al:0};   // a new or jumping track starts where it is
+  q.dx+=(o.dx-q.dx)*k;q.dy+=(o.dy-q.dy)*k;q.al=Math.min(1,q.al+dt*4);seen[id]=1;
+  SO.push({dx:q.dx,dy:q.dy,slot:o.slot,relevant:o.relevant,al:q.al})});
+ for(var id in SM)if(!seen[id])delete SM[id];
+ var M=S.model;if(!M){SMD=null;return}
+ ['l','r','p'].forEach(function(n){var a=M[n],b=SMM[n];if(!a){SMM[n]=null;return}if(!b||b.length!=a.length){SMM[n]=a.slice();return}for(var i=0;i<a.length;i++)b[i]+=(a[i]-b[i])*ease(dt,0.2)});
+ SMD={l:SMM.l,r:SMM.r,p:SMM.p,e:M.e,pl:M.pl,pr:M.pr}}
+function limitSign(cx,cy,r,v){g.fillStyle='#fff';g.beginPath();g.arc(cx,cy,r,0,6.2832);g.fill();g.strokeStyle='#d0202a';g.lineWidth=r*0.18;g.beginPath();g.arc(cx,cy,r*0.86,0,6.2832);g.stroke();g.fillStyle='#111';g.font='700 '+Math.round(r*0.85)+'px system-ui';g.textAlign='center';g.fillText(v,cx,cy+r*0.3);g.textAlign='left'}
+function arrow(cx,cy,s,dir,on){g.fillStyle=on?'#33d17a':'rgba(120,130,142,.22)';g.beginPath();g.moveTo(cx+dir*s,cy);g.lineTo(cx,cy-s*0.8);g.lineTo(cx,cy-s*0.35);g.lineTo(cx-dir*s*0.9,cy-s*0.35);g.lineTo(cx-dir*s*0.9,cy+s*0.35);g.lineTo(cx,cy+s*0.35);g.lineTo(cx,cy+s*0.8);g.closePath();g.fill()}
+function extras(px,py,pw,ph){var B=S.body||{},blink=(Date.now()%800)<450,i;
+ arrow(px-24,py+ph*0.46,14,-1,S.bl&&blink);arrow(px+pw+24,py+ph*0.46,14,1,S.br&&blink);
+ if(B.limit){if(px>=100)limitSign(px-72,py+ph*0.46,24,B.limit);else if(px>=56)limitSign(Math.max(23,px-62),py+ph*0.46,20,B.limit);else limitSign(W-26,py+ph+16,20,B.limit)}
+ var a=Math.max(-3,Math.min(3,S.a||0)),bw=pw*0.36,bx=px+pw/2,by=py+ph-9;   // acceleration: right/green = speeding up, left/red = slowing, full = 3 m/s2
+ g.fillStyle='rgba(255,255,255,.08)';g.fillRect(bx-bw/2,by,bw,4);g.fillStyle=a>=0?'#33d17a':'#ff5a5f';g.fillRect(a>=0?bx:bx+a/3*bw/2,by,Math.abs(a)/3*bw/2,4);
+ var ch=[],D=B.doors||[],nm=['FL','FR','RL','RR'],warn='rgba(205,120,20,.92)';
+ ch.push(S.en?{t:'openpilot ON',bg:'rgba(40,110,210,.92)'}:{t:'openpilot off',bg:'rgba(70,78,90,.85)'});
+ for(i=0;i<4;i++)if(D[i])ch.push({t:'door '+nm[i]+' open',bg:warn});
+ if(B.frunk)ch.push({t:'frunk open',bg:warn});if(B.trunk)ch.push({t:'trunk open',bg:warn});
+ if(B.pbrake)ch.push({t:'park brake',bg:'rgba(180,40,40,.92)'});if(B.rev)ch.push({t:'R',bg:'rgba(90,90,90,.92)'});
+ if(S.brk)ch.push({t:'brake',bg:'rgba(180,40,40,.92)'});if(B.wiper)ch.push({t:'wipers',bg:'rgba(60,120,170,.92)'});
+ if(B.light&&B.light!='day')ch.push({t:B.light,bg:'rgba(60,70,110,.92)'});
+ if(B.inside!=null)ch.push({t:'in '+B.inside.toFixed(1)+' \u00b0C',bg:'rgba(50,58,70,.92)'});
+ g.font='600 12px system-ui';var rows=[[]],rw=[0],maxw=W-16;   // chips wrap onto more rows on a narrow screen
+ ch.forEach(function(c){var w=g.measureText(c.t).width+20,r=rows.length-1;if(rows[r].length&&rw[r]+6+w>maxw){rows.push([]);rw.push(0);r++}rw[r]+=(rows[r].length?6:0)+w;rows[r].push(c)});
+ rows.forEach(function(row,k){var cx0=W/2-rw[k]/2,cy0=py+ph+40+k*30;row.forEach(function(c){cx0+=chip(cx0,cy0,c.t,'#fff',c.bg)+6})});
+ if(S.al1){var col=S.ast==2?'rgba(200,30,40,.93)':S.ast==1?'rgba(210,140,20,.93)':'rgba(30,40,55,.93)',bw2=Math.min(W*0.8,560),bh=S.al2?62:42,bx2=W/2-bw2/2,by2=H-bh-34;
+  g.fillStyle=col;rr(bx2,by2,bw2,bh,12);g.fill();g.fillStyle='#fff';g.textAlign='center';g.font='700 18px system-ui';g.fillText(S.al1,W/2,by2+26);
+  if(S.al2){g.font='500 14px system-ui';g.fillText(S.al2,W/2,by2+48)}g.textAlign='left'}}
+function draw(){smooth();if(mode==0)drawDrive();else drawDiag()}
+function conn(){var es=new EventSource('/stream');es.onmessage=function(e){S=JSON.parse(e.data)};es.onerror=function(){es.close();setTimeout(conn,1500)}}
+var LF=0;function loop(t){if(t-LF>=33){LF=t;draw()}requestAnimationFrame(loop)}   // ~30 fps: data arrives at 10 Hz, the smoothing fills the frames in between
+rs();conn();requestAnimationFrame(loop);</script></body></html>"""
 
 
 class Server(ThreadingMixIn, HTTPServer):
