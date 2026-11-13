@@ -90,6 +90,106 @@ class Body(object):
   # BODY-END
 
 
+# DYN-BEGIN read-only, the car's own drive-unit / brake / airbag / MCU frames on bus 0 (tesla_can.dbc), never sent. Checked against
+# ~20 000 logged frames from this car: motor rpm follows road speed (gear 9.73), torque + / - with pedal / regen, standing objects 0 m/s.
+DYN_ADDRS = (0x108, 0x118, 0x145, 0x368, 0x201, 0x246)
+DYN_HOLD_S = 1.0              # 0x108 / 0x118 / 0x145 / 0x368 are 10-100 Hz: older than this = no value
+DYN_SLOW_HOLD_S = 3.0         # 0x201 seat belts / 0x246 sun are slow
+GEARS = {1: 'P', 2: 'R', 3: 'N', 4: 'D'}
+
+
+def _u(v, start, n):
+  return v >> start & ((1 << n) - 1)
+
+
+def _s(v, start, n):
+  x = _u(v, start, n)
+  return x - (1 << n) if x >> (n - 1) else x
+
+
+class Dyn(object):
+  """0x108 DI_torque1 motor torque (Nm) x motor rpm -> motor power kW (+ drive / - regen; motor output, not battery), pedal %;
+  0x118 DI_torque2 gear; 0x145 ESP_145h long/lat acceleration m/s2, brake master cylinder bar; 0x368 DI_state cruise state /
+  set speed / units, regen-limited light, vehicle hold; 0x201 SDM1 driver belt; 0x246 UI_solarData sun up"""
+  def __init__(self):
+    self.f = {}
+
+  def feed(self, addr, d, now):
+    d = bytes(d[:8]).ljust(8, b'\0')       # some are shorter (0x118: 6 bytes, 0x201 / 0x246: 5): pad, signals sit in the first bytes
+    if any(d):                            # an all-zero frame = the sender is not awake yet: no value, not "0"
+      self.f[addr] = (int.from_bytes(d, 'little'), d, now)
+
+  def _get(self, addr, now, hold=DYN_HOLD_S):
+    r = self.f.get(addr)
+    return r if r and now - r[2] <= hold else None
+
+  def snapshot(self, now):
+    o = dict.fromkeys(('kw', 'ped', 'gear', 'ax', 'ay', 'bp', 'cs', 'set', 'su', 'regen', 'hold', 'belt', 'sun'))
+    r = self._get(0x108, now)
+    if r:
+      v = r[0]; o['kw'] = round(_s(v, 16, 13) * 0.25 * _s(v, 32, 16) * 0.10471976 / 1000., 1); o['ped'] = round(_u(v, 48, 8) * 0.4)
+    r = self._get(0x118, now)
+    if r:
+      o['gear'] = GEARS.get(_u(r[0], 12, 3))
+    r = self._get(0x145, now)
+    if r:
+      v = r[0]; o['ax'] = round(_u(v, 0, 10) * 0.05 - 25.6, 2); o['ay'] = round(_u(v, 16, 10) * 0.05 - 25.6, 2); o['bp'] = round(_u(v, 32, 10) * 0.25 - 42.5, 1)
+    r = self._get(0x368, now)
+    if r:
+      v = r[0]; o['cs'] = _u(v, 12, 4); o['set'] = _u(v, 48, 8); o['su'] = 'km/h' if _u(v, 31, 1) else 'mph'
+      o['regen'] = bool(_u(v, 8, 1)); o['hold'] = _u(v, 3, 3)
+    r = self._get(0x201, now, DYN_SLOW_HOLD_S)
+    if r:
+      o['belt'] = r[1][0] >> 4 & 3            # SDM_bcklDrivStatus (big-endian 5|2): 1 = buckled
+    r = self._get(0x246, now, DYN_SLOW_HOLD_S)
+    if r:
+      o['sun'] = _u(r[0], 25, 1)
+    return o
+  # DYN-END
+
+
+# RADAR-BEGIN the Bosch radar's own object list (radar bus, src 1), read-only. Written fresh from tesla_radar.dbc (BO_ 784 / 785,
+# little-endian) and checked on 560 000 logged frame pairs from this car: identical to cantools. No class guessing, no history:
+# the radar's class only when it is >= 50 % sure (it rarely is), otherwise physics - moving now, or seen moving and stopped (a car
+# at a light) = vehicle; standing things (rails, signs, poles) are left out.
+RADAR_SRC = 1
+RADAR_STALE_S = 0.3
+
+
+class Radar(object):
+  def __init__(self):
+    self.a = {}; self.b = {}
+
+  def feed(self, addr, d, now):
+    if 0x310 <= addr < 0x36F and len(d) == 8:
+      k, q = divmod(addr - 0x310, 3)
+      if q == 0: self.a[k] = (int.from_bytes(bytes(d), 'little'), now)
+      elif q == 1: self.b[k] = (int.from_bytes(bytes(d), 'little'), now)
+
+  def snapshot(self, now, v_ego):
+    """[[slot, d m, y m (left +), ground speed m/s, class 0 unknown / 1 vehicle / 2 two-wheeler / 3 pedestrian, moving state], ...]"""
+    out = []
+    for k in range(32):
+      ra, rb = self.a.get(k), self.b.get(k)
+      if not ra or not rb or now - ra[1] > RADAR_STALE_S or now - rb[1] > RADAR_STALE_S:
+        continue
+      a, b = ra[0], rb[0]
+      d = _u(a, 0, 12) * 0.0625
+      if not (_u(a, 55, 1) or _u(a, 62, 1)) or not 0 < d < 250 or _u(a, 63, 1) != _u(b, 63, 1) or _u(a, 35, 5) * 3.125 < 50:
+        continue
+      gs = _u(a, 12, 12) * 0.0625 - 128 + v_ego
+      cls = _u(b, 53, 3) if _u(b, 48, 5) * 3.125 >= 50 else 0
+      cls = cls if cls in (1, 2, 3) else 0
+      ms = _u(b, 22, 2)
+      if cls == 3 and abs(gs) >= 4: cls = 1          # nobody walks at 14 km/h
+      if cls == 2 and abs(gs) >= 15: cls = 1         # nor cycles at 54 km/h
+      if not (cls or abs(gs) >= 3 or ms in (1, 2)):
+        continue
+      out.append([k, round(d, 1), round(_u(a, 24, 11) * 0.125 - 128, 2), round(gs, 1), cls, ms])
+    return out
+  # RADAR-END
+
+
 SIGN_DETECT_FILE = '/data/sign_detect.json'
 SIGN_HOLD_S = 2.0             # the detector writes at ~2.5 Hz when enabled
 
@@ -250,7 +350,7 @@ def poll_cereal(hz=10.):
   sc = messaging.sub_sock('sendcan')
   subs = {n: messaging.sub_sock(n, conflate=True) for n in ('model', 'carState', 'controlsState')}
   scan = messaging.sub_sock('can')
-  mirror = PandaMirror(); car = CarState(); body = Body(); model = None
+  mirror = PandaMirror(); car = CarState(); body = Body(); dyn = Dyn(); radar = Radar(); model = None
   extra = {'v': 0., 'ang': 0., 'en': False, 'a': 0., 'bl': False, 'br': False, 'gas': False, 'brk': False, 'act': False, 'al1': '', 'al2': '', 'ast': 0}
   while True:
     if not Frame.clients:
@@ -266,6 +366,10 @@ def poll_cereal(hz=10.):
           car.feed(c.address, bytes(c.dat), now)
         if c.src == 0 and c.address in BODY_ADDRS:
           body.feed(c.address, bytes(c.dat), now)
+        if c.src == 0 and c.address in DYN_ADDRS:
+          dyn.feed(c.address, bytes(c.dat), now)
+        elif c.src == RADAR_SRC and 0x310 <= c.address < 0x36F:
+          radar.feed(c.address, bytes(c.dat), now)
     m = messaging.recv_one_or_none(subs['carState'])
     if m is not None:
       cs = m.carState; extra['v'] = float(cs.vEgo)
@@ -281,7 +385,7 @@ def poll_cereal(hz=10.):
       try: model = build_model(m.model)
       except Exception: model = None
     snap = mirror.snapshot(now); mirror.lane_idx = (mirror.lane_idx + 1) % 16
-    snap.update(extra); snap['car'] = car.snapshot(now); snap['body'] = body.snapshot(now); snap['model'] = model; snap['sign'] = read_sign_state(); snap['t'] = round(time.time(), 2)
+    snap.update(extra); snap['car'] = car.snapshot(now); snap['body'] = body.snapshot(now); snap['dyn'] = dyn.snapshot(now); snap['rad'] = radar.snapshot(now, extra['v']); snap['model'] = model; snap['sign'] = read_sign_state(); snap['t'] = round(time.time(), 2)
     publish(snap)
     time.sleep(1. / hz)
 
@@ -314,7 +418,7 @@ def poll_demo(hz=10.):
     lq = 3 if t % 12 > 2 else 0
     mirror.feed(0x557, tc.create_fake_DAS_obj_lane_msg(lead, 0.3, 0, 3, lq, -c0, 0.0, -k * 1.0, 0.0, 30, 3.7)[2], now)
     mirror.feed(0x559, tc.create_DAS_LR_object_msg(0, 0, 7, lead, 0.3, -1.5 * math.sin(t * 0.5), 0, 0, 0, 0, 0)[2], now)
-    mirror.feed(0x559, tc.create_DAS_LR_object_msg(1, 0, 9, 26, 3.7, 1., 0, 0, 0, 0, 0)[2], now)
+    mirror.feed(0x559, tc.create_DAS_LR_object_msg(1, 0, 9, 26, -3.7, 1., 0, 0, 0, 0, 0)[2], now)   # cluster frame: right-positive, so a left car is negative
     mirror.feed(0x659, bytes([5 if t % 30 > 4 else 2, 90, 0, 0xC0 | 8, 0, 0, 0, 0]), now)
     mirror.feed(0x554, bytes([0x20, 0, 0]), now)
     snap = mirror.snapshot(now); mirror.lane_idx = (mirror.lane_idx + 1) % 16
@@ -323,7 +427,11 @@ def poll_demo(hz=10.):
                  'bl': t % 20 < 3, 'br': False, 'gas': False, 'brk': False, 'al1': 'TAKE CONTROL' if t % 40 > 37 else '', 'al2': '', 'ast': 2,
                  'body': {'doors': [t % 25 < 2, False, False, False], 'frunk': False, 'trunk': False, 'lo': True, 'hi': t % 12 > 6, 'wiper': t % 50 > 40,
                           'pbrake': False, 'rev': False, 'light': 'night', 'inside': 21.5, 'limit': 50, 'unit': 'km/h'},
-                 'car': {'hb': int(t % 12 > 6), 'fl': 0, 'out': 9.5}, 't': round(time.time(), 2), 'model': {
+                 'car': {'hb': int(t % 12 > 6), 'fl': 0, 'out': 9.5},
+                 'dyn': {'kw': round(60 * math.sin(t * 0.5), 1), 'ped': 20, 'gear': 'D', 'ax': round(1.5 * math.sin(t * 0.5), 2), 'ay': round(1.2 * math.sin(t * 0.23), 2),
+                         'bp': 0.0, 'cs': 2 if t % 30 > 4 else 1, 'set': 90, 'su': 'km/h', 'regen': t % 20 > 17, 'hold': 0, 'belt': 1, 'sun': 0},
+                 'rad': [[3, round(lead, 1), 0.3, 22.0, 0, 1], [5, round(70 + 20 * math.sin(t * 0.1), 1), 3.6, 26.0, 0, 1], [8, 140.0, -0.4, 24.0, 1, 1],
+                         [11, round(18 + 4 * math.sin(t * 0.3), 1), -3.4, 23.0, 0, 1], [14, 230.0, 0.2, 25.0, 0, 1], [17, 30.0, 5.8, 1.0, 3, 1]], 't': round(time.time(), 2), 'model': {
         'p': [round(c0 + k * 3 * x ** 3 / 1e0 * 0 + 0.5 * k * 2 * x * x * 0.1, 2) for x in xs], 'pl': 0.9, 'pr': 0.8,
         'l': [round(c0 + 1.85 + 0.5 * k * 2 * x * x * 0.1, 2) for x in xs], 'r': [round(c0 - 1.85 + 0.5 * k * 2 * x * x * 0.1, 2) for x in xs]}})
     publish(snap)
@@ -358,6 +466,9 @@ function carBack(cx,y0,w,rel){ // a car seen from behind; y0 = where its tyres t
  rr(cx-w*0.47,y0-h*0.51,w*0.22,h*0.09,w*0.02);g.fill();rr(cx+w*0.25,y0-h*0.51,w*0.22,h*0.09,w*0.02);g.fill();g.shadowBlur=0;
  g.fillStyle='#d5dbe2';g.fillRect(cx-w*0.10,y0-h*0.33,w*0.20,h*0.07);
  g.fillStyle='rgba(0,0,0,.30)';rr(cx-w/2,y0-h*0.23,w,h*0.05,w*0.02);g.fill()}
+function person(cx,y0,h,col){var r=h*0.13;g.fillStyle=col;g.beginPath();g.arc(cx,y0-h+r,r,0,6.2832);g.fill();rr(cx-h*0.13,y0-h+r*2.3,h*0.26,h*0.42,h*0.08);g.fill();
+ g.fillRect(cx-h*0.11,y0-h*0.32,h*0.08,h*0.32);g.fillRect(cx+h*0.03,y0-h*0.32,h*0.08,h*0.32)}
+function leadOf(){var ld=null;for(var i=0;i<SO.length;i++){var o=SO[i];if(o.slot=='lead')return o;if(o.kind=='car'&&Math.abs(o.dy)<1.6&&(!ld||o.dx<ld.dx))ld=o}return ld}   // the cluster lead, else the nearest radar car in the lane (to 250 m)
 function carTop(cx,yr,w,l,rel){ // seen from above, rear edge at screen y=yr, nose pointing up (4.5 m long, 1.8 m wide)
  var dark='#0e1217',gl='#18212c',gr;
  g.fillStyle=dark;rr(cx-w*0.53,yr-l*0.84,w*0.10,l*0.18,w*0.03);g.fill();rr(cx+w*0.43,yr-l*0.84,w*0.10,l*0.18,w*0.03);g.fill();rr(cx-w*0.53,yr-l*0.20,w*0.10,l*0.18,w*0.03);g.fill();rr(cx+w*0.43,yr-l*0.20,w*0.10,l*0.18,w*0.03);g.fill();
@@ -381,9 +492,10 @@ function drawDiag(){g.fillStyle='#0b0d10';g.fillRect(0,0,W,H);if(!S||!S.lanes){g
  line(lf,L.left?'#ffd23f':'#555e68',L.left?5:2,L.left?null:[10,10]);line(rt,L.right?'#ffd23f':'#555e68',L.right?5:2,L.right?null:[10,10]);
  // lead / side vehicles
  SO.slice().sort(function(a,b){return b.dx-a.dx}).forEach(function(o){var p=P(o.dx,o.dy),w,h;g.globalAlpha=o.al;
-  if(tdv){h=Math.max(26,4.5*H*0.8/110*1.6);w=Math.max(12,h/2.2);carTop(p[0],p[1],w,h,o.relevant)}   // an icon with car proportions: the top view stretches the sideways scale 4x, so true scale would look squashed
-  else{w=Math.max(12,1.8*H*0.9/(o.dx+5));h=w*0.8;carBack(p[0],p[1],w,o.relevant)}
-  g.fillStyle='#e8edf2';g.textAlign='center';g.fillText(o.slot+' '+Math.round(o.dx)+' m',p[0],p[1]-h-6);g.textAlign='left';g.globalAlpha=1});
+  var pd=o.kind=='ped'||o.kind=='ped?';if(o.kind=='ped?')g.globalAlpha=o.al*0.55;
+  if(tdv){h=Math.max(26,4.5*H*0.8/110*1.6);w=Math.max(12,h/2.2);if(pd){h=w;g.fillStyle='#f0b429';g.beginPath();g.arc(p[0],p[1]-w/2,w/2.5,0,6.2832);g.fill()}else carTop(p[0],p[1],o.kind=='bike'?w*0.5:w,h,o.relevant)}   // an icon with car proportions: the top view stretches the sideways scale 4x, so true scale would look squashed
+  else{w=Math.max(12,1.8*H*0.9/(o.dx+5));h=w*0.8;if(pd){h=w*1.1;person(p[0],p[1],h,'#f0b429')}else carBack(p[0],p[1],o.kind=='bike'?w*0.45:w,o.relevant)}
+  g.fillStyle='#e8edf2';g.textAlign='center';g.fillText((o.slot=='r'?(o.kind=='ped'?'person':o.kind=='ped?'?'person?':o.kind):o.slot)+' '+Math.round(o.dx)+' m',p[0],p[1]-h-6);g.textAlign='left';g.globalAlpha=1});
  // header
  var st=S.status,y0=22;g.font='15px system-ui';g.fillStyle='#e8edf2';
  g.fillText('openpilot '+(S.en?'ENGAGED':'off')+'   speed '+Math.round((S.v||0)*3.6)+' km/h   wheel '+(S.ang||0).toFixed(1)+' deg',16,y0);
@@ -420,7 +532,9 @@ function drawDrive(){
   g.restore();
   if(M.e){g.save();g.strokeStyle=grad(yb,yh,[[0,'rgba(170,180,195,.30)'],[1,'rgba(170,180,195,0)']]);g.lineWidth=2;[M.e.l,M.e.r].forEach(function(a){g.beginPath();a.forEach(function(y,k){var p=P(M.e.x[k],y);k?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1])});g.stroke()});g.restore()}
  }
- SO.slice().sort(function(a,b){return b.dx-a.dx}).forEach(function(o){var p=P(o.dx,o.dy),w=Math.max(12,1.8*H*0.9/(o.dx+5));g.globalAlpha=o.al;carBack(p[0],p[1],w,o.relevant);pill(p[0],p[1]-w*0.8-14,Math.round(o.dx)+' m');g.globalAlpha=1});
+ var LD=leadOf();SO.slice().sort(function(a,b){return b.dx-a.dx}).forEach(function(o){var p=P(o.dx,o.dy),w=Math.max(12,1.8*H*0.9/(o.dx+5)),hh=w*0.8;g.globalAlpha=o.al;
+  if(o.kind=='ped'||o.kind=='ped?'){hh=w*1.1;g.globalAlpha=o.al*(o.kind=='ped'?1:0.55);person(p[0],p[1],hh,'#f0b429')}else carBack(p[0],p[1],o.kind=='bike'?w*0.45:w,o.relevant);
+  if(o.slot!='r'||o===LD)pill(p[0],p[1]-hh-14,Math.round(o.dx)+' m');g.globalAlpha=1});   // distance on the cluster cars and the lead; the extra radar objects stay quiet
  var ew=Math.min(H*0.27,W*0.2),ey=H*0.92;
  if(eng){g.save();g.translate(W/2,ey);g.scale(1,0.14);var eg=g.createRadialGradient(0,0,0,0,0,ew*0.95);eg.addColorStop(0,'rgba(64,156,255,.55)');eg.addColorStop(1,'rgba(64,156,255,0)');g.fillStyle=eg;g.beginPath();g.arc(0,0,ew*0.95,0,6.2832);g.fill();g.restore()}
  carBack(W/2,ey,ew,false);
@@ -448,22 +562,27 @@ function cl(v,m){return Math.max(-m,Math.min(m,v))}
 function smooth(){ // cluster-style cars: glide (predicted between the 10 Hz updates), hold through short gaps, coast + fade out when lost, fade / slide in when new
  var now=Date.now()/1000,dt=ST?Math.min(0.25,now-ST):0.1;ST=now;SO=[];if(!S)return;var id,q,k=ease(dt,0.5);
  if(SU!==SP){SP=SU;var seen={};   // a new data frame arrived
-  var c0=(S.lanes&&S.lanes.c)?S.lanes.c[0]:0,cur={};(S.obj||[]).forEach(function(o){cur[o.slot+':'+o.id]=1});
-  (S.obj||[]).forEach(function(o){id=o.slot+':'+o.id;q=SM[id];
-   var oy=c0-o.dy;   // the cluster frame is RIGHT-positive and centred on the lane (car code: dy = curv0 - yRel): back to real metres, left-positive, like the lanes drawn here
+  var c0=(S.lanes&&S.lanes.c)?S.lanes.c[0]:0,cur={},L=[];
+  (S.obj||[]).forEach(function(o){L.push({key:o.slot+':'+o.id,slot:o.slot,dx:o.dx,y:c0-o.dy,rel:o.relevant,kind:'car',rid:(o.id>0&&o.id<61)?'c'+o.id:null})});
+  var nc=L.length;   // + the radar's own objects (up to 250 m) that the cluster frame does not already have
+  (S.rad||[]).forEach(function(r){for(var i=0;i<nc;i++)if(Math.abs(L[i].dx-r[1])<5&&Math.abs(L[i].y-r[2])<1.8)return;
+   L.push({key:'r:'+r[0],slot:'r',dx:r[1],y:r[2],rel:0,kind:r[4]==3?'ped':r[4]==2?'bike':(r[4]==0&&r[5]==1&&Math.abs(r[3])<3)?'ped?':'car',rid:'r'+r[0]})});   // ped? = moving at walking pace, radar not sure what it is
+  L.forEach(function(o){cur[o.key]=1});
+  L.forEach(function(o){id=o.key;q=SM[id];
+   var oy=o.y;   // the cluster frame is RIGHT-positive and centred on the lane (car code: dy = curv0 - yRel): back to real metres, left-positive, like the lanes drawn here
    if(q&&(Math.abs(q.tx-o.dx)>20||Math.abs(q.ty-oy)>3)){SM[id+'#'+(GN++)]=q;q.lost=q.lost||now;q=null}   // a jump = another car: the old one coasts out, the new one starts
    if(!q){var j,c,hit=null;for(j in SM){c=SM[j];if(cur[j]||seen[j])continue;   // a track this frame no longer has: the same car moved to another slot (right lane -> lead on a cut-in) or came back under a new id
-     if((o.id>0&&o.id<61&&c.rid===o.id)||(Math.abs(c.tx-o.dx)<6&&Math.abs(c.ty-oy)<2.5)){hit=j;break}}
+     if((o.rid&&c.rid===o.rid&&Math.abs(c.tx-o.dx)<15)||(Math.abs(c.tx-o.dx)<6&&Math.abs(c.ty-oy)<2.5)){hit=j;break}}
     if(hit!==null){q=SM[hit];delete SM[hit];q.lost=0}}   // keep it: it glides from where it was instead of a new car fading in
    if(!q){var near=o.dx<40,side=oy>=0?1:-1;q={dx:o.dx,dy:near?oy+side*1.6:oy,tx:o.dx,ty:oy,vx:0,vy:0,tu:now,al:0,fin:near?0.6:0.25}}   // close (cut-in): slow fade, slides in from its own side; far: quick fade, it is small anyway
    else{var du=Math.max(0.05,now-q.tu);q.vx=cl(q.vx+((o.dx-q.tx)/du-q.vx)*0.5,30);q.vy=cl(q.vy+((oy-q.ty)/du-q.vy)*0.5,3);q.tx=o.dx;q.ty=oy;q.tu=now}
-   q.lost=0;q.slot=o.slot;q.rel=o.relevant;q.rid=o.id;SM[id]=q;seen[id]=1});
+   q.lost=0;q.slot=o.slot;q.rel=o.rel;q.rid=o.rid;q.kind=o.kind;SM[id]=q;seen[id]=1});
   for(id in SM)if(!seen[id]&&!SM[id].lost)SM[id].lost=now}
  for(id in SM){q=SM[id];
   if(q.lost){q.tx+=q.vx*dt;q.ty+=q.vy*dt;q.tu=now;if(now-q.lost>0.5)q.al-=dt/0.7;if(q.al<=0||q.tx<-3){delete SM[id];continue}}   // hold 0.5 s, then fade over 0.7 s while it keeps moving
   else q.al=Math.min(1,q.al+dt/q.fin);
   var pt=Math.min(0.3,now-q.tu)+0.45;q.dx+=(q.tx+q.vx*pt-q.dx)*k;q.dy+=(q.ty+q.vy*pt-q.dy)*k;   // aim ahead by the smoothing lag: smooth AND where the car really is
-  SO.push({dx:q.dx,dy:q.dy,slot:q.slot,relevant:q.rel,al:Math.max(0,Math.min(1,q.al))})}
+  SO.push({dx:q.dx,dy:q.dy,slot:q.slot,relevant:q.rel,kind:q.kind||'car',al:Math.max(0,Math.min(1,q.al))})}
  var M=S.model;if(!M){SMD=null;return}
  ['l','r','p'].forEach(function(n){var a=M[n],b=SMM[n];if(!a){SMM[n]=null;return}if(!b||b.length!=a.length){SMM[n]=a.slice();return}for(var i=0;i<a.length;i++)b[i]+=(a[i]-b[i])*ease(dt,0.2)});
  SMD={l:SMM.l,r:SMM.r,p:SMM.p,e:M.e,pl:M.pl,pr:M.pr}}
@@ -472,10 +591,24 @@ function arrow(cx,cy,s,dir,on){g.fillStyle=on?'#33d17a':'rgba(120,130,142,.22)';
 function extras(px,py,pw,ph){var B=S.body||{},blink=(Date.now()%800)<450,i;
  arrow(px-24,py+ph*0.46,14,-1,S.bl&&blink);arrow(px+pw+24,py+ph*0.46,14,1,S.br&&blink);
  if(B.limit){if(px>=100)limitSign(px-72,py+ph*0.46,24,B.limit);else if(px>=56)limitSign(Math.max(23,px-62),py+ph*0.46,20,B.limit);else limitSign(W-26,py+ph+16,20,B.limit)}
- var a=Math.max(-3,Math.min(3,S.a||0)),bw=pw*0.36,bx=px+pw/2,by=py+ph-9;   // acceleration: right/green = speeding up, left/red = slowing, full = 3 m/s2
- g.fillStyle='rgba(255,255,255,.08)';g.fillRect(bx-bw/2,by,bw,4);g.fillStyle=a>=0?'#33d17a':'#ff5a5f';g.fillRect(a>=0?bx:bx+a/3*bw/2,by,Math.abs(a)/3*bw/2,4);
+ var Y=S.dyn||{},a=Math.max(-3,Math.min(3,S.a||0)),bw=pw*0.36,bx=px+pw/2,by=py+ph-9;
+ g.fillStyle='rgba(255,255,255,.08)';g.fillRect(bx-bw/2,by,bw,4);
+ if(Y.kw!=null){var f=Y.kw>=0?Math.min(1,Y.kw/250):Math.max(-1,Y.kw/60);   // motor power: right/white = drive (full 250 kW), left/green = regen (full 60 kW)
+  g.fillStyle=Y.kw>=0?'#e8edf2':'#33d17a';g.fillRect(f>=0?bx:bx+f*bw/2,by,Math.abs(f)*bw/2,4);
+  g.fillStyle=Y.kw>=0?'#aab4c2':'#33d17a';g.font='600 11px system-ui';g.textAlign='left';g.fillText(Math.round(Y.kw)+' kW',bx+bw/2+6,by+5)}
+ else{g.fillStyle=a>=0?'#33d17a':'#ff5a5f';g.fillRect(a>=0?bx:bx+a/3*bw/2,by,Math.abs(a)/3*bw/2,4)}   // no drive-unit data: acceleration, full = 3 m/s2
+ if(Y.ax!=null){var gx=40,gr=28,gy=H-110,fs=9.81*0.6;   // G-meter: dot = where the car accelerates (up = forward, left = left), ring = 0.3 g, edge = 0.6 g
+  g.strokeStyle='rgba(255,255,255,.16)';g.lineWidth=1;g.beginPath();g.arc(gx,gy,gr,0,6.2832);g.stroke();g.beginPath();g.arc(gx,gy,gr/2,0,6.2832);g.stroke();
+  g.beginPath();g.moveTo(gx-gr,gy);g.lineTo(gx+gr,gy);g.moveTo(gx,gy-gr);g.lineTo(gx,gy+gr);g.stroke();
+  g.fillStyle='#ffd23f';g.beginPath();g.arc(gx-cl(Y.ay/fs,1)*gr,gy-cl(Y.ax/fs,1)*gr,4,0,6.2832);g.fill();
+  g.fillStyle='#8590a0';g.font='11px system-ui';g.textAlign='center';g.fillText((Math.sqrt(Y.ax*Y.ax+Y.ay*Y.ay)/9.81).toFixed(2)+' g',gx,gy+gr+14);
+  if(Y.bp!=null&&Y.bp>1)g.fillText('brake '+Math.round(Y.bp)+' bar',gx,gy+gr+28);else if(Y.ped)g.fillText('pedal '+Y.ped+'%',gx,gy+gr+28);g.textAlign='left'}
  var ch=[],D=B.doors||[],nm=['FL','FR','RL','RR'],warn='rgba(205,120,20,.92)';
+ if(Y.gear)ch.push({t:Y.gear,bg:'rgba(50,58,70,.92)'});
  ch.push(S.en?{t:'openpilot ON',bg:'rgba(40,110,210,.92)'}:{t:'openpilot off',bg:'rgba(70,78,90,.85)'});
+ if(Y.cs>=2&&Y.cs<=4&&Y.set)ch.push({t:'cruise '+Y.set+' '+(Y.su||''),bg:Y.cs==4?'rgba(70,78,90,.85)':'rgba(40,110,210,.92)'});   // 2 on, 3 standstill, 4 override
+ if(Y.regen&&Y.gear=='D')ch.push({t:'regen limited',bg:warn});if(Y.hold==3)ch.push({t:'HOLD',bg:'rgba(40,140,80,.92)'});
+ if(Y.belt===0&&Y.gear=='D')ch.push({t:'driver seatbelt!',bg:'rgba(180,40,40,.92)'});
  for(i=0;i<4;i++)if(D[i])ch.push({t:'door '+nm[i]+' open',bg:warn});
  if(B.frunk)ch.push({t:'frunk open',bg:warn});if(B.trunk)ch.push({t:'trunk open',bg:warn});
  if(B.pbrake)ch.push({t:'park brake',bg:'rgba(180,40,40,.92)'});if(B.rev)ch.push({t:'R',bg:'rgba(90,90,90,.92)'});
@@ -488,7 +621,7 @@ function extras(px,py,pw,ph){var B=S.body||{},blink=(Date.now()%800)<450,i;
  if(S.al1){var col=S.ast==2?'rgba(200,30,40,.93)':S.ast==1?'rgba(210,140,20,.93)':'rgba(30,40,55,.93)',bw2=Math.min(W*0.8,560),bh=S.al2?62:42,bx2=W/2-bw2/2,by2=H-bh-34;
   g.fillStyle=col;rr(bx2,by2,bw2,bh,12);g.fill();g.fillStyle='#fff';g.textAlign='center';g.font='700 18px system-ui';g.fillText(S.al1,W/2,by2+26);
   if(S.al2){g.font='500 14px system-ui';g.fillText(S.al2,W/2,by2+48)}g.textAlign='left'}}
-function draw(){smooth();if(mode==0)drawDrive();else drawDiag()}
+var DIM=false;function draw(){smooth();var dm=!!(S&&S.dyn&&S.dyn.sun===0);if(dm!==DIM){DIM=dm;cv.style.filter=dm?'brightness(0.8)':''}if(mode==0)drawDrive();else drawDiag()}   // dimmer after sunset
 function conn(){var es=new EventSource('/stream');es.onmessage=function(e){S=JSON.parse(e.data);SU=Date.now()/1000};es.onerror=function(){es.close();setTimeout(conn,1500)}}
 var LF=0;function loop(t){if(t-LF>=33){LF=t;draw()}requestAnimationFrame(loop)}   // ~30 fps: data arrives at 10 Hz, the smoothing fills the frames in between
 rs();conn();requestAnimationFrame(loop);</script></body></html>"""
