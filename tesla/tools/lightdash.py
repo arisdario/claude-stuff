@@ -376,7 +376,7 @@ function drawDiag(){g.fillStyle='#0b0d10';g.fillRect(0,0,W,H);if(!S||!S.lanes){g
   if(M.p){var cl=M.p.map(function(y,k){return P(xs[k],y-.9)}),cr=M.p.map(function(y,k){return P(xs[k],y+.9)}).reverse();g.fillStyle='rgba(60,200,120,.12)';g.beginPath();cl.concat(cr).forEach(function(p,k){k?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1])});g.fill()}
   if(M.e){line(M.e.l.map(function(y,k){return P(M.e.x[k],y)}),'rgba(229,72,77,.6)',2);line(M.e.r.map(function(y,k){return P(M.e.x[k],y)}),'rgba(229,72,77,.6)',2)}}
  // what the cluster is told: virtual lane = centre curve +- width/2 (cluster x = real/2)
- var cc=[],lf=[],rt=[];for(i=0;i<=R;i+=2){var xc=i/SC,yc=poly(L.c,xc);cc.push(P(i,yc));lf.push(P(i,yc+L.width/2));rt.push(P(i,yc-L.width/2))}
+ var cc=[],lf=[],rt=[];for(i=0;i<=R;i+=2){var xc=i/SC,yc=-poly(L.c,xc);cc.push(P(i,yc));lf.push(P(i,yc+L.width/2));rt.push(P(i,yc-L.width/2))}
  line(cc,'rgba(255,255,255,.18)',1,[6,8]);
  line(lf,L.left?'#ffd23f':'#555e68',L.left?5:2,L.left?null:[10,10]);line(rt,L.right?'#ffd23f':'#555e68',L.right?5:2,L.right?null:[10,10]);
  // lead / side vehicles
@@ -448,12 +448,16 @@ function cl(v,m){return Math.max(-m,Math.min(m,v))}
 function smooth(){ // cluster-style cars: glide (predicted between the 10 Hz updates), hold through short gaps, coast + fade out when lost, fade / slide in when new
  var now=Date.now()/1000,dt=ST?Math.min(0.25,now-ST):0.1;ST=now;SO=[];if(!S)return;var id,q,k=ease(dt,0.5);
  if(SU!==SP){SP=SU;var seen={};   // a new data frame arrived
+  var c0=(S.lanes&&S.lanes.c)?S.lanes.c[0]:0,cur={};(S.obj||[]).forEach(function(o){cur[o.slot+':'+o.id]=1});
   (S.obj||[]).forEach(function(o){id=o.slot+':'+o.id;q=SM[id];
-   if(q&&(Math.abs(q.tx-o.dx)>20||Math.abs(q.ty-o.dy)>3)){SM[id+'#'+(GN++)]=q;q.lost=q.lost||now;q=null}   // a jump = another car: the old one coasts out, the new one starts
-   if(!q){for(var j in SM){var c=SM[j];if(c.lost&&c.slot==o.slot&&Math.abs(c.dx-o.dx)<6&&Math.abs(c.dy-o.dy)<1.5){q=c;delete SM[j];break}}}   // the same car back under a new id: keep it
-   if(!q){var near=o.dx<40,side=o.dy>=0?1:-1;q={dx:o.dx,dy:near?o.dy+side*1.6:o.dy,tx:o.dx,ty:o.dy,vx:0,vy:0,tu:now,al:0,fin:near?0.6:0.25}}   // close (cut-in): slow fade, slides in from the side; far: quick fade, it is small anyway
-   else{var du=Math.max(0.05,now-q.tu);q.vx=cl(q.vx+((o.dx-q.tx)/du-q.vx)*0.5,30);q.vy=cl(q.vy+((o.dy-q.ty)/du-q.vy)*0.5,3);q.tx=o.dx;q.ty=o.dy;q.tu=now}
-   q.lost=0;q.slot=o.slot;q.rel=o.relevant;SM[id]=q;seen[id]=1});
+   var oy=c0-o.dy;   // the cluster frame is RIGHT-positive and centred on the lane (car code: dy = curv0 - yRel): back to real metres, left-positive, like the lanes drawn here
+   if(q&&(Math.abs(q.tx-o.dx)>20||Math.abs(q.ty-oy)>3)){SM[id+'#'+(GN++)]=q;q.lost=q.lost||now;q=null}   // a jump = another car: the old one coasts out, the new one starts
+   if(!q){var j,c,hit=null;for(j in SM){c=SM[j];if(cur[j]||seen[j])continue;   // a track this frame no longer has: the same car moved to another slot (right lane -> lead on a cut-in) or came back under a new id
+     if((o.id>0&&o.id<61&&c.rid===o.id)||(Math.abs(c.tx-o.dx)<6&&Math.abs(c.ty-oy)<2.5)){hit=j;break}}
+    if(hit!==null){q=SM[hit];delete SM[hit];q.lost=0}}   // keep it: it glides from where it was instead of a new car fading in
+   if(!q){var near=o.dx<40,side=oy>=0?1:-1;q={dx:o.dx,dy:near?oy+side*1.6:oy,tx:o.dx,ty:oy,vx:0,vy:0,tu:now,al:0,fin:near?0.6:0.25}}   // close (cut-in): slow fade, slides in from its own side; far: quick fade, it is small anyway
+   else{var du=Math.max(0.05,now-q.tu);q.vx=cl(q.vx+((o.dx-q.tx)/du-q.vx)*0.5,30);q.vy=cl(q.vy+((oy-q.ty)/du-q.vy)*0.5,3);q.tx=o.dx;q.ty=oy;q.tu=now}
+   q.lost=0;q.slot=o.slot;q.rel=o.relevant;q.rid=o.id;SM[id]=q;seen[id]=1});
   for(id in SM)if(!seen[id]&&!SM[id].lost)SM[id].lost=now}
  for(id in SM){q=SM[id];
   if(q.lost){q.tx+=q.vx*dt;q.ty+=q.vy*dt;q.tu=now;if(now-q.lost>0.5)q.al-=dt/0.7;if(q.al<=0||q.tx<-3){delete SM[id];continue}}   // hold 0.5 s, then fade over 0.7 s while it keeps moving
