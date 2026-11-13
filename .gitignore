@@ -14,3 +14,6 @@ routegraph*.sqlite
 # generated national map-curve database (~100 MB): build it with tesla/tools/mapcurve_build.py, never commit it
 tesla/tools/mapcurve_national.sqlite
 tesla/tools/mapcurve_national.sqlite.gz
+
+# built by tesla/model083/tools/replay083.py on first run
+tesla/model083/tools/replay_decode0812
