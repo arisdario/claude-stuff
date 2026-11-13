@@ -37,6 +37,7 @@ cp "$OP/models/supercombo.dlc.083" "$OP/models/supercombo.dlc"
 
 say "3. the adapter (0.8.3 output -> 0.7.5 messages)"
 cp "$HERE/driving.h" "$HERE/driving.cc" "$HERE/model083_adapter.h" "$MD/"
+rm -f "$MD/model0812_adapter.h"     # driving.cc would pick the 0.8.12 adapter if it were there (install0812.sh)
 echo "copied driving.h driving.cc model083_adapter.h"
 
 say "4. PCC with the curve-limit fix (the new model turns PCC's camera curve limit on)"

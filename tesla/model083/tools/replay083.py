@@ -31,7 +31,6 @@ GROUND_FROM_MEDMODEL = np.array([[0.0, 0.0, 1.0],
                                  [-1.84808520e-20, 9.00738606e-04, -4.28751576e-02]])
 VIEW_FROM_DEVICE = np.array([[0., 0., 1.], [1., 0., 0.], [0., 1., 0.]]).T
 MW, MH = 512, 256
-OUT_N = 11327 + 512
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -140,9 +139,14 @@ def main():
       out[0].astype(np.float32).tofile(fr)
       if i % a.every == 0: kept.append((i, yuv.copy()))
       if i % 100 == 0: print('frame', i, flush=True)
-  dec_bin = os.path.join(HERE, 'replay_decode')
-  if not os.path.exists(dec_bin):
-    subprocess.check_call(['g++', '-std=c++11', '-O2', os.path.join(HERE, 'replay_decode.cc'), '-o', dec_bin])
+  n_out = sess.get_outputs()[0].shape[1]           # 0.8.3: 11327, 0.8.12: 6472 (both include the 512 recurrent values)
+  is0812 = n_out == 6472
+  print('model output %d floats -> %s adapter' % (n_out, '0.8.12' if is0812 else '0.8.3'))
+  dec_bin = os.path.join(HERE, 'replay_decode0812' if is0812 else 'replay_decode')
+  if not os.path.exists(dec_bin) or os.path.getmtime(dec_bin) < max(os.path.getmtime(os.path.join(HERE, f)) for f in
+                                                                    ('replay_decode.cc', '../model083_adapter.h', '../model0812_adapter.h')):
+    subprocess.check_call(['g++', '-std=c++11', '-O2'] + (['-DMODEL0812'] if is0812 else []) +
+                          [os.path.join(HERE, 'replay_decode.cc'), '-o', dec_bin])
   dec_path = a.out + '.dec.bin'
   subprocess.check_call([dec_bin, raw_path, dec_path])
   dec = np.fromfile(dec_path, np.float32).reshape(-1, 581)

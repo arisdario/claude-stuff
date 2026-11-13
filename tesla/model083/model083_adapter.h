@@ -43,6 +43,7 @@ const int LEAD_MHP_VALS = 4;
 const int LEAD_MHP_SELECTION = 3;
 const int LEAD_MHP_GROUP_SIZE = 2 * LEAD_MHP_VALS + LEAD_MHP_SELECTION;
 const int POSE_N = 12;
+const long MODEL_DLC_BYTES = 63447299L;          // exact size of the matching supercombo.dlc (modeld refuses any other)
 
 const int PLAN_IDX = 0;
 const int LL_IDX = PLAN_IDX + PLAN_MHP_N * PLAN_MHP_GROUP_SIZE;

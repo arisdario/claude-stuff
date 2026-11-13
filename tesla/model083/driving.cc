@@ -9,23 +9,44 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
 #include "common/timing.h"
 #include "common/params.h"
 #include "driving.h"
+// Model adapter: the 0.8.12 one if install0812.sh put it here, otherwise 0.8.3 (install.sh). Both have the same
+// interface; MODEL_ADAPTER is the namespace used below. The model file (supercombo.dlc) must match the adapter:
+// model_init checks its exact size and refuses to run on a mismatch instead of decoding garbage.
+#if __has_include("model0812_adapter.h")
+#include "model0812_adapter.h"
+namespace MODEL_ADAPTER = m0812;
+#else
 #include "model083_adapter.h"
+namespace MODEL_ADAPTER = m083;
+#endif
 
 void model_init(ModelState* s, cl_device_id device_id, cl_context context, int temporal) {
   frame_init(&s->frame, MODEL_WIDTH, MODEL_HEIGHT, device_id, context);
   s->input_frames = (float*)calloc(MODEL_FRAME_SIZE * 2, sizeof(float));
 
-  const int output_size = m083::OUTPUT_SIZE + m083::TEMPORAL_SIZE;
+  const int output_size = MODEL_ADAPTER::OUTPUT_SIZE + MODEL_ADAPTER::TEMPORAL_SIZE;
   s->output = (float*)calloc(output_size, sizeof(float));
 
+  {  // model file and adapter are switched together by install.sh / install0812.sh: never run a mismatched pair
+    struct stat st;
+    if (stat("../../models/supercombo.dlc", &st) != 0 || (long)st.st_size != MODEL_ADAPTER::MODEL_DLC_BYTES) {
+      fprintf(stderr, "modeld: models/supercombo.dlc is %ld bytes but the installed adapter expects %ld: model and adapter "
+              "do not match - refusing to run (re-run install.sh or install0812.sh)\n",
+              (long)(stat("../../models/supercombo.dlc", &st) == 0 ? st.st_size : -1), MODEL_ADAPTER::MODEL_DLC_BYTES);
+      exit(1);
+    }
+  }
   s->m = new DefaultRunModel("../../models/supercombo.dlc", s->output, output_size, USE_GPU_RUNTIME);
 
 #ifdef TEMPORAL
   assert(temporal);
-  s->m->addRecurrent(&s->output[m083::OUTPUT_SIZE], m083::TEMPORAL_SIZE);
+  s->m->addRecurrent(&s->output[MODEL_ADAPTER::OUTPUT_SIZE], MODEL_ADAPTER::TEMPORAL_SIZE);
 #endif
 
 #ifdef DESIRE
@@ -58,7 +79,7 @@ ModelDataRaw model_eval_frame(ModelState* s, cl_command_queue q,
   if (desire_in != NULL) {
     // 0.7.5's modeld sets vec_desire[desire - 1]; the 0.8.3 model is indexed by desire itself
     float d83[DESIRE_LEN];
-    m083::desire_to_083(desire_in, d83);
+    MODEL_ADAPTER::desire_to_083(desire_in, d83);
     for (int i = 1; i < DESIRE_LEN; i++) {
       // Model decides when action is completed, so desire input is just a pulse triggered on rising edge
       s->pulse_desire[i] = (d83[i] - s->prev_desire[i] > .99) ? d83[i] : 0.0;
@@ -87,18 +108,18 @@ void model_free(ModelState* s) {
 }
 
 void poly_fit(float *in_pts, float *in_stds, float *out) {
-  m083::poly_fit(in_pts, in_stds, out);
+  MODEL_ADAPTER::poly_fit(in_pts, in_stds, out);
 }
 
-static void fill_line(cereal::ModelData::PathData::Builder path, const m083::Line &L) {
-  path.setPoints(kj::ArrayPtr<const float>(L.points, m083::PATH_N));
-  path.setStds(kj::ArrayPtr<const float>(L.stds, m083::PATH_N));
+static void fill_line(cereal::ModelData::PathData::Builder path, const MODEL_ADAPTER::Line &L) {
+  path.setPoints(kj::ArrayPtr<const float>(L.points, MODEL_ADAPTER::PATH_N));
+  path.setStds(kj::ArrayPtr<const float>(L.stds, MODEL_ADAPTER::PATH_N));
   path.setPoly(kj::ArrayPtr<const float>(L.poly, 4));
   path.setProb(L.prob);
   path.setStd(L.std);
 }
 
-static void fill_lead(cereal::ModelData::LeadData::Builder lead, const m083::Lead &R) {
+static void fill_lead(cereal::ModelData::LeadData::Builder lead, const MODEL_ADAPTER::Lead &R) {
   lead.setProb(R.prob);
   lead.setDist(R.dist);
   lead.setStd(R.std);
@@ -113,14 +134,14 @@ static void fill_lead(cereal::ModelData::LeadData::Builder lead, const m083::Lea
 void model_publish(PubSocket *sock, uint32_t frame_id,
                    const ModelDataRaw net_outputs, uint64_t timestamp_eof) {
   const float *o = net_outputs.raw;
-  m083::Line p, l, r; m083::Lead ld, lf; m083::Longi g; m083::Meta mt;
-  m083::path_from_plan(o, p);
-  m083::lane_line(o, m083::LANE_LEFT, l);
-  m083::lane_line(o, m083::LANE_RIGHT, r);
-  m083::lead(o, 0, ld);
-  m083::lead(o, 1, lf);
-  m083::longi(o, g);
-  m083::meta(o, mt);
+  MODEL_ADAPTER::Line p, l, r; MODEL_ADAPTER::Lead ld, lf; MODEL_ADAPTER::Longi g; MODEL_ADAPTER::Meta mt;
+  MODEL_ADAPTER::path_from_plan(o, p);
+  MODEL_ADAPTER::lane_line(o, MODEL_ADAPTER::LANE_LEFT, l);
+  MODEL_ADAPTER::lane_line(o, MODEL_ADAPTER::LANE_RIGHT, r);
+  MODEL_ADAPTER::lead(o, 0, ld);
+  MODEL_ADAPTER::lead(o, 1, lf);
+  MODEL_ADAPTER::longi(o, g);
+  MODEL_ADAPTER::meta(o, mt);
 
   capnp::MallocMessageBuilder msg;
   cereal::Event::Builder event = msg.initRoot<cereal::Event>();
@@ -143,9 +164,9 @@ void model_publish(PubSocket *sock, uint32_t frame_id,
   fill_lead(framed.initLeadFuture(), lf);
 
   // road edges ride in the unused freePath list (format in model083_adapter.h road_edges)
-  float edges[m083::ROAD_EDGE_PACK_N];
-  m083::road_edges(o, edges);
-  framed.setFreePath(kj::ArrayPtr<const float>(edges, m083::ROAD_EDGE_PACK_N));
+  float edges[MODEL_ADAPTER::ROAD_EDGE_PACK_N];
+  MODEL_ADAPTER::road_edges(o, edges);
+  framed.setFreePath(kj::ArrayPtr<const float>(edges, MODEL_ADAPTER::ROAD_EDGE_PACK_N));
 
   auto meta = framed.initMeta();
   meta.setDesireState(kj::ArrayPtr<const float>(mt.desire_state, DESIRE_LEN));
@@ -153,7 +174,7 @@ void model_publish(PubSocket *sock, uint32_t frame_id,
   meta.setGasDisengageProb(mt.gas);
   meta.setBrakeDisengageProb(mt.brake);
   meta.setSteerOverrideProb(mt.steer);
-  meta.setDesirePrediction(kj::ArrayPtr<const float>(mt.desire_pred, m083::DESIRE_PRED_N));
+  meta.setDesirePrediction(kj::ArrayPtr<const float>(mt.desire_pred, MODEL_ADAPTER::DESIRE_PRED_N));
 
   auto words = capnp::messageToFlatArray(msg);
   auto bytes = words.asBytes();
@@ -162,8 +183,8 @@ void model_publish(PubSocket *sock, uint32_t frame_id,
 
 void posenet_publish(PubSocket *sock, uint32_t frame_id,
                    const ModelDataRaw net_outputs, uint64_t timestamp_eof) {
-  m083::Pose ps;
-  m083::pose(net_outputs.raw, ps);
+  MODEL_ADAPTER::Pose ps;
+  MODEL_ADAPTER::pose(net_outputs.raw, ps);
 
   capnp::MallocMessageBuilder msg;
   cereal::Event::Builder event = msg.initRoot<cereal::Event>();

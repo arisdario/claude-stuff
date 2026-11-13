@@ -5,8 +5,13 @@
 // = 581 float32 per frame.   g++ -std=c++11 -O2 replay_decode.cc -o replay_decode && ./replay_decode in.bin out.bin
 #include <stdio.h>
 #include <vector>
+#ifdef MODEL0812
+#include "../model0812_adapter.h"      // g++ -DMODEL0812 ... : decode 0.8.12 outputs (6472 floats per frame)
+using namespace m0812;
+#else
 #include "../model083_adapter.h"
 using namespace m083;
+#endif
 
 int main(int argc, char **argv) {
   if (argc < 3) { fprintf(stderr, "usage: replay_decode raw_outputs.bin decoded.bin\n"); return 1; }

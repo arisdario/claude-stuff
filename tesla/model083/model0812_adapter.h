@@ -1,0 +1,253 @@
+// model0812_adapter.h - turns the raw output of the openpilot 0.8.12 driving model (supercombo, Dec 2021: the newest
+// model that runs on comma two / EON hardware; 0.8.14+ need comma three's second camera) into the fields the 0.7.5
+// "model" message carries, so 0.7.5's planners, radard and the Tesla code keep working unchanged.
+// Same interface as model083_adapter.h (driving.cc uses whichever one is installed). Plain C++11, unit-tested in
+// test_adapter0812.cc on any PC.
+//
+// Layout from openpilot v0.8.12 selfdrive/modeld/models/driving.{h,cc} (ModelOutput structs; output 5960 floats +
+// 512 recurrent = 6472, checked against the real 0.8.12 ONNX). Inputs are identical to 0.8.3. What differs from 0.8.3:
+//   - plan: 15 values per time step (position, velocity, acceleration, rotation, rotation rate), stds in a 2nd block
+//   - lane line probs: 4 PAIRS (val_deprecated, val) - the second one is used, like 0.8.12's fill_lane_lines
+//   - leads: 2 hypotheses, each a 6-point trajectory (t = 0,2,..,10 s) of x, y, v, a + 3 selection logits (0/2/4 s)
+//   - meta: engaged + disengage predictions at 5 horizons (2..10 s) + blinker probs; gas/brake/steer use horizon 0
+// Conventions shared with 0.8.3 (handled the same way): y positive = RIGHT (negated), log-stds (exp), desire shifted.
+#pragma once
+#include <math.h>
+#include <string.h>
+
+namespace m0812 {
+
+const int TRAJECTORY_SIZE = 33;
+const double T_IDXS[TRAJECTORY_SIZE] = {0., 0.00976562, 0.0390625, 0.08789062, 0.15625, 0.24414062, 0.3515625,
+  0.47851562, 0.625, 0.79101562, 0.9765625, 1.18164062, 1.40625, 1.65039062, 1.9140625, 2.19726562, 2.5,
+  2.82226562, 3.1640625, 3.52539062, 3.90625, 4.30664062, 4.7265625, 5.16601562, 5.625, 6.10351562, 6.6015625,
+  7.11914062, 7.65625, 8.21289062, 8.7890625, 9.38476562, 10.};
+const double X_IDXS[TRAJECTORY_SIZE] = {0., 0.1875, 0.75, 1.6875, 3., 4.6875, 6.75, 9.1875, 12., 15.1875, 18.75,
+  22.6875, 27., 31.6875, 36.75, 42.1875, 48., 54.1875, 60.75, 67.6875, 75., 82.6875, 90.75, 99.1875, 108.,
+  117.1875, 126.75, 136.6875, 147., 157.6875, 168.75, 180.1875, 192.};
+
+const int DESIRE_N = 8;
+const int TRAFFIC_N = 2;
+const int DESIRE_PRED_N = 32;
+const int DISENGAGE_LEN = 5, DISENGAGE_STRIDE = 7;      // gas, brake, steer, brake 3/4/5 m/s2, gas pressed
+const int BLINKER_LEN = 6;
+const int PLAN_MHP_N = 5;
+const int PLAN_MHP_COLUMNS = 15;
+const int PLAN_MHP_VALS = 15 * 33;
+const int PLAN_MHP_SELECTION = 1;
+const int PLAN_MHP_GROUP_SIZE = 2 * PLAN_MHP_VALS + PLAN_MHP_SELECTION;
+const int LEAD_MHP_N = 2;
+const int LEAD_TRAJ_LEN = 6, LEAD_PRED_DIM = 4;          // t = 0, 2, 4, 6, 8, 10 s; x, y, v, a
+const int LEAD_MHP_VALS = LEAD_TRAJ_LEN * LEAD_PRED_DIM;
+const int LEAD_MHP_SELECTION = 3;
+const int LEAD_MHP_GROUP_SIZE = 2 * LEAD_MHP_VALS + LEAD_MHP_SELECTION;
+const int POSE_N = 12;
+const long MODEL_DLC_BYTES = 56684955L;          // exact size of the matching supercombo.dlc (modeld refuses any other)
+
+const int PLAN_IDX = 0;
+const int LL_IDX = PLAN_IDX + PLAN_MHP_N * PLAN_MHP_GROUP_SIZE;
+const int LL_PROB_IDX = LL_IDX + 4 * 2 * 2 * 33;
+const int RE_IDX = LL_PROB_IDX + 4 * 2;                   // 4 (val_deprecated, val) pairs
+const int LEAD_IDX = RE_IDX + 2 * 2 * 2 * 33;
+const int LEAD_PROB_IDX = LEAD_IDX + LEAD_MHP_N * LEAD_MHP_GROUP_SIZE;
+const int DESIRE_STATE_IDX = LEAD_PROB_IDX + 3;
+const int META_IDX = DESIRE_STATE_IDX + DESIRE_N;          // engaged
+const int DISENGAGE_IDX = META_IDX + 1;
+const int BLINKER_IDX = DISENGAGE_IDX + DISENGAGE_LEN * DISENGAGE_STRIDE;
+const int DESIRE_PRED_IDX = BLINKER_IDX + BLINKER_LEN * 2;
+const int POSE_IDX = DESIRE_PRED_IDX + DESIRE_PRED_N;
+const int OUTPUT_SIZE = POSE_IDX + POSE_N;
+const int TEMPORAL_SIZE = 512;              // recurrent state, same as 0.8.3 (0.7.5's model used 1024)
+
+const int PATH_N = 192;                     // 0.7.5 MODEL_PATH_DISTANCE: one point per metre
+const float NO_DATA_STD = 1.0e3f;           // 0.7.5 marks points past the valid length with this std
+const int LANE_LEFT = 1, LANE_RIGHT = 2;    // inner lane lines of the 4
+
+struct Line { float points[PATH_N]; float stds[PATH_N]; float poly[4]; float prob; float std; };
+struct Lead { float prob, dist, std, rel_y, rel_y_std, rel_vel, rel_vel_std, rel_a, rel_a_std; };
+struct Longi { float dist[10], speed[10], accel[10]; };
+struct Meta { float desire_state[DESIRE_N]; float engaged, gas, brake, steer; float desire_pred[DESIRE_PRED_N]; };
+struct Pose { float trans[3], trans_std[3], rot[3], rot_std[3]; };
+
+inline float sigm(float x) { return 1.0f / (1.0f + expf(-x)); }
+
+inline void softmax(const float *in, float *out, int n) {
+  float mx = in[0];
+  for (int i = 1; i < n; i++) if (in[i] > mx) mx = in[i];
+  float den = 0;
+  for (int i = 0; i < n; i++) { out[i] = expf(in[i] - mx); den += out[i]; }
+  for (int i = 0; i < n; i++) out[i] /= den;
+}
+
+// best hypothesis: the one whose selection logit (at offset from the END of its group) is largest (0.8.12 get_best_prediction)
+inline const float *best(const float *data, int n, int group_size, int offset) {
+  int mi = 0;
+  for (int i = 1; i < n; i++)
+    if (data[(i + 1) * group_size + offset] > data[(mi + 1) * group_size + offset]) mi = i;
+  return &data[mi * group_size];
+}
+
+// linear interpolation of ys over increasing xs, clamped at both ends
+inline float interp(double x, const double *xs, const float *ys, int n) {
+  if (x <= xs[0]) return ys[0];
+  if (x >= xs[n - 1]) return ys[n - 1];
+  for (int i = 1; i < n; i++) {
+    if (x <= xs[i]) {
+      double t = (x - xs[i - 1]) / (xs[i] - xs[i - 1]);
+      return (float)(ys[i - 1] + t * (ys[i] - ys[i - 1]));
+    }
+  }
+  return ys[n - 1];
+}
+
+// 0.7.5 poly_fit: weighted least squares of (y - y0) on [x^3, x^2, x] for x = 0..191, weights 1/std; poly[3] = y0.
+// Normal equations with column scaling, in double (3x3, solved by Gaussian elimination with partial pivoting).
+inline void poly_fit(const float *pts, const float *stds, float *poly) {
+  const double y0 = pts[0];
+  double A[3][3] = {{0}}, b[3] = {0}, sc[3] = {0};
+  for (int i = 0; i < PATH_N; i++) {
+    const double x = i, w = 1.0 / ((double)stds[i] * stds[i]);
+    const double v[3] = {x * x * x, x * x, x};
+    for (int j = 0; j < 3; j++) sc[j] += v[j] * v[j] * w;
+  }
+  for (int j = 0; j < 3; j++) sc[j] = sc[j] > 0 ? 1.0 / sqrt(sc[j]) : 1.0;
+  for (int i = 0; i < PATH_N; i++) {
+    const double x = i, w = 1.0 / ((double)stds[i] * stds[i]), r = pts[i] - y0;
+    const double v[3] = {x * x * x * sc[0], x * x * sc[1], x * sc[2]};
+    for (int j = 0; j < 3; j++) { b[j] += v[j] * r * w; for (int k = 0; k < 3; k++) A[j][k] += v[j] * v[k] * w; }
+  }
+  for (int c = 0; c < 3; c++) {
+    int p = c;
+    for (int r = c + 1; r < 3; r++) if (fabs(A[r][c]) > fabs(A[p][c])) p = r;
+    if (p != c) { for (int k = 0; k < 3; k++) { double t = A[c][k]; A[c][k] = A[p][k]; A[p][k] = t; } double t = b[c]; b[c] = b[p]; b[p] = t; }
+    if (fabs(A[c][c]) < 1e-300) { poly[0] = poly[1] = poly[2] = 0; poly[3] = (float)y0; return; }
+    for (int r = c + 1; r < 3; r++) {
+      const double f = A[r][c] / A[c][c];
+      for (int k = c; k < 3; k++) A[r][k] -= f * A[c][k];
+      b[r] -= f * b[c];
+    }
+  }
+  double s[3];
+  for (int c = 2; c >= 0; c--) {
+    double acc = b[c];
+    for (int k = c + 1; k < 3; k++) acc -= A[c][k] * s[k];
+    s[c] = acc / A[c][c];
+  }
+  for (int j = 0; j < 3; j++) poly[j] = (float)(s[j] * sc[j]);
+  poly[3] = (float)y0;
+}
+
+// predicted path from the most likely plan: y (left positive) at every metre; points past where the plan reaches
+// get NO_DATA_STD so the fit ignores them (like 0.7.5's valid_len), but the first 5 always count
+inline void path_from_plan(const float *out, Line &L) {
+  const float *pl = best(out + PLAN_IDX, PLAN_MHP_N, PLAN_MHP_GROUP_SIZE, -1);
+  double px[TRAJECTORY_SIZE]; float py[TRAJECTORY_SIZE], ps[TRAJECTORY_SIZE];
+  double mx = 0;
+  for (int i = 0; i < TRAJECTORY_SIZE; i++) {
+    double x = pl[i * PLAN_MHP_COLUMNS + 0];
+    if (i > 0 && x < px[i - 1] + 1e-3) x = px[i - 1] + 1e-3;     // keep x increasing (standstill / noise)
+    px[i] = x; if (x > mx) mx = x;
+    py[i] = -pl[i * PLAN_MHP_COLUMNS + 1];
+    ps[i] = expf(pl[PLAN_MHP_VALS + i * PLAN_MHP_COLUMNS + 1]);
+  }
+  const bool short_plan = mx < 5.0;          // standing / creeping: the plan says nothing about the road ahead
+  for (int d = 0; d < PATH_N; d++) {
+    L.points[d] = short_plan ? py[0] : interp(d, px, py, TRAJECTORY_SIZE);
+    L.stds[d] = (d < 5 || d <= mx) ? (short_plan ? ps[0] : interp(d, px, ps, TRAJECTORY_SIZE)) : NO_DATA_STD;
+    if (!(L.stds[d] > 1e-3f)) L.stds[d] = 1e-3f;
+  }
+  L.prob = 1.0f;
+  L.std = ps[0];
+  poly_fit(L.points, L.stds, L.poly);
+}
+
+// one of the 4 lane lines (k = 1 left inner, 2 right inner), y left positive at every metre
+inline void lane_line(const float *out, int k, Line &L) {
+  const float *ln = out + LL_IDX + k * TRAJECTORY_SIZE * 2;
+  const float *sd = out + LL_IDX + 2 * TRAJECTORY_SIZE * (4 + k);
+  float ly[TRAJECTORY_SIZE], ls[TRAJECTORY_SIZE];
+  for (int i = 0; i < TRAJECTORY_SIZE; i++) { ly[i] = -ln[2 * i]; ls[i] = expf(sd[2 * i]); }
+  for (int d = 0; d < PATH_N; d++) {
+    L.points[d] = interp(d, X_IDXS, ly, TRAJECTORY_SIZE);
+    L.stds[d] = interp(d, X_IDXS, ls, TRAJECTORY_SIZE);
+    if (!(L.stds[d] > 1e-3f)) L.stds[d] = 1e-3f;
+  }
+  L.prob = sigm(out[LL_PROB_IDX + 2 * k + 1]);   // (val_deprecated, val): 0.8.12 uses val
+  L.std = expf(sd[0]);
+  poly_fit(L.points, L.stds, L.poly);
+}
+
+// lead now (t = 0) or in 2 s (t = 1), distance from the camera like 0.7.5 (radard subtracts RADAR_TO_CAMERA).
+// 0.8.12: the hypothesis most likely for that time (selection logit t), and its trajectory point at that time
+// (mean[0] = now, mean[1] = 2 s) - the 0.7.5 leadFuture is "the lead in 2 s".
+inline void lead(const float *out, int t, Lead &R) {
+  const float *d = best(out + LEAD_IDX, LEAD_MHP_N, LEAD_MHP_GROUP_SIZE, t - LEAD_MHP_SELECTION);
+  const float *m = d + t * LEAD_PRED_DIM, *sd = d + LEAD_MHP_VALS + t * LEAD_PRED_DIM;
+  R.prob = sigm(out[LEAD_PROB_IDX + t]);
+  R.dist = m[0];            R.std = expf(sd[0]);
+  R.rel_y = -m[1];          R.rel_y_std = expf(sd[1]);
+  R.rel_vel = m[2];         R.rel_vel_std = expf(sd[2]);
+  R.rel_a = m[3];           R.rel_a_std = expf(sd[3]);
+}
+
+// 0.7.5 "longitudinal": distance / speed / acceleration along the plan at t = 0..9 s
+inline void longi(const float *out, Longi &G) {
+  const float *pl = best(out + PLAN_IDX, PLAN_MHP_N, PLAN_MHP_GROUP_SIZE, -1);
+  float x[TRAJECTORY_SIZE], v[TRAJECTORY_SIZE], a[TRAJECTORY_SIZE];
+  for (int i = 0; i < TRAJECTORY_SIZE; i++) {
+    x[i] = pl[i * PLAN_MHP_COLUMNS + 0]; v[i] = pl[i * PLAN_MHP_COLUMNS + 3]; a[i] = pl[i * PLAN_MHP_COLUMNS + 6];
+  }
+  for (int s = 0; s < 10; s++) {
+    G.dist[s] = interp(s, T_IDXS, x, TRAJECTORY_SIZE);
+    G.speed[s] = interp(s, T_IDXS, v, TRAJECTORY_SIZE);
+    G.accel[s] = interp(s, T_IDXS, a, TRAJECTORY_SIZE);
+  }
+}
+
+inline void meta(const float *out, Meta &M) {
+  float st[DESIRE_N];
+  softmax(out + DESIRE_STATE_IDX, st, DESIRE_N);
+  for (int i = 0; i < DESIRE_N - 1; i++) M.desire_state[i] = st[i + 1];   // 0.7.5 reads [desire - 1]
+  M.desire_state[DESIRE_N - 1] = 0.0f;
+  M.engaged = sigm(out[META_IDX]);
+  const float *dg = out + DISENGAGE_IDX;                  // horizon 0 (2 s), like 0.8.3's single values
+  M.gas = sigm(dg[0]);
+  M.brake = sigm(dg[1]);
+  M.steer = sigm(dg[2]);
+  for (int i = 0; i < 4; i++) {           // desire_pred is read [desire - 1] too (controlsd LDW flags), so shift like desire_state
+    float dp[DESIRE_N];
+    softmax(out + DESIRE_PRED_IDX + i * DESIRE_N, dp, DESIRE_N);
+    for (int j = 0; j < DESIRE_N - 1; j++) M.desire_pred[i * DESIRE_N + j] = dp[j + 1];
+    M.desire_pred[i * DESIRE_N + (DESIRE_N - 1)] = 0.0f;
+  }
+}
+
+inline void pose(const float *out, Pose &P) {
+  const float *p = out + POSE_IDX;
+  for (int i = 0; i < 3; i++) {
+    P.trans[i] = p[i];      P.trans_std[i] = expf(p[6 + i]);
+    P.rot[i] = p[3 + i];    P.rot_std[i] = expf(p[9 + i]);
+  }
+}
+
+// 0.7.5's modeld feeds the desire one-hot shifted by one (index = desire - 1); the model wants index = desire
+inline void desire_to_083(const float *desire_075, float *desire_083) {
+  desire_083[0] = 0.0f;
+  for (int i = 1; i < DESIRE_N; i++) desire_083[i] = desire_075[i - 1];
+}
+
+// Road edges (curbs, walls, end of the drivable surface) have no field in the 0.7.5 message; they travel in the
+// unused ModelData.freePath list:  [ROAD_EDGE_FORMAT, left edge y x33, right edge y x33, left std, right std]
+// y is left-positive at the X_IDXS distances, like the lanes. radarweb reads them (empty list = old model).
+const float ROAD_EDGE_FORMAT = 1.0f;
+const int ROAD_EDGE_PACK_N = 1 + 2 * TRAJECTORY_SIZE + 2;
+inline void road_edges(const float *out, float *pack) {
+  pack[0] = ROAD_EDGE_FORMAT;
+  for (int k = 0; k < 2; k++) {
+    const float *e = out + RE_IDX + k * TRAJECTORY_SIZE * 2;       // ModelOutputRoadEdges.mean.{left,right}[i].y
+    for (int i = 0; i < TRAJECTORY_SIZE; i++) pack[1 + k * TRAJECTORY_SIZE + i] = -e[2 * i];
+    pack[1 + 2 * TRAJECTORY_SIZE + k] = expf(out[RE_IDX + 2 * TRAJECTORY_SIZE * (2 + k)]);
+  }
+}
+
+}  // namespace m0812
