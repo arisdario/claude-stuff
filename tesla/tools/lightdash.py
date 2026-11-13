@@ -442,15 +442,24 @@ function drawDrive(){
  g.fillStyle='#f3f6fa';g.font='300 58px system-ui';g.textAlign='center';g.fillText(Math.round((S.v||0)*3.6),W/2,py+62);g.fillStyle='#8590a0';g.font='500 13px system-ui';g.fillText('km/h',W/2,py+84);
  g.fillStyle=S.present?'rgba(130,150,170,.55)':'rgba(255,120,120,.9)';g.font='11px system-ui';
  g.fillText((S.present?'panda live':'PANDA STALE')+'  ·  cluster '+S.status.text+'  ·  emulation '+(S.emu===null?'?':S.emu?'on':'off')+(S.default?'  ·  no lane data':'')+'  ·  tap: next view',W/2,H-12);g.textAlign='left'}
-var SM={},SMM={},ST=0,SO=[],SMD=null;
+var SM={},SMM={},ST=0,SO=[],SMD=null,SU=0,SP=0,GN=0;
 function ease(dt,tau){return 1-Math.exp(-dt/tau)}
-function smooth(){ // the cars and the model's lines glide to each new 10 Hz value instead of jumping to it
- var now=Date.now()/1000,dt=ST?Math.min(0.25,now-ST):0.1;ST=now;SO=[];if(!S)return;var k=ease(dt,0.35),seen={};
- (S.obj||[]).forEach(function(o){var id=o.slot+':'+o.id,q=SM[id];
-  if(!q||Math.abs(q.dx-o.dx)>20||Math.abs(q.dy-o.dy)>3)q=SM[id]={dx:o.dx,dy:o.dy,al:q?q.al:0};   // a new or jumping track starts where it is
-  q.dx+=(o.dx-q.dx)*k;q.dy+=(o.dy-q.dy)*k;q.al=Math.min(1,q.al+dt*4);seen[id]=1;
-  SO.push({dx:q.dx,dy:q.dy,slot:o.slot,relevant:o.relevant,al:q.al})});
- for(var id in SM)if(!seen[id])delete SM[id];
+function cl(v,m){return Math.max(-m,Math.min(m,v))}
+function smooth(){ // cluster-style cars: glide (predicted between the 10 Hz updates), hold through short gaps, coast + fade out when lost, fade / slide in when new
+ var now=Date.now()/1000,dt=ST?Math.min(0.25,now-ST):0.1;ST=now;SO=[];if(!S)return;var id,q,k=ease(dt,0.5);
+ if(SU!==SP){SP=SU;var seen={};   // a new data frame arrived
+  (S.obj||[]).forEach(function(o){id=o.slot+':'+o.id;q=SM[id];
+   if(q&&(Math.abs(q.tx-o.dx)>20||Math.abs(q.ty-o.dy)>3)){SM[id+'#'+(GN++)]=q;q.lost=q.lost||now;q=null}   // a jump = another car: the old one coasts out, the new one starts
+   if(!q){for(var j in SM){var c=SM[j];if(c.lost&&c.slot==o.slot&&Math.abs(c.dx-o.dx)<6&&Math.abs(c.dy-o.dy)<1.5){q=c;delete SM[j];break}}}   // the same car back under a new id: keep it
+   if(!q){var near=o.dx<40,side=o.dy>=0?1:-1;q={dx:o.dx,dy:near?o.dy+side*1.6:o.dy,tx:o.dx,ty:o.dy,vx:0,vy:0,tu:now,al:0,fin:near?0.6:0.25}}   // close (cut-in): slow fade, slides in from the side; far: quick fade, it is small anyway
+   else{var du=Math.max(0.05,now-q.tu);q.vx=cl(q.vx+((o.dx-q.tx)/du-q.vx)*0.5,30);q.vy=cl(q.vy+((o.dy-q.ty)/du-q.vy)*0.5,3);q.tx=o.dx;q.ty=o.dy;q.tu=now}
+   q.lost=0;q.slot=o.slot;q.rel=o.relevant;SM[id]=q;seen[id]=1});
+  for(id in SM)if(!seen[id]&&!SM[id].lost)SM[id].lost=now}
+ for(id in SM){q=SM[id];
+  if(q.lost){q.tx+=q.vx*dt;q.ty+=q.vy*dt;q.tu=now;if(now-q.lost>0.5)q.al-=dt/0.7;if(q.al<=0||q.tx<-3){delete SM[id];continue}}   // hold 0.5 s, then fade over 0.7 s while it keeps moving
+  else q.al=Math.min(1,q.al+dt/q.fin);
+  var pt=Math.min(0.3,now-q.tu)+0.45;q.dx+=(q.tx+q.vx*pt-q.dx)*k;q.dy+=(q.ty+q.vy*pt-q.dy)*k;   // aim ahead by the smoothing lag: smooth AND where the car really is
+  SO.push({dx:q.dx,dy:q.dy,slot:q.slot,relevant:q.rel,al:Math.max(0,Math.min(1,q.al))})}
  var M=S.model;if(!M){SMD=null;return}
  ['l','r','p'].forEach(function(n){var a=M[n],b=SMM[n];if(!a){SMM[n]=null;return}if(!b||b.length!=a.length){SMM[n]=a.slice();return}for(var i=0;i<a.length;i++)b[i]+=(a[i]-b[i])*ease(dt,0.2)});
  SMD={l:SMM.l,r:SMM.r,p:SMM.p,e:M.e,pl:M.pl,pr:M.pr}}
@@ -476,7 +485,7 @@ function extras(px,py,pw,ph){var B=S.body||{},blink=(Date.now()%800)<450,i;
   g.fillStyle=col;rr(bx2,by2,bw2,bh,12);g.fill();g.fillStyle='#fff';g.textAlign='center';g.font='700 18px system-ui';g.fillText(S.al1,W/2,by2+26);
   if(S.al2){g.font='500 14px system-ui';g.fillText(S.al2,W/2,by2+48)}g.textAlign='left'}}
 function draw(){smooth();if(mode==0)drawDrive();else drawDiag()}
-function conn(){var es=new EventSource('/stream');es.onmessage=function(e){S=JSON.parse(e.data)};es.onerror=function(){es.close();setTimeout(conn,1500)}}
+function conn(){var es=new EventSource('/stream');es.onmessage=function(e){S=JSON.parse(e.data);SU=Date.now()/1000};es.onerror=function(){es.close();setTimeout(conn,1500)}}
 var LF=0;function loop(t){if(t-LF>=33){LF=t;draw()}requestAnimationFrame(loop)}   // ~30 fps: data arrives at 10 Hz, the smoothing fills the frames in between
 rs();conn();requestAnimationFrame(loop);</script></body></html>"""
 
