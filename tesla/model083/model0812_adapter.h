@@ -8,7 +8,9 @@
 // 512 recurrent = 6472, checked against the real 0.8.12 ONNX). Inputs are identical to 0.8.3. What differs from 0.8.3:
 //   - plan: 15 values per time step (position, velocity, acceleration, rotation, rotation rate), stds in a 2nd block
 //   - lane line probs: 4 PAIRS (val_deprecated, val) - the second one is used, like 0.8.12's fill_lane_lines
-//   - leads: 2 hypotheses, each a 6-point trajectory (t = 0,2,..,10 s) of x, y, v, a + 3 selection logits (0/2/4 s)
+//   - leads: 2 hypotheses, each a 6-point trajectory (t = 0,2,..,10 s) of x, y, v, a + 3 selection logits (0/2/4 s);
+//     lead v/a are ABSOLUTE (0.8.3: relative) -> converted to relative with the plan's own ego speed
+//   - lane probs get comma's planner std discount (0.7.5's lane_planner doesn't apply it)
 //   - meta: engaged + disengage predictions at 5 horizons (2..10 s) + blinker probs; gas/brake/steer use horizon 0
 // Conventions shared with 0.8.3 (handled the same way): y positive = RIGHT (negated), log-stds (exp), desire shifted.
 #pragma once
@@ -172,22 +174,30 @@ inline void lane_line(const float *out, int k, Line &L) {
     L.stds[d] = interp(d, X_IDXS, ls, TRAJECTORY_SIZE);
     if (!(L.stds[d] > 1e-3f)) L.stds[d] = 1e-3f;
   }
-  L.prob = sigm(out[LL_PROB_IDX + 2 * k + 1]);   // (val_deprecated, val): 0.8.12 uses val
   L.std = expf(sd[0]);
+  // (val_deprecated, val): 0.8.12 uses val. Then comma's v0.8.12 lane_planner discount, which 0.7.5's planner lacks:
+  // prob *= interp(std, [0.15, 0.3], [1, 0]) - a lane line the model is unsure where it is gets no weight.
+  const float mod = L.std <= 0.15f ? 1.0f : (L.std >= 0.3f ? 0.0f : (0.3f - L.std) / 0.15f);
+  L.prob = sigm(out[LL_PROB_IDX + 2 * k + 1]) * mod;
   poly_fit(L.points, L.stds, L.poly);
 }
 
-// lead now (t = 0) or in 2 s (t = 1), distance from the camera like 0.7.5 (radard subtracts RADAR_TO_CAMERA).
-// 0.8.12: the hypothesis most likely for that time (selection logit t), and its trajectory point at that time
-// (mean[0] = now, mean[1] = 2 s) - the 0.7.5 leadFuture is "the lead in 2 s".
+// lead now (t = 0) and leadFuture (t = 1), distance from the camera like 0.7.5 (radard subtracts RADAR_TO_CAMERA).
+// Like comma's v0.8.12 radard (leadOne = leadsV3[0], leadTwo = leadsV3[1], both read at x[0], y[0], v[0]): the
+// hypothesis most likely for selection time t (0 s / 2 s), always at its trajectory point 0 (= now).
+// SPEED: 0.8.12's lead v/a are ABSOLUTE (comma's radar_helpers: vRel = v[0] - v_ego); 0.7.5 wants them RELATIVE
+// (0.7.5 radard: vLead = v_ego + relVel; 0.8.3 already gave relative values). The adapter has no carState, so the
+// ego speed/accel used here is the model's own estimate: the best plan's velocity.x / acceleration.x at t = 0.
 inline void lead(const float *out, int t, Lead &R) {
   const float *d = best(out + LEAD_IDX, LEAD_MHP_N, LEAD_MHP_GROUP_SIZE, t - LEAD_MHP_SELECTION);
-  const float *m = d + t * LEAD_PRED_DIM, *sd = d + LEAD_MHP_VALS + t * LEAD_PRED_DIM;
+  const float *m = d, *sd = d + LEAD_MHP_VALS;                                  // trajectory point 0
+  const float *pl = best(out + PLAN_IDX, PLAN_MHP_N, PLAN_MHP_GROUP_SIZE, -1);
+  const float v_ego = pl[3], a_ego = pl[6];                                    // plan mean[0].velocity.x / acceleration.x
   R.prob = sigm(out[LEAD_PROB_IDX + t]);
   R.dist = m[0];            R.std = expf(sd[0]);
   R.rel_y = -m[1];          R.rel_y_std = expf(sd[1]);
-  R.rel_vel = m[2];         R.rel_vel_std = expf(sd[2]);
-  R.rel_a = m[3];           R.rel_a_std = expf(sd[3]);
+  R.rel_vel = m[2] - v_ego; R.rel_vel_std = expf(sd[2]);
+  R.rel_a = m[3] - a_ego;   R.rel_a_std = expf(sd[3]);
 }
 
 // 0.7.5 "longitudinal": distance / speed / acceleration along the plan at t = 0..9 s

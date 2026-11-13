@@ -33,20 +33,33 @@ else
   [ "$(sha "$OP/models/supercombo.dlc.083")" = "$SHA" ] || die "checksum mismatch - not the 0.8.3 model, not installing"
   echo "downloaded, checksum OK"
 fi
-cp "$OP/models/supercombo.dlc.083" "$OP/models/supercombo.dlc"
 
-say "3. the adapter (0.8.3 output -> 0.7.5 messages)"
+say "3. keep the sources modeld is built from now, to put back if the build fails"
+PREV=$MD/.prev_install; rm -rf "$PREV"; mkdir -p "$PREV"
+for f in driving.h driving.cc model083_adapter.h model0812_adapter.h; do if [ -f "$MD/$f" ]; then cp "$MD/$f" "$PREV/"; fi; done
+echo "saved in $PREV"
+
+say "4. the adapter (0.8.3 output -> 0.7.5 messages)"
 cp "$HERE/driving.h" "$HERE/driving.cc" "$HERE/model083_adapter.h" "$MD/"
 rm -f "$MD/model0812_adapter.h"     # driving.cc would pick the 0.8.12 adapter if it were there (install0812.sh)
 echo "copied driving.h driving.cc model083_adapter.h"
 
-say "4. PCC with the curve-limit fix (the new model turns PCC's camera curve limit on)"
+say "5. PCC with the curve-limit fix (the new model turns PCC's camera curve limit on)"
 for f in PCC_module.py pcc_curves.py; do
   if [ -f "$CAR/$f" ] && cmp -s "$REPO/tesla/$f" "$CAR/$f"; then echo "$f already current"; else cp "$REPO/tesla/$f" "$CAR/$f"; echo "updated $f"; fi
 done
 
-say "5. rebuild modeld"
-cd "$OP" && scons -j4 selfdrive/modeld/_modeld || die "build failed - run uninstall.sh to go back, and send me the error"
+say "6. rebuild modeld (the model file is swapped only AFTER this succeeds)"
+if ! (cd "$OP" && scons -j4 selfdrive/modeld/_modeld); then
+  echo "build FAILED - putting the previous sources back; the model file was NOT changed"
+  rm -f "$MD/model083_adapter.h" "$MD/model0812_adapter.h"; cp "$PREV"/* "$MD/" 2>/dev/null || true
+  (cd "$OP" && scons -j4 selfdrive/modeld/_modeld) >/dev/null 2>&1 || true
+  die "build failed - nothing switched. Send me the error above"
+fi
+
+say "7. switch the model file (build OK)"
+cp "$OP/models/supercombo.dlc.083" "$OP/models/supercombo.dlc"
+echo "models/supercombo.dlc = the 0.8.3 model"
 
 say "done"
 echo "Reboot, then with the car on and openpilot NOT engaged:"

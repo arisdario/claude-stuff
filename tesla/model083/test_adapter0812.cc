@@ -44,18 +44,18 @@ int main() {
   const float ly[4] = {-5.4f, -1.8f, 1.7f, 5.3f};
   op0812::ModelOutputYZ *lm[4] = {lanes.mean.left_far.data(), lanes.mean.left_near.data(), lanes.mean.right_near.data(), lanes.mean.right_far.data()};
   op0812::ModelOutputYZ *ls[4] = {lanes.std.left_far.data(), lanes.std.left_near.data(), lanes.std.right_near.data(), lanes.std.right_far.data()};
-  for (int k = 0; k < 4; k++) for (int i = 0; i < 33; i++) { lm[k][i].y = ly[k]; ls[k][i].y = logf(0.2f + 0.1f * k); }
+  for (int k = 0; k < 4; k++) for (int i = 0; i < 33; i++) { lm[k][i].y = ly[k]; ls[k][i].y = logf(0.10f + 0.05f * k); }   // near lanes: 0.15, 0.20
   lanes.prob.left_near = {logit(0.01f), logit(0.9f)};
   lanes.prob.right_near = {logit(0.99f), logit(0.3f)};
   // --- road edges ---
   for (int i = 0; i < 33; i++) { edges.mean.left[i].y = -6.0f; edges.mean.right[i].y = 4.5f; }
   edges.std.left[0].y = logf(0.4f); edges.std.right[0].y = logf(0.6f);
-  // --- leads: hypothesis 1 best NOW (30 m, 1 m right), hypothesis 0 best for 2 s (45 m at its 2 s point) ---
+  // --- leads (v/a ABSOLUTE in 0.8.12): hypothesis 1 best NOW = a STOPPED car 30 m ahead, 1 m right; hypothesis 0
+  //     best for 2 s = a car at 15 m/s, 45 m ahead NOW (comma's leadTwo reads point 0). Ego (plan) = 20 m/s, 0.5 m/s2.
   for (int h = 0; h < 2; h++) for (int i = 0; i < 6; i++) {
-    leads.prediction[h].mean[i] = {(h == 1 ? 30.0f : 60.0f) + 7.5f * i, h == 1 ? 1.0f : -2.0f, -3.0f + i, 0.2f};
+    leads.prediction[h].mean[i] = {(h == 1 ? 30.0f : 45.0f) + 7.5f * i, h == 1 ? 1.0f : -2.0f, h == 1 ? 0.0f : 15.0f, 0.2f};
     leads.prediction[h].std[i] = {logf(1.5f + i), logf(0.4f), logf(0.8f), logf(0.5f)};
   }
-  leads.prediction[0].mean[1].x = 45.0f;
   leads.prediction[1].prob = {3.0f, -2.0f, 0.0f}; leads.prediction[0].prob = {-1.0f, 4.0f, 0.0f};
   leads.prob = {logit(0.8f), logit(0.6f), logit(0.5f)};
   // --- meta / pose ---
@@ -74,16 +74,18 @@ int main() {
   near("path std from plan std (exp)", p.stds[10], 0.3, 1e-3);
   near("left lane = -left_near (left positive)", l.points[20], 1.8, 1e-4);
   near("right lane = -right_near", r.points[20], -1.7, 1e-4);
-  near("left lane prob uses .val, not val_deprecated", l.prob, 0.9, 1e-4);
-  near("right lane prob uses .val", r.prob, 0.3, 1e-4);
-  near("left lane std (exp of std[0].y)", l.std, 0.3, 1e-4);
+  near("left lane prob uses .val (std 0.15: no discount)", l.prob, 0.9, 1e-4);
+  near("right lane prob .val x comma std discount (0.20)", r.prob, 0.3 * (0.3 - 0.2) / 0.15, 1e-4);
+  near("left lane std (exp of std[0].y)", l.std, 0.15, 1e-4);
   near("lead now: best-for-t0 hypothesis, mean[0].x", ld.dist, 30.0, 1e-4);
   near("lead now: y negated", ld.rel_y, -1.0, 1e-4);
-  near("lead now: v", ld.rel_vel, -3.0, 1e-4);
+  near("lead now: STOPPED car at 20 m/s ego -> relVel -20", ld.rel_vel, -20.0, 1e-4);
+  near("lead now: relative accel = 0.2 - plan 0.5", ld.rel_a, -0.3, 1e-4);
   near("lead now: x std = exp(std[0].x)", ld.std, 1.5, 1e-4);
   near("lead now prob = sigmoid(leads.prob[0])", ld.prob, 0.8, 1e-4);
-  near("lead 2 s: best-for-t1 hypothesis, mean[1].x", lf.dist, 45.0, 1e-4);
-  near("lead 2 s: x std = exp(std[1].x)", lf.std, 2.5, 1e-4);
+  near("leadFuture: best-for-t1 hypothesis, point 0 x", lf.dist, 45.0, 1e-4);
+  near("leadFuture: x std = exp(std[0].x)", lf.std, 1.5, 1e-4);
+  near("leadFuture: relVel = 15 - 20", lf.rel_vel, -5.0, 1e-4);
   near("lead 2 s prob = sigmoid(leads.prob[1])", lf.prob, 0.6, 1e-4);
   near("longitudinal speed @3 s", g.speed[3], 20.0, 1e-3);
   near("longitudinal accel @3 s", g.accel[3], 0.5, 1e-3);

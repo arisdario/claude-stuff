@@ -37,6 +37,22 @@ class T(unittest.TestCase):
     self.assertIn('model0812_adapter.h', i0812)
     self.assertIn('209e9544e456dbc2a7d60490da65154e129bc84830909d8d931f97b3df93949b', i0812)   # the 0.8.12 dlc
 
+  def test_model_file_switched_only_after_a_successful_build(self):
+    for name, tag in (('install.sh', '083'), ('install0812.sh', '0812')):
+      s = open(os.path.join(M, name)).read()
+      build = s.index('scons -j4 selfdrive/modeld/_modeld')
+      swap = s.index('cp "$OP/models/supercombo.dlc.%s" "$OP/models/supercombo.dlc"' % tag)
+      self.assertLess(build, swap, name)                                 # an old modeld never runs a new model file
+      import re
+      writes = re.findall(r'^\s*cp [^\n]*"\$OP/models/supercombo\.dlc"\s*$', s, re.M)
+      self.assertEqual(len(writes), 1, (name, writes))                   # exactly one place writes the live model file
+      self.assertIn('putting the previous sources back', s)
+
+  def test_0812_lead_speed_is_made_relative(self):
+    s = open(os.path.join(M, 'model0812_adapter.h')).read()
+    self.assertIn('R.rel_vel = m[2] - v_ego;', s)                       # 0.8.12 lead v is absolute; 0.7.5 wants relative
+    self.assertIn('const float *m = d, *sd = d + LEAD_MHP_VALS;', s)    # leadFuture = point 0, like comma's leadTwo
+
 
 if __name__ == '__main__':
   unittest.main()

@@ -263,3 +263,25 @@ Built against Tinkla `0.7.5.a` (BogGyver/openpilot).
 ## Steering-wiggle investigation
 
 See `tesla/diag/README.md` (synchronised read-only diagnostic logger: `start_diagnostics.sh` / `stop_diagnostics.sh`).
+
+---
+
+## openpilot 0.8.12 model (`install0812.sh`)
+
+0.8.12 (Dec 2021) is the newest driving model that runs on EON / comma two hardware (0.8.14+ need comma three's second
+camera). Same inputs as 0.8.3; different output layout, decoded by `model0812_adapter.h` (`driving.cc` uses it when
+it is installed). Every offset is checked against comma's own v0.8.12 structs (`test_adapter0812.cc`, which writes its
+fake output through `tools/openpilot_0812_structs.h`).
+
+What the 0.8.12 adapter converts (beyond what the 0.8.3 one does):
+- **lead speed/accel are absolute in 0.8.12** (relative in 0.8.3) -> made relative with the model's own ego speed (best
+  plan velocity at t = 0), so 0.7.5's radard (`vLead = v_ego + relVel`) gets what it expects;
+- `leadFuture` = the hypothesis most likely at 2 s, read at its current point (like comma's radard `leadTwo`);
+- lane probabilities use the second value of each pair and comma's planner discount `prob *= interp(std, [.15, .3], [1, 0])`.
+
+Safety: `modeld` refuses to run when `models/supercombo.dlc` does not have the exact size the installed adapter
+expects, and the install scripts switch the model file only **after** `modeld` built successfully (a failed build puts
+the previous sources back and leaves the model file unchanged).
+
+Switch: `sh install0812.sh` (0.8.12) / `sh install.sh` (0.8.3) / `sh uninstall.sh` (stock 0.7.5), then reboot.
+Not yet verified on the car: speed on the EON GPU (it ran correctly on the CPU runtime of the SNPE that ships with 0.7.5).
