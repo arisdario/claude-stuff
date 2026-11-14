@@ -84,6 +84,11 @@ class ACCController():
     self.new_speed = 0
     average_speed_over_x_suggestions = 20 # 1 second (20x a second)
     self.fleet_speed = FleetSpeed(average_speed_over_x_suggestions)
+    # CURVEACC: slow down for curves with the cruise buttons (no pedal). curve_cap_kph = the curve speed now (999 = none),
+    # curve_lowered = we pressed down for a curve and will press back up to your speed after it.
+    self.curve_cap_kph = 999.
+    self.curve_lowered = False
+    self.curve_warn_time_ms = 0
 
   # Updates the internal state of this controller based on user input,
   # specifically the steering wheel mounted cruise control stalk, and OpenPilot
@@ -111,10 +116,8 @@ class ACCController():
         # A double pull enables ACC. updating the max ACC speed if necessary.
         self.enable_adaptive_cruise = True
         # Increase ACC speed to match current, if applicable.
-        if self.adaptive:
-          self.acc_speed_kph = max(CS.v_ego_raw * CV.MS_TO_KPH, self.speed_limit_kph)
-        else:
-          self.acc_speed_kph = CS.v_ego_raw * CV.MS_TO_KPH
+        # You set the speed: engage at the current speed (the map speed limit only gives a warning, carcontroller).
+        self.acc_speed_kph = CS.v_ego_raw * CV.MS_TO_KPH
         self.user_has_braked = False
         self.has_gone_below_min_speed = False
       else:
@@ -187,13 +190,10 @@ class ACCController():
   def update_acc(self, enabled, CS, frame, actuators, pcm_speed, speed_limit_kph, set_speed_limit_active, speed_limit_offset):
     # Adaptive cruise control
     self.prev_speed_limit_kph = self.speed_limit_kph
-    if set_speed_limit_active and speed_limit_kph > 0:
-      self.speed_limit_kph = speed_limit_kph + speed_limit_offset
-      if int(self.prev_speed_limit_kph) != int(self.speed_limit_kph):
-        self.acc_speed_kph = self.speed_limit_kph
-        self.fleet_speed.reset_averager()
-    else: # reset internal speed limit, so double pull doesn't set higher speed than current (e.g. after leaving the highway)
-      self.speed_limit_kph = 0.
+    # The map speed limit no longer changes the set speed: the car's two map limits flip back and forth (50 <-> 60,
+    # 90 <-> 50 in the logs) and every flip used to overwrite the speed you chose. You set the speed with the stalk;
+    # carcontroller gives one warning when you go above the limit.
+    self.speed_limit_kph = speed_limit_kph + speed_limit_offset if (set_speed_limit_active and speed_limit_kph > 0) else 0.
     current_time_ms = _current_time_millis()
     if CruiseButtons.should_be_throttled(CS.cruise_buttons):
       self.human_cruise_action_time = current_time_ms
@@ -232,7 +232,14 @@ class ACCController():
         # and speed more directly.
         # Bring in the lead car distance from the radarState feed
         
+        self.curve_cap_kph = self._curve_cap_kph(CS)
         button_to_press = self._calc_follow_button(CS, lead_1, speed_limit_kph, set_speed_limit_active, speed_limit_offset, frame)
+        # CURVEACC: the lead car logic keeps priority - its slow-down / cancel always wins; otherwise the curve may press
+        # down (or, after the curve, back up to your speed)
+        if not (button_to_press is not None and (CruiseButtons.is_decel(button_to_press) or button_to_press == CruiseButtons.CANCEL)):
+          curve_button = self._curve_button(CS, lead_1)
+          if curve_button is not None:
+            button_to_press = curve_button
     if button_to_press:
       self.automated_cruise_action_time = current_time_ms
       # If trying to slow below the min cruise speed, just cancel cruise.
@@ -264,6 +271,7 @@ class ACCController():
     future_vrel_kph = lead_speed_kph - CS.v_cruise_actual
     # How much we can accelerate without exceeding the max allowed speed.
     max_acc_speed_kph = self.fleet_speed.adjust(CS, self.acc_speed_kph * CV.KPH_TO_MS, frame) * CV.MS_TO_KPH
+    max_acc_speed_kph = min(max_acc_speed_kph, self.curve_cap_kph)   # CURVEACC: never speed up into a curve
     available_speed_kph = max_acc_speed_kph - CS.v_cruise_actual
     half_press_kph, full_press_kph = self._get_cc_units_kph(CS.imperial_speed_units)
     # button to issue
@@ -403,6 +411,47 @@ class ACCController():
       return sys.maxsize
     return abs(float(lead_car.dRel) / lead_car.vRel)
     
+  def _curve_cap_kph(self, CS):
+    """CURVEACC: the speed (kph) the curve ahead allows now (999 = no curve). Ignored while signalling / changing lane
+    (the camera path bends then without a curve). Warns once every 3 s when far too fast for the buttons alone."""
+    if CS.turn_signal_blinking or getattr(self.CC, 'alca_enabled', False):
+      return 999.
+    v_curve = self.CC.PCC.curve_speed_for_acc(CS)
+    if v_curve >= 254.:
+      return 999.
+    now_ms = _current_time_millis()
+    if CS.v_ego > v_curve + 4.0 and now_ms - self.curve_warn_time_ms > 3000:     # ~15 km/h over: cruise regen alone is too late
+      self.curve_warn_time_ms = now_ms
+      CS.UE.custom_alert_message(4, "Sharp curve - brake!", 150, 4)
+    # never below the lowest cruise speed (+3): lower than that the code would cancel cruise in the middle of the curve
+    return max(v_curve * CV.MS_TO_KPH, self.MIN_CRUISE_SPEED_MS * CV.MS_TO_KPH + 3.)
+
+  def _curve_button(self, CS, lead_car):
+    """CURVEACC: press down while the cruise speed is above the curve speed; after the curve press back up to your
+    speed (only what the curve took away, and not toward a lead car that is close)."""
+    if CS.pcm_acc_status != CruiseState.ENABLED:
+      self.curve_lowered = False
+      return None
+    half_press_kph, full_press_kph = self._get_cc_units_kph(CS.imperial_speed_units)
+    target_kph = min(self.acc_speed_kph, self.curve_cap_kph)
+    over_kph = CS.v_cruise_actual - target_kph
+    if over_kph >= full_press_kph and self._no_action_for(milliseconds=300):
+      self.curve_lowered = True
+      return CruiseButtons.DECEL_2ND
+    if over_kph >= half_press_kph * 1.5 and self._no_action_for(milliseconds=500):
+      self.curve_lowered = True
+      return CruiseButtons.DECEL_SET
+    if self.curve_lowered:
+      lead_close = (lead_car is not None and lead_car.status and lead_car.dRel > 0 and
+                    lead_car.dRel < CS.v_ego * CS.apFollowTimeInS * 1.5)
+      under_kph = target_kph - CS.v_cruise_actual
+      if under_kph < half_press_kph:
+        if self.curve_cap_kph >= self.acc_speed_kph:
+          self.curve_lowered = False                  # curve over and back at your speed
+      elif not lead_close and self._no_human_action_for(milliseconds=1000) and self._no_action_for(milliseconds=700):
+        return CruiseButtons.RES_ACCEL_2ND if under_kph >= full_press_kph else CruiseButtons.RES_ACCEL
+    return None
+
   def _get_cc_units_kph(self, is_imperial_units):
     # Cruise control buttons behave differently depending on whether the car
     # is configured for metric or imperial units.

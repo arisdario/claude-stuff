@@ -279,7 +279,7 @@ class PCCController():
         # Increase PCC speed to match current, if applicable.
         # We round the target speed in the user's units of measurement to avoid jumpy speed readings
         current_speed_kph_uom_rounded = int(CS.v_ego * CV.MS_TO_KPH / speed_uom_kph + 0.5) * speed_uom_kph
-        self.pedal_speed_kph = max(current_speed_kph_uom_rounded, self.speed_limit_kph)
+        self.pedal_speed_kph = current_speed_kph_uom_rounded   # you set the speed; the map limit only warns (carcontroller)
     # Handle pressing the cancel button.
     elif CS.cruise_buttons == CruiseButtons.CANCEL:
       self.enable_pedal_cruise = False
@@ -371,14 +371,9 @@ class PCCController():
       #print ("Torque level at detection %s" % (CS.torqueLevel))
       #print ("Speed level at detection %s" % (CS.v_ego * CV.MS_TO_MPH))
 
-    if set_speed_limit_active and speed_limit_ms > 0:
-      self.speed_limit_kph = (speed_limit_ms + speed_limit_offset) * CV.MS_TO_KPH
-      if int(self.prev_speed_limit_kph) != int(self.speed_limit_kph):
-        self.pedal_speed_kph = self.speed_limit_kph
-        # reset MovingAverage for fleet speed when speed limit changes
-        self.fleet_speed.reset_averager()
-    else: # reset internal speed limit, so double pull doesn't set higher speed than current (e.g. after leaving the highway)
-      self.speed_limit_kph = 0.
+    # The map speed limit no longer changes the set speed (its two sources flip back and forth and overwrote the speed you
+    # chose). You set it with the stalk; carcontroller gives one warning when you go above the limit.
+    self.speed_limit_kph = (speed_limit_ms + speed_limit_offset) * CV.MS_TO_KPH if (set_speed_limit_active and speed_limit_ms > 0) else 0.
     self.pedal_idx = (self.pedal_idx + 1) % 16
 
     self._csa_shadow_tick(CS, enabled)    # TESLACSA: log-only (reads signals, validates, logs; touches no control state)
@@ -703,6 +698,26 @@ class PCCController():
     self.last_speed_kph = new_speed_kph
     return new_speed_kph * CV.KPH_TO_MS
     
+  def curve_speed_for_acc(self, CS):
+    """CURVEACC: curve speed (m/s, 255 = no curve) for the stalk-button ACC on cars without a pedal - the same camera-path
+    limit (_curve_speed) and mapped-curve limit the pedal uses. Only called when there is no pedal (update_pdl never runs
+    then), so the model / liveMapData readers are not shared. Kill switch for the camera part: /data/curve_limit_off"""
+    try:
+      mapd = messaging.recv_one_or_none(self.live_map_data)
+      if mapd is not None:
+        lmd = mapd.liveMapData
+        self._map_curve = (lmd.curvature, lmd.distToTurn, time.time()) if (lmd.mapValid and lmd.curvatureValid) else None
+      v = self._curve_speed(CS)
+      if self._map_curve is not None and time.time() - self._map_curve[2] < 2.:
+        curv, dist, t_map = self._map_curve
+        dist = max(0., dist - CS.v_ego * (time.time() - t_map))
+        vm = max_v_in_mapped_curve_ms(curv, dist, CS.v_ego)
+        if vm:
+          v = min(v, vm)
+      return v
+    except Exception:
+      return 255.
+
   def _curve_speed(self, CS):
     """CURVELIMIT2: max speed (m/s) for the curvature of the model path, computed from the raw
     path POINTS (local finite differences) instead of the single global cubic poly. The poly is a

@@ -168,6 +168,13 @@ class CarController():
     self.set_speed_limit_active = False
     self.speed_limit_offset = 0.
     self.speed_limit_ms = 0.
+    # SPEEDWARN: Waze-style warning above the map speed limit (the limit never changes the set speed any more)
+    self._sw_armed = True
+    self._sw_over_t = None
+    self._sw_below_t = None
+    self._sw_chime_t = 0.
+    self._sw_show_t = 0.
+    self.SW_REMIND_S = 180.   # reminder chime while you stay above the limit
 
     # for warnings
     self.warningCounter = 0
@@ -733,6 +740,8 @@ class CarController():
     # send enabled ethernet every 0.2 sec
     if frame % 20 == 0:
         can_sends.append(teslacan.create_enabled_eth_msg(1))
+    if frame % 5 == 0:
+      self._speed_limit_warning(CS)
     if (not self.PCC.pcc_available) and frame % 5 == 0: # acc processed at 20Hz
       cruise_btn = self.ACC.update_acc(enabled, CS, frame, actuators, pcm_speed, \
                     self.speed_limit_ms * CV.MS_TO_KPH,
@@ -757,6 +766,47 @@ class CarController():
     self.last_accel = apply_accel
     
     return pedal_can_sends + can_sends
+
+  def _speed_limit_warning(self, CS):
+    """SPEEDWARN, Waze style. Above the map speed limit (+ your speed-offset setting, + 3 km/h for speedometer/GPS
+    difference) for 2 s: ONE chime with "Speed limit 50 km/h". While you stay above, the same text stays on screen
+    silently. Still above after SW_REMIND_S: one reminder chime. Back under the limit for 10 s: everything resets (the
+    next time you go over it chimes again) - so the map's two flip-flopping limits can't make it nag. It never changes
+    the cruise speed. (UIEvents: sound=-1 is silent, and a sound only plays when the text changes.)"""
+    try:
+      lim_kph = self.speed_limit_ms * CV.MS_TO_KPH
+      if lim_kph <= 0:
+        self._sw_over_t = None
+        return
+      off_kph = max(0., self.speed_limit_offset) if (CS.hasTeslaIcIntegration or self.isMetric) else 0.
+      v_kph = CS.v_ego * CV.MS_TO_KPH
+      now = time.monotonic()
+      k, unit = (1., 'km/h') if self.isMetric else (CV.KPH_TO_MPH, 'mph')
+      txt = "Speed limit %d %s" % (int(round(lim_kph * k)), unit)
+      if v_kph > lim_kph + off_kph + 3.:
+        self._sw_below_t = None
+        if self._sw_over_t is None:
+          self._sw_over_t = now
+        elif now - self._sw_over_t >= 2.:
+          if self._sw_armed:                                        # the one chime
+            self._sw_armed = False
+            self._sw_chime_t = self._sw_show_t = now
+            CS.UE.custom_alert_message(3, txt, 250, 4)
+          elif now - self._sw_chime_t >= self.SW_REMIND_S:          # occasional reminder chime (different text = sound)
+            self._sw_chime_t = self._sw_show_t = now
+            CS.UE.custom_alert_message(3, "%s - you're at %d" % (txt, int(round(v_kph * k))), 250, 4)
+          elif now - self._sw_show_t >= 2.:                         # stays on screen, silent
+            self._sw_show_t = now
+            CS.UE.custom_alert_message(3, txt, 250, -1)
+      else:
+        self._sw_over_t = None
+        if v_kph <= lim_kph + off_kph:
+          if self._sw_below_t is None:
+            self._sw_below_t = now
+          elif now - self._sw_below_t >= 10.:
+            self._sw_armed = True
+    except Exception:
+      pass
 
   #to show lead car on IC
   def showLeadCarOnICCanMessage(self, radarStateMsg):
