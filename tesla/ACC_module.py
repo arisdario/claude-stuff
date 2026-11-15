@@ -21,6 +21,8 @@ FOLLOW_ANTICIPATE_MAX = 0.6 # m/s2 - the lead's acceleration used for that is ca
 FOLLOW_REVERSE_MS = 3000    # after a press in one direction, the other direction waits this long (no +1/-1 flip-flop)
 ROAD_CLEAR_PRESS_MS = 800   # no lead: +1 at most every 0.8 s back to your speed (was every 0.5 s: a +0.7 m/s2 push)
 LEAD_HOLD_MS = 500          # radarState arrives at ~20 Hz like this loop: keep the last lead this long between messages
+ACC_CURVES_ON = '/data/acc_curves_on'   # curve slowing with the cruise buttons is OFF unless this file exists (the
+                                        # focus is smooth lead following; curves come back once that is right)
 CURVE_CONFIRM_MS = 1500     # a curve limit counts only after it was there CONTINUOUSLY this long (night camera path blips
                             # gave 41-63 km/h 'curves' on a straight highway for 1-2 s: -5 then +5 = sag and push)
 
@@ -529,6 +531,13 @@ class ACCController():
     """CURVEACC: the speed (kph) the curve ahead allows now (999 = no curve). Ignored while signalling / changing lane
     (the camera path bends then without a curve). Warns once every 3 s when far too fast for the buttons alone."""
     if CS.turn_signal_blinking or getattr(self.CC, 'alca_enabled', False):
+      return 999.
+    now_ms = _current_time_millis()
+    if now_ms - getattr(self, '_curves_checked_ms', -1e9) > 5000:        # look at the switch file every 5 s only
+      self._curves_checked_ms = now_ms
+      self._curves_on = os.path.exists(ACC_CURVES_ON)
+    if not self._curves_on:
+      self._cap_since, self._cap_hist = None, []
       return 999.
     v_curve = self.CC.PCC.curve_speed_for_acc(CS)
     now_ms = _current_time_millis()
