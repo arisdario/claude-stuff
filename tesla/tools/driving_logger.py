@@ -607,7 +607,7 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
       sample['gps'] = last_gps
 
       if not reported_fields and car is not None and rad is not None:
-        f.write(json.dumps({'meta': 'fields_seen_once', 't': time.time(),
+        f.write(json.dumps({'src': 'meta', 'meta': 'fields_seen_once', 't': time.time(),
                              'carState_sample_keys': sorted(k for k in sample if not k.startswith('das_')),
                              'lead1': sample['lead1']}) + '\n')
         reported_fields = True
