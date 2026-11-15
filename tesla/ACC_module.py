@@ -20,6 +20,9 @@ FOLLOW_ANTICIPATE_S = 2.0   # aim at the lead's speed this many seconds ahead wh
 FOLLOW_ANTICIPATE_MAX = 0.6 # m/s2 - the lead's acceleration used for that is capped (radar blips gave 13 km/h jumps)
 FOLLOW_REVERSE_MS = 3000    # after a press in one direction, the other direction waits this long (no +1/-1 flip-flop)
 ROAD_CLEAR_PRESS_MS = 800   # no lead: +1 at most every 0.8 s back to your speed (was every 0.5 s: a +0.7 m/s2 push)
+LEAD_HOLD_MS = 500          # radarState arrives at ~20 Hz like this loop: keep the last lead this long between messages
+CURVE_CONFIRM_MS = 1500     # a curve limit counts only after it was there CONTINUOUSLY this long (night camera path blips
+                            # gave 41-63 km/h 'curves' on a straight highway for 1-2 s: -5 then +5 = sag and push)
 
 
 
@@ -117,6 +120,9 @@ class ACCController():
     self.lead_kph_t = 0
     self.follow_target_kph = None
     self.lead_hist = []          # last 5 (lead speed kph, lead accel) - median against single radar blips
+    self._last_lead = None       # (lead, time ms): held LEAD_HOLD_MS between radarState messages
+    self._cap_since = None       # when the current uninterrupted curve limit started (ms)
+    self._cap_hist = []          # (ms, cap kph) of that stretch, last CURVE_CONFIRM_MS
     self.follow_dir = 0          # +1 / -1: direction of the last follow press
     self.follow_dir_ms = 0
 
@@ -251,8 +257,11 @@ class ACCController():
     lead = messaging.recv_one_or_none(self.radarState)
     if lead is not None:
         lead_1 = lead.radarState.leadOne
+        self._last_lead = (lead_1, current_time_ms)
         if lead_1.dRel:
           self.lead_last_seen_time_ms = current_time_ms
+    elif self._last_lead is not None and current_time_ms - self._last_lead[1] <= LEAD_HOLD_MS:
+        lead_1 = self._last_lead[0]      # no new message this cycle: the lead did not vanish, keep the last one
     if self.enable_adaptive_cruise and enabled: # and (button_to_press == None):
       if CS.cstm_btns.get_button_label2(ACCMode.BUTTON_NAME) in ["OP", "AutoOP"]:    
         button_to_press = self._calc_button(CS, pcm_speed)
@@ -522,9 +531,17 @@ class ACCController():
     if CS.turn_signal_blinking or getattr(self.CC, 'alca_enabled', False):
       return 999.
     v_curve = self.CC.PCC.curve_speed_for_acc(CS)
-    if v_curve >= 254.:
-      return 999.
     now_ms = _current_time_millis()
+    if v_curve >= 254.:
+      self._cap_since, self._cap_hist = None, []
+      return 999.
+    # only a curve that stays: CURVE_CONFIRM_MS without interruption, then the least strict value of that stretch
+    if self._cap_since is None:
+      self._cap_since = now_ms
+    self._cap_hist = [h for h in self._cap_hist if now_ms - h[0] <= CURVE_CONFIRM_MS] + [(now_ms, v_curve)]
+    if now_ms - self._cap_since < CURVE_CONFIRM_MS:
+      return 999.
+    v_curve = max(v for _, v in self._cap_hist)
     if CS.v_ego > v_curve + 4.0 and now_ms - self.curve_warn_time_ms > 3000:     # ~15 km/h over: cruise regen alone is too late
       self.curve_warn_time_ms = now_ms
       CS.UE.custom_alert_message(4, "Sharp curve - brake!", 150, 4)
@@ -540,22 +557,23 @@ class ACCController():
     half_press_kph, full_press_kph = self._get_cc_units_kph(CS.imperial_speed_units)
     target_kph = min(self.acc_speed_kph, self.curve_cap_kph)
     over_kph = CS.v_cruise_actual - target_kph
-    if over_kph >= full_press_kph and self._no_action_for(milliseconds=300):
+    if over_kph >= 2 * full_press_kph and self._no_action_for(milliseconds=300):
       self.curve_lowered = True; self.last_follow_msg = "curve -5"
       return CruiseButtons.DECEL_2ND
     if over_kph >= half_press_kph * 1.5 and self._no_action_for(milliseconds=500):
       self.curve_lowered = True; self.last_follow_msg = "curve -1"
       return CruiseButtons.DECEL_SET
     if self.curve_lowered:
-      lead_close = (lead_car is not None and lead_car.status and lead_car.dRel > 0 and
-                    lead_car.dRel < CS.v_ego * CS.apFollowTimeInS * 1.5)
+      if lead_car is not None and lead_car.status and lead_car.dRel > 0:
+        self.curve_lowered = False                    # a car ahead: the follow logic sets the speed from here
+        return None
       under_kph = target_kph - CS.v_cruise_actual
       if under_kph < half_press_kph:
         if self.curve_cap_kph >= self.acc_speed_kph:
           self.curve_lowered = False                  # curve over and back at your speed
-      elif not lead_close and self._no_human_action_for(milliseconds=1000) and self._no_action_for(milliseconds=700):
-        self.last_follow_msg = "after curve +5" if under_kph >= full_press_kph else "after curve +1"
-        return CruiseButtons.RES_ACCEL_2ND if under_kph >= full_press_kph else CruiseButtons.RES_ACCEL
+      elif self._no_human_action_for(milliseconds=1000) and self._no_action_for(milliseconds=1000):
+        self.last_follow_msg = "after curve +1"       # +1 per second: a smooth ramp (+5 steps were a push)
+        return CruiseButtons.RES_ACCEL
     return None
 
   def _get_cc_units_kph(self, is_imperial_units):
