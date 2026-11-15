@@ -33,6 +33,7 @@ XNOR_HOLD_MS = 6000        # XNOR v2: no speed-up for 6 s after the car ahead di
 XNOR_CLOSING_MS = 2.5      # XNOR v2: no speed-up while closing on the car ahead faster than this (m/s)
 XNOR_DOWN_HYST_KPH = 0.7   # XNOR v2: press -1 when the aim is this far below the set speed ...
 XNOR_UP_HYST_KPH = 1.3     # ... +1 when this far above
+XNOR_MIN_GAP_S = 1.0       # XNOR v2: regen when presses cannot stop the closing before the gap is down to 1 s
 XNOR_CANCEL_NEED_MS2 = 0.6 # XNOR v2: cancel (regen) only when stopping the closing before 6 m needs more than presses give
 LEAD_HOLD_MS = 500          # radarState arrives at ~20 Hz like this loop: keep the last lead this long between messages
 ACC_CURVES_ON = '/data/acc_curves_on'   # curve slowing with the cruise buttons is OFF unless this file exists (the
@@ -727,7 +728,7 @@ class ACCController():
         accelerated 115 -> 133 km/h toward it)
       - -5 instead of xnor's cancel when the plan is far below the set speed (15 Nov: 11 cancels, almost all needless);
         cancel only when presses cannot brake enough (collision < 4 s, lead slower than cruise, or the braking needed
-        to stop closing before 6 m is above what presses give)
+        to stop closing before the gap is down to 1 s / 6 m is above what presses give)
       - engaging with SET (current speed), not RES (RES restored 125 at 84 km/h, then cancelled)"""
     half_press_kph, full_press_kph = self._get_cc_units_kph(CS.imperial_speed_units)
     v_kph = CS.v_ego * CV.MS_TO_KPH
@@ -742,7 +743,9 @@ class ACCController():
       need = 0.
       if lead_seen:
         closing = max(0., -lead_car.vRel)
-        room = lead_car.dRel - 6.
+        # keep at least XNOR_MIN_GAP_S (not only 6 m): 15 Nov 19:47:32-46 the car closed from 133 m to 14 m (0.5 s at
+        # 101 km/h) at 10-20 km/h while presses gave only -0.6 m/s2 - stopping short of 6 m never asked for regen
+        room = lead_car.dRel - max(6., XNOR_MIN_GAP_S * CS.v_ego)
         need = 99. if room <= 0.5 else closing ** 2 / (2. * room)
       if lead_seen and (self._fast_decel_required(CS, lead_car) or need > XNOR_CANCEL_NEED_MS2) \
           and self._no_human_action_for(milliseconds=500):
