@@ -67,6 +67,10 @@ class Abort(Exception):
   pass
 
 
+class AccessError(Exception):
+  """the token cannot write to the repository: every file would fail the same way, so the pass stops"""
+
+
 def log(msg):
   line = '%s %s' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg)
   try:
@@ -286,6 +290,9 @@ class GitHub(object):
       return r
     code, r = self.call('POST', '/repos/%s/releases' % self.repo,
                         {'tag_name': tag, 'name': tag, 'body': 'Drive logs uploaded by the EON (tesla/tools/log_uploader.py).'})
+    if code in (401, 403, 404):
+      raise AccessError('cannot create release %s: HTTP %s %s - the token cannot write to %s (401 = wrong/expired token; 404/403 = '
+                        'the token does not include this repository, or lacks Contents: Read and write)' % (tag, code, (r or {}).get('message'), self.repo))
     if code != 201:
       raise RuntimeError('cannot create release %s: HTTP %s %s (does the repo have a first commit, e.g. a README?)' % (tag, code, (r or {}).get('message')))
     return r
@@ -342,6 +349,9 @@ def run_pass(gh, st, stop, now=None):
         os.remove(path); log('deleted %s from the EON (%s)' % (path, DELETE))
     except Abort:
       raise
+    except AccessError as e:
+      failed += 1; log('STOPPED: %s' % e)
+      break
     except Exception as e:
       failed += 1; log('FAILED %s: %s' % (path, e))
     finally:
