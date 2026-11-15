@@ -16,7 +16,10 @@ FOLLOW_PRESS_MS = 1000      # speeding up: one +1 per second at most -> evenly s
 FOLLOW_BIG_KPH = 6.0        # speeding up: target this far above AND the lead accelerating -> +5 (keeps up with a fast lead)
 FOLLOW_DECEL_PRESS_MS = 500 # slowing down: react quickly (the lead's CURRENT speed, a press every 0.5 s, -5 when far off)
 LEAD_SPEED_TAU_S = 2.0      # smoothing of the lead speed used for speeding up (radar vRel is noisy)
-FOLLOW_ANTICIPATE_S = 2.5   # aim at the lead's speed this many seconds ahead when it pulls away (its acceleration, capped)
+FOLLOW_ANTICIPATE_S = 2.0   # aim at the lead's speed this many seconds ahead when it pulls away (its acceleration, capped)
+FOLLOW_ANTICIPATE_MAX = 0.6 # m/s2 - the lead's acceleration used for that is capped (radar blips gave 13 km/h jumps)
+FOLLOW_REVERSE_MS = 3000    # after a press in one direction, the other direction waits this long (no +1/-1 flip-flop)
+ROAD_CLEAR_PRESS_MS = 800   # no lead: +1 at most every 0.8 s back to your speed (was every 0.5 s: a +0.7 m/s2 push)
 
 
 
@@ -113,6 +116,9 @@ class ACCController():
     self.lead_kph_f = None
     self.lead_kph_t = 0
     self.follow_target_kph = None
+    self.lead_hist = []          # last 5 (lead speed kph, lead accel) - median against single radar blips
+    self.follow_dir = 0          # +1 / -1: direction of the last follow press
+    self.follow_dir_ms = 0
 
   # Updates the internal state of this controller based on user input,
   # specifically the steering wheel mounted cruise control stalk, and OpenPilot
@@ -328,7 +334,21 @@ class ACCController():
      # Make sure we were able to populate lead_1.
     # dRel is in meters.
     lead_dist_m = lead_car.dRel
-    lead_speed_kph = (lead_car.vRel + CS.v_ego) * CV.MS_TO_KPH
+    lead_speed_raw_kph = (lead_car.vRel + CS.v_ego) * CV.MS_TO_KPH
+    a_lead_raw = getattr(lead_car, 'aLeadK', None)
+    if a_lead_raw is None:
+      a_lead_raw = getattr(lead_car, 'aRel', 0.) + getattr(CS, 'a_ego', 0.)
+    # radar blips: one reading jumps +15..+30 km/h for a single sample (seen on 15 Nov) - use the median of the last 5
+    if lead_dist_m > 0:
+      self.lead_hist = (self.lead_hist + [(lead_speed_raw_kph, a_lead_raw)])[-5:]
+    else:
+      self.lead_hist = []
+    if self.lead_hist:
+      srt = sorted(self.lead_hist)
+      lead_speed_kph = srt[len(srt) // 2][0]
+      a_lead_med = sorted(a for _, a in self.lead_hist)[len(self.lead_hist) // 2]
+    else:
+      lead_speed_kph, a_lead_med = lead_speed_raw_kph, 0.
     # Relative velocity between the lead car and our set cruise speed.
     future_vrel_kph = lead_speed_kph - CS.v_cruise_actual
     # How much we can accelerate without exceeding the max allowed speed.
@@ -393,26 +413,30 @@ class ACCController():
           lead_kph_f = self._lead_speed_filtered(lead_speed_kph, current_time_ms)
           gap_err_m = lead_dist_m - safe_dist_m
           gap_kph = max(-8., min(8., gap_err_m / FOLLOW_CLOSE_S * CV.MS_TO_KPH))
-          a_lead = getattr(lead_car, 'aLeadK', None)
-          if a_lead is None:
-            a_lead = getattr(lead_car, 'aRel', 0.) + getattr(CS, 'a_ego', 0.)
-          ahead_kph = max(0., min(1.5, a_lead)) * FOLLOW_ANTICIPATE_S * CV.MS_TO_KPH   # only when it pulls away, capped
+          a_lead = a_lead_med
+          ahead_kph = max(0., min(FOLLOW_ANTICIPATE_MAX, a_lead)) * FOLLOW_ANTICIPATE_S * CV.MS_TO_KPH   # only when it pulls away, capped
           up_target_kph = min(lead_kph_f + ahead_kph + gap_kph, max_acc_speed_kph)
           down_target_kph = min(lead_kph_f, lead_speed_kph) + gap_kph
           self.follow_target_kph = up_target_kph
           down_dead_kph = half_press_kph * 1.5 if gap_err_m < 0 else FOLLOW_DEADBAND_KPH   # closer than wanted: react sooner
-          if (down_target_kph <= CS.v_cruise_actual - down_dead_kph
+          urgent = gap_err_m < -0.3 * safe_dist_m or lead_speed_kph < CS.v_ego * CV.MS_TO_KPH - 8.
+          since_ms = current_time_ms - self.follow_dir_ms
+          may_down = urgent or self.follow_dir != 1 or since_ms > FOLLOW_REVERSE_MS
+          may_up = self.follow_dir != -1 or since_ms > FOLLOW_REVERSE_MS
+          if (may_down and down_target_kph <= CS.v_cruise_actual - down_dead_kph
               and self._no_action_for(milliseconds=FOLLOW_DECEL_PRESS_MS) and self._no_human_action_for(milliseconds=1000)):
             big = down_target_kph <= CS.v_cruise_actual - full_press_kph
             msg = "%s (follow: aim %.0f)" % ("-5" if big else "-1", down_target_kph)
             button = CruiseButtons.DECEL_2ND if big else CruiseButtons.DECEL_SET
             self.new_speed = CS.v_cruise_actual - (full_press_kph if big else half_press_kph)
-          elif (up_target_kph - CS.v_cruise_actual >= FOLLOW_DEADBAND_KPH and available_speed_kph >= half_press_kph
+            self.follow_dir, self.follow_dir_ms = -1, current_time_ms
+          elif (may_up and up_target_kph - CS.v_cruise_actual >= FOLLOW_DEADBAND_KPH and available_speed_kph >= half_press_kph
                 and self._no_action_for(milliseconds=FOLLOW_PRESS_MS) and self._no_human_action_for(milliseconds=1000)):
             big = up_target_kph - CS.v_cruise_actual >= FOLLOW_BIG_KPH and a_lead > 0.3 and available_speed_kph >= full_press_kph
             msg = "%s (follow: aim %.0f)" % ("+5" if big else "+1", up_target_kph)
             button = CruiseButtons.RES_ACCEL_2ND if big else CruiseButtons.RES_ACCEL
             self.new_speed = CS.v_cruise_actual + (full_press_kph if big else half_press_kph)
+            self.follow_dir, self.follow_dir_ms = 1, current_time_ms
 
       # If lead_dist is reported as 0, no one is detected in front of you so you
       # can speed up. Only accel on straight-aways; vision radar often
@@ -420,7 +444,7 @@ class ACCController():
       elif (lead_dist_m == 0
             and CS.angle_steers < 2.0
             and half_press_kph < available_speed_kph
-            and self._no_action_for(milliseconds=500)
+            and self._no_action_for(milliseconds=ROAD_CLEAR_PRESS_MS)
             and self._no_human_action_for(milliseconds=1000)
             and current_time_ms > self.lead_last_seen_time_ms + 4000):
           msg =  "+1 (road clear)"
