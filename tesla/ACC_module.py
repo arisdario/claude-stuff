@@ -10,33 +10,32 @@ import time
 ACC_LOG_DIR = '/data/acclog'          # ACCLOG: one line per ACC cycle (20/s) while ACC is on - see _acc_log()
 ACC_LOG_OFF = '/data/acc_log_off'
 ACC_LOG_MAX_BYTES = 300 * 1024 * 1024
-FOLLOW_CLOSE_S = 12.0        # SMOOTHFOLLOW: close a gap error over ~12 s (12 m too far -> aim 3.6 km/h faster than the lead)
-FOLLOW_DEADBAND_KPH = 2.0   # press only when the set speed is this far from the target (slowing: when the gap is fine)
-FOLLOW_PRESS_MS = 1500      # speeding up: one +1 per 1.5 s at most -> evenly spaced small steps = a gentle ramp
-QUIET_GAP = (0.8, 1.5)      # QUIETFOLLOW: gap between 0.8x and 1.5x the wanted gap (2.0-3.75 s at 2.5 s) ...
-QUIET_SPEED_KPH = 3.0       # ... and the car ahead within 3 km/h of your speed: press NOTHING (a human holds the pedal;
-                            # 15 Nov: 33-40 set changes a minute while the gap barely moved = the restless feeling)
-DIST_SLOPE_S = 3.0          # the lead's speed from how the DISTANCE changes over the last 3 s (the radar's direct
-                            # relative speed read ~3 km/h low at 60-90 km/h, +-2 km/h scatter)
-MIN_GAP_M = 6.0             # BRAKEREQ: the distance to keep in the worst case
-PRESS_DECEL_MS2 = 0.5       # BRAKEREQ: what cruise presses reliably deliver (measured ~0.6): more needed -> cancel
-LEAD_HARD_BRAKE_MS2 = -1.5  # BRAKEREQ: the lead braking this hard while we close -> cancel for full regen at once
+# ACCPLAN: openpilot's own longitudinal planner decides the speed - the 0.7.5 MPC that keeps the distance to the car
+# ahead and the cruise speed smoother for your set speed (selfdrive/controls/lib/planner.py, published as 'plan').
+# This module only (1) turns that plan into cruise stalk presses (SERVO, _calc_button) and (2) keeps its own safety
+# check that does not depend on the plan or on comfort (SAFETY, _fast_decel_required / POSGATE).
+# The gap the planner keeps is 1.8 s in 0.7.5; tools/patch_planner_gap.py makes it your gap (town 2.5 s, highway 3.6 s).
+K_CC = 0.9                  # SERVO: Tesla cruise accelerates ~0.25 m/s2 per km/h of set-speed error (logs) = 0.9 1/s
+SERVO_HYST_KPH = 0.7        # SERVO: press only when the wanted set speed is this far from the car's (no +1/-1 dither)
+SERVO_UP_HYST_KPH = 1.3     # SERVO: speeding up waits for a little more (radar blips push the plan up for a moment)
+SERVO_TAU_S = 2.0           # SERVO: the wanted set speed is smoothed (radar noise reaches the plan) ...
+SERVO_FAST_DOWN_KPH = 1.5   # ... but never kept more than 1.5 km/h above the plan's own value: slowing is not delayed
+SERVO_PRESS_MS = 300        # SERVO: at most one press per 0.3 s (the car shows the new set speed ~0.2 s later)
+SERVO_HUMAN_MS = 1000       # SERVO: nothing for 1 s after YOUR stalk press (your press always wins)
+PLAN_MAX_AGE_MS = 500       # SERVO: a plan older than this is not used (then only the safety cancel can act)
+PLAN_DRIFT_MS = 1.5         # SERVO: the plan integrates its own speed; it is used at most 1.5 m/s away from the real
+                            # speed (after a cancel / your accelerator the plan can be ahead of the car: no surge)
+MIN_GAP_M = 6.0             # SAFETY: the distance to keep in the worst case
+PRESS_DECEL_MS2 = 0.6       # SAFETY: what cruise presses deliver (measured ~0.6 m/s2): more needed -> cancel (regen ~1.5)
+LEAD_HARD_BRAKE_MS2 = -1.5  # SAFETY: the lead braking this hard while we close -> cancel at once
+REENGAGE_NEED_MS2 = 0.3     # REENGAGE: cruise comes back (SET, current speed) when braking needed is below this ...
+REENGAGE_LEAD_ACCEL_MS2 = -0.5  # ... and the lead is not braking harder than this (filtered)
 POSITIVE_BLOCK_MS = 3000    # POSGATE: no speed-up command for 3 s after the lead decelerated / was clearly slower
-LEAD_ACCEL_TAU_S = 0.7      # low-pass time constant of the lead's acceleration (radar noise +-0.3 m/s2)
-LEAD_BRAKING_MS2 = -0.4     # SAFETY: the radar's lead acceleration (median) below this = the lead is braking: the
-                            # instant radar speed counts (the distance slope lags ~1.5 s) and the quiet zone is off
-FOLLOW_BIG_KPH = 6.0        # speeding up: target this far above AND the lead accelerating -> +5 (keeps up with a fast lead)
-FOLLOW_DECEL_PRESS_MS = 500 # slowing down: react quickly (the lead's CURRENT speed, a press every 0.5 s, -5 when far off)
-LEAD_SPEED_TAU_S = 2.0      # smoothing of the lead speed used for speeding up (radar vRel is noisy)
-FOLLOW_ANTICIPATE_S = 2.0   # aim at the lead's speed this many seconds ahead when it pulls away (its acceleration, capped)
-FOLLOW_ANTICIPATE_MAX = 0.6 # m/s2 - the lead's acceleration used for that is capped (radar blips gave 13 km/h jumps)
-FOLLOW_REVERSE_MS = 3000    # after a press in one direction, the other direction waits this long (no +1/-1 flip-flop)
-ROAD_CLEAR_PRESS_MS = 800   # no lead: +1 at most every 0.8 s back to your speed (was every 0.5 s: a +0.7 m/s2 push)
+LEAD_FILTER_TAU_S = 0.7     # low-pass of the lead's acceleration and relative speed (radar noise +-0.3 m/s2, +-2 km/h)
+LEAD_BRAKING_MS2 = -0.25    # POSGATE: lead acceleration (filtered) below this = the lead decelerates
+LEAD_SLOWER_MS = 1.5        # POSGATE: lead slower than us by this much (filtered vRel; the radar reads ~0.8 m/s low)
+LEAD_FILTER_KEEP_MS = 2000  # the lead filters survive a radar drop-out this long
 LEAD_HOLD_MS = 500          # radarState arrives at ~20 Hz like this loop: keep the last lead this long between messages
-ACC_CURVES_ON = '/data/acc_curves_on'   # curve slowing with the cruise buttons is OFF unless this file exists (the
-                                        # focus is smooth lead following; curves come back once that is right)
-CURVE_CONFIRM_MS = 1500     # a curve limit counts only after it was there CONTINUOUSLY this long (night camera path blips
-                            # gave 41-63 km/h 'curves' on a straight highway for 1-2 s: -5 then +5 = sag and push)
 
 
 
@@ -96,6 +95,7 @@ class ACCController():
     self.human_cruise_action_time = 0
     self.automated_cruise_action_time = 0
     self.radarState = messaging.sub_sock('radarState', conflate=True)
+    self.plan_sock = messaging.sub_sock('plan', conflate=True)   # ACCPLAN
     self.last_update_time = 0
     self.enable_adaptive_cruise = False
     self.prev_enable_adaptive_cruise = False
@@ -118,28 +118,25 @@ class ACCController():
     self.new_speed = 0
     average_speed_over_x_suggestions = 20 # 1 second (20x a second)
     self.fleet_speed = FleetSpeed(average_speed_over_x_suggestions)
-    # CURVEACC: slow down for curves with the cruise buttons (no pedal). curve_cap_kph = the curve speed now (999 = none),
-    # curve_lowered = we pressed down for a curve and will press back up to your speed after it.
-    self.curve_cap_kph = 999.
-    self.curve_lowered = False
-    self.curve_warn_time_ms = 0
+    self.curve_cap_kph = 999.    # curves are not slowed for by this module (the log keeps the column: always 999)
     # ACCLOG state
     self.last_follow_msg = None
     self._log_f = None
     self._log_buf = []
     self._log_check_t = 0.
     self._log_off = False
-    # SMOOTHFOLLOW state
-    self.lead_kph_f = None
-    self.lead_kph_t = 0
+    # ACCPLAN state
+    self._plan = None            # (vStart, aStart, vTarget, aTarget, hasLead, source, vCruise, aCruise, received ms)
+    self.plan_v = self.plan_a = None
     self.follow_target_kph = None
-    self.lead_hist = []          # last 5 (lead speed kph, lead accel) - median against single radar blips
+    self._want_f = None          # smoothed wanted set speed (SERVO_TAU_S) and when it was updated (ms)
+    self._want_ms = 0
+    self.brake_need_ms2 = 0.
     self._last_lead = None       # (lead, time ms): held LEAD_HOLD_MS between radarState messages
-    self.dist_hist = []          # QUIETFOLLOW: (ms, lead distance) of the last DIST_SLOPE_S, for the true closing speed
-    self._cap_since = None       # when the current uninterrupted curve limit started (ms)
-    self._cap_hist = []          # (ms, cap kph) of that stretch, last CURVE_CONFIRM_MS
-    self.follow_dir = 0          # +1 / -1: direction of the last follow press
-    self.follow_dir_ms = 0
+    self.a_lead_f = 0.           # filtered lead acceleration / relative speed (LEAD_FILTER_TAU_S), reset without a lead
+    self.v_rel_f = 0.
+    self._lead_f_ms = 0
+    self.lead_closing_time_ms = 0
 
   # Updates the internal state of this controller based on user input,
   # specifically the steering wheel mounted cruise control stalk, and OpenPilot
@@ -277,24 +274,11 @@ class ACCController():
           self.lead_last_seen_time_ms = current_time_ms
     elif self._last_lead is not None and current_time_ms - self._last_lead[1] <= LEAD_HOLD_MS:
         lead_1 = self._last_lead[0]      # no new message this cycle: the lead did not vanish, keep the last one
+    self._update_lead_filter(CS, lead_1, current_time_ms)
     if self.enable_adaptive_cruise and enabled: # and (button_to_press == None):
-      if CS.cstm_btns.get_button_label2(ACCMode.BUTTON_NAME) in ["OP", "AutoOP"]:    
-        button_to_press = self._calc_button(CS, pcm_speed)
-        self.new_speed = pcm_speed * CV.MS_TO_KPH
-      else:
-        # Alternative speed decision logic that uses the lead car's distance
-        # and speed more directly.
-        # Bring in the lead car distance from the radarState feed
-        
-        self.curve_cap_kph = self._curve_cap_kph(CS)
-        button_to_press = self._calc_follow_button(CS, lead_1, speed_limit_kph, set_speed_limit_active, speed_limit_offset, frame)
-        # CURVEACC: the lead car logic keeps priority - its slow-down / cancel always wins; otherwise the curve may press
-        # down (or, after the curve, back up to your speed)
-        if not (button_to_press is not None and (CruiseButtons.is_decel(button_to_press) or button_to_press == CruiseButtons.CANCEL)):
-          curve_button = self._curve_button(CS, lead_1)
-          if curve_button is not None:
-            button_to_press = curve_button
-    # POSGATE: the ONE exit for every button - follow, road clear, after-curve, the OP modes. No +1 / +5 / RES while
+      # ACCPLAN: one decision path - safety check, then the planner's speed through the servo
+      button_to_press = self._calc_button(CS, lead_1, self._read_plan(current_time_ms), current_time_ms)
+    # POSGATE: the ONE exit for every button. No +1 / +5 / RES while
     # braking is needed, or within 3 s of the lead decelerating or being clearly slower (whatever rule asked for it).
     # Before the press bookkeeping below: a blocked press must not count as a press (it would delay the next one).
     if CruiseButtons.is_accel(button_to_press) and self._positive_blocked(CS, lead_1, current_time_ms):
@@ -317,7 +301,7 @@ class ACCController():
     return button_to_press
 
   def _positive_blocked(self, CS, lead, now_ms):
-    if now_ms < getattr(self, 'lead_closing_time_ms', 0) + POSITIVE_BLOCK_MS:
+    if now_ms < self.lead_closing_time_ms + POSITIVE_BLOCK_MS:
       return True
     if lead is not None and getattr(lead, 'dRel', 0) and self._fast_decel_required(CS, lead):
       return True
@@ -326,7 +310,9 @@ class ACCController():
   def _acc_log(self, CS, lead, button):
     """ACCLOG: what ACC saw and decided, for tuning the following behaviour offline. One JSON list per cycle:
     [t, v_ego m/s, a_ego m/s2, car set speed kph, your speed kph, lead seen 0/1, lead dist m, lead vRel m/s, lead aRel,
-     curve cap kph (999 none), button (0 none), reason, cruise state, brake 0/1, gas 0/1]. Buffered, written once a second,
+     curve cap kph (999 none), button (0 none), reason, cruise state, brake 0/1, gas 0/1,
+     ACCPLAN: plan speed m/s, plan accel m/s2 (None = no fresh plan), wanted set kph, braking needed m/s2,
+     lead accel filtered, lead vRel filtered]. Buffered, written once a second,
     new file per start in /data/acclog, oldest files deleted above 300 MB. Off: touch /data/acc_log_off. Never raises."""
     try:
       now = time.time()
@@ -343,7 +329,10 @@ class ACCController():
                             round(self.acc_speed_kph, 1), int(seen), round(lead.dRel, 1) if seen else None,
                             round(lead.vRel, 2) if seen else None, round(getattr(lead, 'aRel', 0.), 2) if seen else None,
                             round(self.curve_cap_kph), button or 0, self.last_follow_msg, int(CS.pcm_acc_status),
-                            int(bool(getattr(CS, 'brake_pressed', 0))), int(bool(getattr(CS, 'user_gas_pressed', 0)))])
+                            int(bool(getattr(CS, 'brake_pressed', 0))), int(bool(getattr(CS, 'user_gas_pressed', 0))),
+                            None if self.plan_v is None else round(self.plan_v, 2), None if self.plan_a is None else round(self.plan_a, 2),
+                            None if self.follow_target_kph is None else round(self.follow_target_kph, 1),
+                            round(self.brake_need_ms2, 2) if seen else None, round(self.a_lead_f, 2), round(self.v_rel_f, 2)])
       self.last_follow_msg = None
       if len(self._log_buf) >= 20:
         if self._log_f is None:
@@ -359,179 +348,6 @@ class ACCController():
     except Exception:
       self._log_buf = []
 
-  # function to calculate the cruise button based on a safe follow distance
-  def _calc_follow_button(self, CS, lead_car, speed_limit_kph, set_speed_limit_active, speed_limit_offset, frame):
-    if lead_car is None:
-      return None
-    # Desired gap (in seconds) between cars.
-    follow_time_s = CS.apFollowTimeInS
-    # v_ego is in m/s, so safe_dist_m is in meters.
-    safe_dist_m = CS.v_ego * follow_time_s
-    current_time_ms = _current_time_millis()
-     # Make sure we were able to populate lead_1.
-    # dRel is in meters.
-    lead_dist_m = lead_car.dRel
-    lead_speed_raw_kph = (lead_car.vRel + CS.v_ego) * CV.MS_TO_KPH
-    a_lead_raw = getattr(lead_car, 'aLeadK', None)
-    if a_lead_raw is None:
-      a_lead_raw = getattr(lead_car, 'aRel', 0.) + getattr(CS, 'a_ego', 0.)
-    # radar blips: one reading jumps +15..+30 km/h for a single sample (seen on 15 Nov) - use the median of the last 5
-    if lead_dist_m > 0:
-      self.lead_hist = (self.lead_hist + [(lead_speed_raw_kph, a_lead_raw, lead_dist_m)])[-5:]
-    else:
-      self.lead_hist = []
-    if self.lead_hist:
-      mid = len(self.lead_hist) // 2
-      lead_speed_kph = sorted(h[0] for h in self.lead_hist)[mid]
-      a_lead_med = sorted(h[1] for h in self.lead_hist)[mid]
-      lead_dist_m = sorted(h[2] for h in self.lead_hist)[mid]   # far leads jump 95 <-> 130 m (two cars): median too
-    else:
-      lead_speed_kph, a_lead_med = lead_speed_raw_kph, 0.
-    lead_est_kph = self._lead_speed_from_distance(CS, lead_dist_m)      # None until 1.5 s of steady distance
-    # the lead's acceleration, low-pass ~0.7 s: the radar's raw value has +-0.3 m/s2 noise (a 5-sample median still
-    # read -0.72 for a lead slowing at -0.3 and triggered a cancel); a real hard braking shows within ~0.5 s
-    now_f = _current_time_millis()
-    if lead_dist_m > 0:
-      k = min(1., (now_f - getattr(self, 'a_lead_t', 0)) / 1000. / LEAD_ACCEL_TAU_S) if getattr(self, 'a_lead_t', 0) else 1.
-      self.a_lead_f = getattr(self, 'a_lead_f', 0.) + (a_lead_raw - getattr(self, 'a_lead_f', 0.)) * k
-      self.a_lead_t = now_f
-    else:
-      self.a_lead_f, self.a_lead_t = 0., 0
-    a_lead_med = self.a_lead_f
-    if lead_dist_m > 0 and (a_lead_med < LEAD_BRAKING_MS2 or lead_speed_kph < CS.v_ego * CV.MS_TO_KPH - 3.):
-      self.lead_closing_time_ms = _current_time_millis()               # REENGAGE: no cruise resume for 3 s after this
-    # Relative velocity between the lead car and our set cruise speed.
-    future_vrel_kph = lead_speed_kph - CS.v_cruise_actual
-    # How much we can accelerate without exceeding the max allowed speed.
-    max_acc_speed_kph = self.fleet_speed.adjust(CS, self.acc_speed_kph * CV.KPH_TO_MS, frame) * CV.MS_TO_KPH
-    max_acc_speed_kph = min(max_acc_speed_kph, self.curve_cap_kph)   # CURVEACC: never speed up into a curve
-    available_speed_kph = max_acc_speed_kph - CS.v_cruise_actual
-    half_press_kph, full_press_kph = self._get_cc_units_kph(CS.imperial_speed_units)
-    # button to issue
-    button = None
-    # debug msg
-    msg = None
-
-    # Automatically engage traditional cruise if ACC is active.
-    if self._should_autoengage_cc(CS, lead_car=lead_car) and self._no_action_for(milliseconds=100):
-      # ENGAGESET: SET (stalk down) engages at the CURRENT speed. RES restores the PREVIOUS set speed on a Tesla - the
-      # logs show cruise engaging at 95 while driving 65 (16:17:18), 104 at 83 behind a slower car (16:48:46): the
-      # 'accelerates hard when following starts, then slows' the driver felt.
-      button = CruiseButtons.DECEL_SET
-      msg = "engage cruise at current speed"
-    # If traditional cruise is engaged, then control it.
-    elif CS.pcm_acc_status == CruiseState.ENABLED:
-      
-      # Disengage cruise control if a slow object is seen ahead. This triggers
-      # full regen braking, which is stronger than the braking that happens if
-      # you just reduce cruise speed.
-      if self._fast_decel_required(CS, lead_car) and self._no_human_action_for(milliseconds=500):
-        msg = "Off (Slow traffic)"
-        button = CruiseButtons.CANCEL
-        self.new_speed = 1
-        
-      # if cruise is set to faster than the max speed, slow down
-      elif CS.v_cruise_actual > max_acc_speed_kph and self._no_action_for(milliseconds=300):
-        msg =  "Slow to max"
-        button = CruiseButtons.DECEL_SET
-        self.new_speed =  max_acc_speed_kph 
-        
-      elif (# if we have a populated lead_distance
-            lead_dist_m > 0
-            and self._no_action_for(milliseconds=300)
-            # and we're moving
-            and CS.v_cruise_actual > full_press_kph):
-        ### Slowing down ###
-        # Reduce speed significantly if lead_dist < safe dist
-        # and if the lead car isn't already pulling away.
-        if lead_dist_m < safe_dist_m * .5 and future_vrel_kph < 2:
-          msg =  "-5 (Significantly too close)"
-          button = CruiseButtons.DECEL_2ND
-          self.new_speed = CS.v_ego * CV.MS_TO_KPH - full_press_kph
-        # Don't rush up to lead car - but only when it matters: within 1.3x the safe distance, or reaching the safe
-        # distance within 8 s at the current closing speed. A car 120 m ahead at 114 km/h (4 s) closing at 10 km/h is
-        # 15+ s away from mattering: those presses (-1 every 0.3 s on noisy far readings) were the sag on 15 Nov 16:44.
-        elif future_vrel_kph < -15 and self._lead_matters(CS, lead_dist_m, lead_speed_kph, safe_dist_m):
-          msg =  "-5 (approaching too fast)"
-          button = CruiseButtons.DECEL_2ND
-          self.new_speed = CS.v_ego * CV.MS_TO_KPH - full_press_kph
-        elif future_vrel_kph < -8 and self._lead_matters(CS, lead_dist_m, lead_speed_kph, safe_dist_m):
-          msg =  "-1 (approaching too fast)"
-          button = CruiseButtons.DECEL_SET
-          self.new_speed = CS.v_ego * CV.MS_TO_KPH - half_press_kph
-        # SMOOTHFOLLOW: instead of chasing the gap press by press (+1 up to 3x a second when the lead pulled away, then
-        # "-1 near safe distance" - felt as a push and a sag), aim the set speed at ONE target: the lead's smoothed speed
-        # plus a slow correction that closes / opens the gap towards safe_dist over FOLLOW_CLOSE_S. Press +1/-1 only when
-        # the car's set speed is FOLLOW_DEADBAND_KPH or more away from it, at most every FOLLOW_PRESS_MS. The danger cases
-        # above (much too close, closing fast, slow traffic) still act at once.
-        else:
-          # asymmetric on purpose: speeding up uses the smoothed lead speed and is calm; slowing down uses the lead's
-          # current speed (whichever is lower) and reacts quickly - a lead that brakes must never be followed lazily
-          lead_kph_f = self._lead_speed_filtered(lead_speed_kph, current_time_ms)
-          # QUIETFOLLOW: the lead's speed from the distance change when available (unbiased), else the smoothed radar
-          lead_base_kph = lead_est_kph if lead_est_kph is not None else lead_kph_f
-          v_kph = CS.v_ego * CV.MS_TO_KPH
-          gap_err_m = lead_dist_m - safe_dist_m
-          gap_s = lead_dist_m / max(CS.v_ego, 1.)
-          in_band = QUIET_GAP[0] * follow_time_s <= gap_s <= QUIET_GAP[1] * follow_time_s
-          gap_kph = 0. if in_band else max(-8., min(8., gap_err_m / FOLLOW_CLOSE_S * CV.MS_TO_KPH))   # no gap chasing inside the band
-          a_lead = a_lead_med
-          ahead_kph = max(0., min(FOLLOW_ANTICIPATE_MAX, a_lead)) * FOLLOW_ANTICIPATE_S * CV.MS_TO_KPH   # only when it pulls away, capped
-          up_target_kph = min(lead_base_kph + ahead_kph + gap_kph, max_acc_speed_kph)
-          # SAFETY: closer than wanted, or the lead braking -> the faster-reacting radar reading counts too (whichever is lower)
-          lead_braking = a_lead_med < LEAD_BRAKING_MS2
-          down_target_kph = (min(lead_base_kph, lead_speed_kph) if (gap_err_m < 0 or lead_braking) else lead_base_kph) + gap_kph
-          quiet = (in_band and not lead_braking and abs(lead_base_kph - v_kph) < QUIET_SPEED_KPH
-                   and abs(CS.v_cruise_actual - v_kph) < QUIET_SPEED_KPH)   # gap fine, same speed, set speed = speed
-          self.follow_target_kph = up_target_kph
-          down_dead_kph = half_press_kph * 1.5 if gap_err_m < 0 else FOLLOW_DEADBAND_KPH   # closer than wanted: react sooner
-          urgent = gap_err_m < -0.3 * safe_dist_m or lead_speed_kph < CS.v_ego * CV.MS_TO_KPH - 8. or lead_braking
-          if quiet and not urgent:
-            down_target_kph = up_target_kph = CS.v_cruise_actual             # nothing to do: hold the speed
-          since_ms = current_time_ms - self.follow_dir_ms
-          may_down = urgent or self.follow_dir != 1 or since_ms > FOLLOW_REVERSE_MS
-          may_up = self.follow_dir != -1 or since_ms > FOLLOW_REVERSE_MS
-          if (may_down and down_target_kph <= CS.v_cruise_actual - down_dead_kph
-              and self._no_action_for(milliseconds=FOLLOW_DECEL_PRESS_MS) and self._no_human_action_for(milliseconds=1000)):
-            big = down_target_kph <= CS.v_cruise_actual - full_press_kph
-            msg = "%s (follow: aim %.0f)" % ("-5" if big else "-1", down_target_kph)
-            button = CruiseButtons.DECEL_2ND if big else CruiseButtons.DECEL_SET
-            self.new_speed = CS.v_cruise_actual - (full_press_kph if big else half_press_kph)
-            self.follow_dir, self.follow_dir_ms = -1, current_time_ms
-          elif (may_up and not lead_braking and up_target_kph - CS.v_cruise_actual >= FOLLOW_DEADBAND_KPH and available_speed_kph >= half_press_kph
-                and self._no_action_for(milliseconds=FOLLOW_PRESS_MS) and self._no_human_action_for(milliseconds=1000)):
-            big = up_target_kph - CS.v_cruise_actual >= FOLLOW_BIG_KPH and a_lead > 0.3 and available_speed_kph >= full_press_kph
-            msg = "%s (follow: aim %.0f)" % ("+5" if big else "+1", up_target_kph)
-            button = CruiseButtons.RES_ACCEL_2ND if big else CruiseButtons.RES_ACCEL
-            self.new_speed = CS.v_cruise_actual + (full_press_kph if big else half_press_kph)
-            self.follow_dir, self.follow_dir_ms = 1, current_time_ms
-
-      # If lead_dist is reported as 0, no one is detected in front of you so you
-      # can speed up. Only accel on straight-aways; vision radar often
-      # loses lead car in a turn.
-      elif (lead_dist_m == 0
-            and CS.angle_steers < 2.0
-            and half_press_kph < available_speed_kph
-            and self._no_action_for(milliseconds=ROAD_CLEAR_PRESS_MS)
-            and self._no_human_action_for(milliseconds=1000)
-            and current_time_ms > self.lead_last_seen_time_ms + 4000):
-          msg =  "+1 (road clear)"
-          button = CruiseButtons.RES_ACCEL
-          self.new_speed = CS.v_ego * CV.MS_TO_KPH + half_press_kph
-
-    if (current_time_ms > self.last_update_time + 1000):
-      ratio = 0
-      if safe_dist_m > 0:
-        ratio = (lead_dist_m / safe_dist_m) * 100
-      print ("Ratio: {0:.1f}%  lead: {1:.1f}m  avail: {2:.1f}kph  vRel: {3:.1f}kph  Angle: {4:.1f}deg".format(
-        ratio, lead_dist_m, available_speed_kph, lead_car.vRel * CV.MS_TO_KPH, CS.angle_steers))
-      self.last_update_time = current_time_ms
-      if msg is not None:
-        print ("ACC: " + msg)
-    if msg is not None:
-      self.last_follow_msg = msg      # ACCLOG: the reason of this cycle's decision
-    return button
-    
   def _should_autoengage_cc(self, CS, lead_car=None):
     # Automatically (re)engage cruise control so long as 
     # 1) The carstate allows cruise control
@@ -542,16 +358,15 @@ class ACCController():
                     and CS.v_ego >= self.MIN_CRUISE_SPEED_MS
                     and _current_time_millis() > self.fast_decel_time + 2000)
                     
-    slow_lead = lead_car and lead_car.dRel > 0 and lead_car.vRel < 0 or self._fast_decel_required(CS, lead_car) # pylint: disable=chained-comparison
-    # SAFETY (REENGAGE): a radar drop-out ("no lead", dRel 0) right after a slow-traffic cancel looked like a clear
-    # road, and cruise was resumed - on a Tesla RES restores the PREVIOUS set speed - while still closing on the slow
-    # car (bench: 24 resumes during a lead braking at -3 m/s2). Now: no lead in view must last 3 s before it counts
-    # as clear, and never within 3 s of the lead braking or being clearly slower.
+    # SAFETY (REENGAGE): engage only when cruise presses alone can handle what is left - braking needed under half of
+    # what presses deliver and the lead not braking. (Waiting 3 s after the lead was last slower kept regen on far too
+    # long: 120 -> 37 km/h behind a lead that settled at 60 in the bench.) A radar drop-out ("no lead", dRel 0) right
+    # after a cancel is not a clear road: no lead in view must last 3 s first (bench: resumes while closing on the car).
     now_ms = _current_time_millis()
     lead_seen = lead_car is not None and lead_car.dRel > 0
+    slow_lead = lead_seen and (self._fast_decel_required(CS, lead_car) or self.brake_need_ms2 > REENGAGE_NEED_MS2
+                               or self.a_lead_f < REENGAGE_LEAD_ACCEL_MS2)
     if not lead_seen and now_ms < self.lead_last_seen_time_ms + 3000:
-      slow_lead = True
-    if now_ms < getattr(self, 'lead_closing_time_ms', 0) + 3000:
       slow_lead = True
     
     # "Autoresume" mode allows cruise to engage even after brake events, but
@@ -575,22 +390,16 @@ class ACCController():
     lead_absolute_speed_ms = lead_car.vRel + CS.v_ego
     lead_too_slow = lead_absolute_speed_ms < self.MIN_CRUISE_SPEED_MS
 
-    # SAFETY (BRAKEREQ): cruise presses can only slow the car ~0.6 m/s2; cancelling gives regen ~1.5 m/s2. Cancel at
-    # once when the deceleration NEEDED to stop closing before MIN_GAP_M exceeds what presses deliver, or when the
-    # radar measures the lead braking hard - a time-to-collision of 4 s comes far too late at highway speed (bench:
-    # lead -3 m/s2 at 120 km/h collided although regen from the first moment would have kept >5 m).
+    # SAFETY: cruise presses slow the car ~0.6 m/s2 at most; cancelling gives regen ~1.5 m/s2 at once. Cancel when the
+    # deceleration NEEDED exceeds what presses deliver: the lead's own braking plus what it takes to stop closing before
+    # MIN_GAP_M (need = b_lead + closing^2 / (2 room)), or when the lead brakes hard while we close. Independent of the
+    # planner and of every comfort setting. (bench: a 4 s time-to-collision alone came too late at 120 km/h)
     closing_ms = max(0., -lead_car.vRel)
     room_m = lead_car.dRel - MIN_GAP_M
-    a_lead = getattr(self, 'a_lead_f', 0.)                     # filtered (see _calc_follow_button)
-    v_lead = max(0., CS.v_ego + lead_car.vRel)
-    if room_m <= 0.5:
-      need_ms2 = 99.
-    else:
-      need_ms2 = closing_ms ** 2 / (2. * room_m)               # lead keeps its speed
-      if a_lead < -0.2:                                         # lead keeps braking at its rate to a stop: we must stop
-        need_ms2 = max(need_ms2, CS.v_ego ** 2 / (2. * (room_m + v_lead ** 2 / (2. * -a_lead))))   # within room + its stop
+    b_lead = max(0., -self.a_lead_f)
+    need_ms2 = 99. if room_m <= 0.5 else b_lead + closing_ms ** 2 / (2. * room_m)
     self.brake_need_ms2 = need_ms2
-    brake_needed = need_ms2 > PRESS_DECEL_MS2 or (a_lead < LEAD_HARD_BRAKE_MS2 and closing_ms > 1.)
+    brake_needed = need_ms2 > PRESS_DECEL_MS2 or (self.a_lead_f < LEAD_HARD_BRAKE_MS2 and closing_ms > 1.)
 
     return collision_imminent or lead_too_slow or brake_needed
     
@@ -601,102 +410,6 @@ class ACCController():
       return sys.maxsize
     return abs(float(lead_car.dRel) / lead_car.vRel)
     
-  @staticmethod
-  def _lead_matters(CS, dist_m, lead_kph, safe_dist_m):
-    """the lead is close enough for the quick 'approaching too fast' presses"""
-    closing_ms = CS.v_ego - lead_kph * CV.KPH_TO_MS
-    if dist_m < 1.3 * safe_dist_m:
-      return True
-    return closing_ms > 0.5 and (dist_m - safe_dist_m) / closing_ms < 8.
-
-  def _lead_speed_from_distance(self, CS, dist_m):
-    """QUIETFOLLOW: the lead's speed = your speed + how fast the distance changes (least-squares slope over the last
-    DIST_SLOPE_S). Unbiased, unlike the radar's relative speed. None until 1.5 s of steady data (restarts on a jump)."""
-    now_ms = _current_time_millis()
-    if dist_m <= 0:
-      self.dist_hist = []
-      return None
-    if self.dist_hist and (abs(dist_m - self.dist_hist[-1][1]) > 4. or now_ms - self.dist_hist[-1][0] > 600):
-      self.dist_hist = []                               # another car / lost for a while: start again
-    self.dist_hist = [h for h in self.dist_hist if now_ms - h[0] <= DIST_SLOPE_S * 1000] + [(now_ms, dist_m)]
-    if len(self.dist_hist) < 10 or self.dist_hist[-1][0] - self.dist_hist[0][0] < 1500:
-      return None
-    n = len(self.dist_hist)
-    mt = sum(h[0] for h in self.dist_hist) / float(n); md = sum(h[1] for h in self.dist_hist) / float(n)
-    den = sum((h[0] - mt) ** 2 for h in self.dist_hist)
-    if den <= 0:
-      return None
-    slope_ms = sum((h[0] - mt) * (h[1] - md) for h in self.dist_hist) / den * 1000.   # m per s
-    return (CS.v_ego + slope_ms) * CV.MS_TO_KPH
-
-  def _lead_speed_filtered(self, lead_kph, now_ms):
-    """SMOOTHFOLLOW: lead speed smoothed with a ~1.5 s time constant; restarts if the lead was not seen for 2 s"""
-    if self.lead_kph_f is None or now_ms - self.lead_kph_t > 2000:
-      self.lead_kph_f = lead_kph
-    else:
-      k = min(1., (now_ms - self.lead_kph_t) / 1000. / LEAD_SPEED_TAU_S)
-      self.lead_kph_f += (lead_kph - self.lead_kph_f) * k
-    self.lead_kph_t = now_ms
-    return self.lead_kph_f
-
-  def _curve_cap_kph(self, CS):
-    """CURVEACC: the speed (kph) the curve ahead allows now (999 = no curve). Ignored while signalling / changing lane
-    (the camera path bends then without a curve). Warns once every 3 s when far too fast for the buttons alone."""
-    if CS.turn_signal_blinking or getattr(self.CC, 'alca_enabled', False):
-      return 999.
-    now_ms = _current_time_millis()
-    if now_ms - getattr(self, '_curves_checked_ms', -1e9) > 5000:        # look at the switch file every 5 s only
-      self._curves_checked_ms = now_ms
-      self._curves_on = os.path.exists(ACC_CURVES_ON)
-    if not self._curves_on:
-      self._cap_since, self._cap_hist = None, []
-      return 999.
-    v_curve = self.CC.PCC.curve_speed_for_acc(CS)
-    now_ms = _current_time_millis()
-    if v_curve >= 254.:
-      self._cap_since, self._cap_hist = None, []
-      return 999.
-    # only a curve that stays: CURVE_CONFIRM_MS without interruption, then the least strict value of that stretch
-    if self._cap_since is None:
-      self._cap_since = now_ms
-    self._cap_hist = [h for h in self._cap_hist if now_ms - h[0] <= CURVE_CONFIRM_MS] + [(now_ms, v_curve)]
-    if now_ms - self._cap_since < CURVE_CONFIRM_MS:
-      return 999.
-    v_curve = max(v for _, v in self._cap_hist)
-    if CS.v_ego > v_curve + 4.0 and now_ms - self.curve_warn_time_ms > 3000:     # ~15 km/h over: cruise regen alone is too late
-      self.curve_warn_time_ms = now_ms
-      CS.UE.custom_alert_message(4, "Sharp curve - brake!", 150, 4)
-    # never below the lowest cruise speed (+3): lower than that the code would cancel cruise in the middle of the curve
-    return max(v_curve * CV.MS_TO_KPH, self.MIN_CRUISE_SPEED_MS * CV.MS_TO_KPH + 3.)
-
-  def _curve_button(self, CS, lead_car):
-    """CURVEACC: press down while the cruise speed is above the curve speed; after the curve press back up to your
-    speed (only what the curve took away, and not toward a lead car that is close)."""
-    if CS.pcm_acc_status != CruiseState.ENABLED:
-      self.curve_lowered = False
-      return None
-    half_press_kph, full_press_kph = self._get_cc_units_kph(CS.imperial_speed_units)
-    target_kph = min(self.acc_speed_kph, self.curve_cap_kph)
-    over_kph = CS.v_cruise_actual - target_kph
-    if over_kph >= 2 * full_press_kph and self._no_action_for(milliseconds=300):
-      self.curve_lowered = True; self.last_follow_msg = "curve -5"
-      return CruiseButtons.DECEL_2ND
-    if over_kph >= half_press_kph * 1.5 and self._no_action_for(milliseconds=500):
-      self.curve_lowered = True; self.last_follow_msg = "curve -1"
-      return CruiseButtons.DECEL_SET
-    if self.curve_lowered:
-      if lead_car is not None and lead_car.status and lead_car.dRel > 0:
-        self.curve_lowered = False                    # a car ahead: the follow logic sets the speed from here
-        return None
-      under_kph = target_kph - CS.v_cruise_actual
-      if under_kph < half_press_kph:
-        if self.curve_cap_kph >= self.acc_speed_kph:
-          self.curve_lowered = False                  # curve over and back at your speed
-      elif self._no_human_action_for(milliseconds=1000) and self._no_action_for(milliseconds=1000):
-        self.last_follow_msg = "after curve +1"       # +1 per second: a smooth ramp (+5 steps were a push)
-        return CruiseButtons.RES_ACCEL
-    return None
-
   def _get_cc_units_kph(self, is_imperial_units):
     # Cruise control buttons behave differently depending on whether the car
     # is configured for metric or imperial units.
@@ -710,52 +423,109 @@ class ACCController():
       full_press_kph = 5
     return half_press_kph, full_press_kph
     
-  # Adjust speed based off OP's longitudinal model. As of OpenPilot 0.5.3, this
-  # is inoperable because the planner crashes when given only visual radar
-  # inputs. (Perhaps this can be used in the future with a radar install, or if
-  # OpenPilot planner changes.)
-  def _calc_button(self, CS, desired_speed_ms):
-    button_to_press = None
-    # Automatically engange traditional cruise if appropriate.
-    if self._should_autoengage_cc(CS) and desired_speed_ms >= CS.v_ego:
-      button_to_press = CruiseButtons.DECEL_SET     # ENGAGESET: at the current speed, not RES (previous set speed)
-    # If traditional cruise is engaged, then control it.
-    elif (CS.pcm_acc_status == CruiseState.ENABLED
-          # But don't make adjustments if a human has manually done so in
-          # the last 3 seconds. Human intention should not be overridden.
-          and self._no_human_action_for(milliseconds=3000)
-          and self._no_automated_action_for(milliseconds=500)):
-      # The difference between OP's target speed and the current cruise
-      # control speed, in KPH.
-      speed_offset_kph = (desired_speed_ms * CV.MS_TO_KPH - CS.v_cruise_actual)
-    
-      half_press_kph, full_press_kph = self._get_cc_units_kph(CS.imperial_speed_units)
-      
-      # Reduce cruise speed significantly if necessary. Multiply by a % to
-      # make the car slightly more eager to slow down vs speed up.
-      if desired_speed_ms < self.MIN_CRUISE_SPEED_MS:
-        button_to_press = CruiseButtons.CANCEL
-      if speed_offset_kph < -2 * full_press_kph and CS.v_cruise_actual > 0:
-        button_to_press = CruiseButtons.CANCEL
-      elif speed_offset_kph < -0.6 * full_press_kph and CS.v_cruise_actual > 0:
-        # Send cruise stalk dn_2nd.
-        button_to_press = CruiseButtons.DECEL_2ND
-      # Reduce speed slightly if necessary.
-      elif speed_offset_kph < -0.9 * half_press_kph and CS.v_cruise_actual > 0:
-        # Send cruise stalk dn_1st.
-        button_to_press = CruiseButtons.DECEL_SET
-      # Increase cruise speed if possible.
-      elif CS.v_ego > self.MIN_CRUISE_SPEED_MS:
-        # How much we can accelerate without exceeding max allowed speed.
-        available_speed_kph = self.acc_speed_kph - CS.v_cruise_actual
-        if speed_offset_kph >= full_press_kph and full_press_kph < available_speed_kph:
-          # Send cruise stalk up_2nd.
-          button_to_press = CruiseButtons.RES_ACCEL_2ND
-        elif speed_offset_kph >= half_press_kph and half_press_kph < available_speed_kph:
-          # Send cruise stalk up_1st.
-          button_to_press = CruiseButtons.RES_ACCEL
-    return button_to_press
-    
+  # ACCPLAN SERVO: the set speed that makes Tesla's cruise follow openpilot's plan. The car's cruise accelerates by about
+  # K_CC x (set speed - speed), so to get the planned acceleration a at the planned speed v the set speed is v + a / K_CC.
+  # Pressed in 1 / 5 steps toward it with SERVO_HYST_KPH hysteresis; never above YOUR set speed.
+  def _calc_button(self, CS, lead_car, plan, now_ms):
+    button = None
+    msg = None
+    half_press_kph, full_press_kph = self._get_cc_units_kph(CS.imperial_speed_units)
+    lead_seen = lead_car is not None and lead_car.dRel > 0
+    if self._should_autoengage_cc(CS, lead_car=lead_car if lead_seen else None) and self._no_action_for(milliseconds=100):
+      # ENGAGESET: SET (stalk down) engages at the CURRENT speed. RES would restore the PREVIOUS set speed on a Tesla
+      # (logs: cruise engaging at 95 while driving 65 at 16:17:18, at 104 while 83 behind a slower car at 16:48:46).
+      button = CruiseButtons.DECEL_SET
+      msg = "engage cruise at current speed"
+    elif CS.pcm_acc_status == CruiseState.ENABLED:
+      if lead_seen and self._fast_decel_required(CS, lead_car) and self._no_human_action_for(milliseconds=500):
+        button = CruiseButtons.CANCEL
+        msg = "Off (braking needed %.1f m/s2)" % min(self.brake_need_ms2, 9.9)
+        self.new_speed = 1
+      elif plan is None:
+        msg = "no plan"
+      elif getattr(CS, 'user_gas_pressed', False):
+        msg = "your accelerator"     # you drive: no presses (the set speed would follow your foot up)
+      elif self._no_automated_action_for(milliseconds=SERVO_PRESS_MS) and self._no_human_action_for(milliseconds=SERVO_HUMAN_MS):
+        v_plan, a_plan = plan
+        v_ref = min(max(v_plan, CS.v_ego - PLAN_DRIFT_MS), CS.v_ego + PLAN_DRIFT_MS)
+        raw_kph = min((v_ref + a_plan / K_CC) * CV.MS_TO_KPH, self.acc_speed_kph)
+        want_kph = self._smooth_want(raw_kph, now_ms)
+        self.follow_target_kph = want_kph
+        diff_kph = want_kph - CS.v_cruise_actual
+        if diff_kph <= -full_press_kph:
+          button = CruiseButtons.DECEL_2ND
+        elif diff_kph <= -SERVO_HYST_KPH * half_press_kph:
+          button = CruiseButtons.DECEL_SET
+        elif CS.v_ego > self.MIN_CRUISE_SPEED_MS and diff_kph >= full_press_kph:
+          button = CruiseButtons.RES_ACCEL_2ND
+        elif CS.v_ego > self.MIN_CRUISE_SPEED_MS and diff_kph >= SERVO_UP_HYST_KPH * half_press_kph:
+          button = CruiseButtons.RES_ACCEL
+        if button is not None:
+          step = {CruiseButtons.DECEL_2ND: -full_press_kph, CruiseButtons.DECEL_SET: -half_press_kph,
+                  CruiseButtons.RES_ACCEL_2ND: full_press_kph, CruiseButtons.RES_ACCEL: half_press_kph}[button]
+          self.new_speed = CS.v_cruise_actual + step
+          msg = "%+d (plan %.0f km/h %+.2f m/s2 -> set %.1f)" % (step, v_plan * CV.MS_TO_KPH, a_plan, want_kph)
+    if msg is not None:
+      self.last_follow_msg = msg      # ACCLOG: the reason of this cycle's decision
+    return button
+
+  def _smooth_want(self, raw_kph, now_ms):
+    """SERVO: low-pass of the wanted set speed; a drop larger than SERVO_FAST_DOWN_KPH goes through at once"""
+    if self._want_f is None or now_ms - self._want_ms > 1000:
+      self._want_f = raw_kph
+    else:
+      self._want_f += (raw_kph - self._want_f) * min(1., (now_ms - self._want_ms) / 1000. / SERVO_TAU_S)
+    self._want_ms = now_ms
+    self._want_f = min(self._want_f, raw_kph + SERVO_FAST_DOWN_KPH)
+    return self._want_f
+
+  def _read_plan(self, now_ms):
+    """ACCPLAN: (speed m/s, acceleration m/s2) openpilot's planner wants now, or None when there is no fresh plan.
+    The speed is interpolated like controlsd does (plan.vStart/aStart -> aTarget over the 0.2 s planner step). The
+    planner's camera-curve slowing ('model' source) is ignored when no car is ahead: its own cruise solution is used
+    (curve slowing is off on this car - night path blips made 'curves' on straight roads)."""
+    msg = messaging.recv_one_or_none(self.plan_sock)
+    if msg is not None:
+      p = msg.plan
+      self._plan = (p.vStart, p.aStart, p.vTarget, p.aTarget, bool(p.hasLead), str(p.longitudinalPlanSource),
+                    p.vCruise, p.aCruise, now_ms, bool(msg.valid))
+    self.plan_v = self.plan_a = None
+    if self._plan is None:
+      return None
+    v_start, a_start, v_target, a_target, has_lead, source, v_cruise, a_cruise, t_ms, valid = self._plan
+    age_s = (now_ms - t_ms) / 1000.
+    if not valid or age_s * 1000. > PLAN_MAX_AGE_MS:
+      return None
+    if source == 'model' and not has_lead:
+      v, a = v_cruise, a_cruise
+    else:
+      dt = min(age_s, 0.2 + 0.01) + 0.01                            # as controlsd: LON_MPC_STEP + DT_CTRL
+      a = a_start + (dt / 0.2) * (a_target - a_start)
+      v = v_start + dt * (a + a_start) / 2.
+    self.plan_v, self.plan_a = v, a
+    return v, a
+
+  def _update_lead_filter(self, CS, lead, now_ms):
+    """the lead's acceleration and relative speed, low-pass LEAD_FILTER_TAU_S (radar noise); POSGATE / REENGAGE mark"""
+    if lead is None or not lead.dRel:
+      if now_ms - self._lead_f_ms > LEAD_FILTER_KEEP_MS:   # a short radar drop-out keeps the filters (same car)
+        self.a_lead_f, self.v_rel_f, self._lead_f_ms = 0., 0., 0
+      return
+    a_raw = getattr(lead, 'aLeadK', None)
+    if a_raw is None:
+      a_raw = getattr(lead, 'aRel', 0.) + getattr(CS, 'a_ego', 0.)
+    if self._lead_f_ms == 0 or now_ms - self._lead_f_ms > LEAD_FILTER_KEEP_MS:
+      # new lead: acceleration starts at 0 (one raw reading has +-0.3 m/s2 noise - a 0.6 reading alone was a false
+      # cancel); a real braking car shows within ~0.5 s, and the closing speed term of the safety check acts at once
+      self.a_lead_f, self.v_rel_f = 0., lead.vRel
+    else:
+      k = min(0.1, (now_ms - self._lead_f_ms) / 1000.) / LEAD_FILTER_TAU_S   # after a drop-out: one normal step, not a jump
+      self.a_lead_f += (a_raw - self.a_lead_f) * k
+      self.v_rel_f += (lead.vRel - self.v_rel_f) * k
+    self._lead_f_ms = now_ms
+    if self.a_lead_f < LEAD_BRAKING_MS2 or self.v_rel_f < -LEAD_SLOWER_MS:
+      self.lead_closing_time_ms = now_ms
+
   def _no_human_action_for(self, milliseconds):
     return _current_time_millis() > self.human_cruise_action_time + milliseconds
     
