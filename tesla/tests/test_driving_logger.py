@@ -9,6 +9,7 @@ tesla_tx_hook). If either ever changes, this test (and driving_logger's decode) 
 import os
 import struct
 import sys
+import json
 import unittest
 from ctypes import create_string_buffer
 
@@ -291,6 +292,69 @@ class TestModeLog(unittest.TestCase):
     open(p, 'w').write('class Planner(): pass\n')
     self.assertIs(DL.gap_patch_active(p), False)
     self.assertIsNone(DL.gap_patch_active(os.path.join(d, 'missing')))
+
+
+class TestClassifiedExtras(unittest.TestCase):
+  def test_fields_dict(self):
+    NS = type('NS', (), {})
+    m = NS(); m.cruiseControl = NS(); m.cruiseControl.speedOverride = 25.123456; m.cruiseControl.cancel = False
+    m.hudControl = NS(); m.hudControl.leadVisible = True
+    d = DL.fields_dict(m, DL.CC_FIELDS)
+    self.assertEqual(d['pcm_speed'], 25.123); self.assertIs(d['cancel'], False); self.assertIs(d['hud_lead'], True)
+    self.assertIsNone(d['gas'])                                     # not in this message: None, no crash
+    self.assertTrue(all(v is None for v in DL.fields_dict(None, DL.PATH_FIELDS).values()))
+    p = NS(); p.dPoly = [0.001, -0.02, 0.3, 0.1]; p.laneWidth = 3.4
+    d = DL.fields_dict(p, DL.PATH_FIELDS); self.assertEqual(d['d_poly'], [0.001, -0.02, 0.3, 0.1]); self.assertEqual(d['lane_width'], 3.4)
+
+  def test_lead_dict_has_source_flags(self):
+    L = type('L', (), dict(status=True, dRel=130., vRel=-1., yRel=0.2, aRel=0., vLeadK=30., aLeadK=0., vLead=30., aLeadTau=1.5,
+                           modelProb=0.0, radar=True, fcw=False))
+    d = DL.lead_dict(L()); self.assertIs(d['radar'], True); self.assertIs(d['fcw'], False); self.assertEqual(d['modelProb'], 0.0)
+
+  def test_tracks_line(self):
+    P = type('P', (), {})
+    pts = []
+    for tid, d, y, v in ((3, 150.04, 0.21, -2.06), (1, 40., -3.5, 0.), (9, 300., 0., 0.), (5, 0., 0., 0.)):
+      p = P(); p.trackId, p.dRel, p.yRel, p.vRel = tid, d, y, v; pts.append(p)
+    r = json.loads(DL.tracks_line(pts, 1000.0))
+    self.assertEqual(r['src'], 'tracks'); self.assertEqual(r['o'], [[1, 40.0, -3.5, 0.0], [3, 150.0, 0.2, -2.1]])   # sorted, <=250 m
+
+  def test_pictures_priority(self):
+    self.assertEqual(DL.frame_window('lead_out'), (DL.FRAME_KEEP_S, DL.FRAME_AFTER_S))
+    self.assertEqual(DL.frame_window('accel'), (DL.FRAME_EVERY_S, DL.FRAME_EVERY_S))
+    import tempfile, shutil
+    d = tempfile.mkdtemp()
+    try:
+      w = DL.ChunkWriter(root=d, background=False)
+      n_routine = sum(w.add_frame(1000. + i, b'x', 'accel') for i in range(30))
+      n_prio = sum(w.add_frame(2000. + i, b'x', 'gap_short') for i in range(30))
+      self.assertEqual(n_routine, DL.FRAMES_PER_CHUNK); self.assertEqual(n_prio, DL.FRAMES_PRIORITY_EXTRA)
+      w.close()
+    finally:
+      shutil.rmtree(d)
+
+  def test_kernel_filter(self):
+    self.assertEqual(DL.kmsg_line(b"6,1234,5678,-;usb 1-1.3: can't re-read device descriptor for authorization: -110\n"),
+                     "usb 1-1.3: can't re-read device descriptor for authorization: -110")
+    self.assertIsNone(DL.kmsg_line(b'5,1,2,-;type=1400 audit(1.2:3): avc: denied { getattr } path="/dev/video0"'))
+    self.assertIsNone(DL.kmsg_line(b'6,1,2,-;msm_vidc: info: Opening video instance'))
+
+  def test_sys_sampler_on_fake_proc(self):
+    import tempfile, shutil
+    d = tempfile.mkdtemp()
+    try:
+      os.makedirs(os.path.join(d, 'proc', '321')); os.makedirs(os.path.join(d, 'sys', 'class', 'thermal', 'thermal_zone0'))
+      open(os.path.join(d, 'proc', '321', 'cmdline'), 'wb').write(b'./camerad\0')
+      open(os.path.join(d, 'proc', '321', 'stat'), 'w').write('321 (camerad) S ' + ' '.join(['0'] * 10) + ' 250 50 0 0')
+      open(os.path.join(d, 'proc', 'loadavg'), 'w').write('8.50 3.20 1.10 2/400 999')
+      open(os.path.join(d, 'sys', 'class', 'thermal', 'thermal_zone0', 'temp'), 'w').write('61000')
+      s = DL.SysSampler(proc=os.path.join(d, 'proc'), sysfs=os.path.join(d, 'sys'), frame='/nonexistent', data=d)
+      s.tick = 100
+      r = s.sample(0., 1000.)
+      self.assertEqual(r['src'], 'sys'); self.assertEqual(r['procs']['camerad'], [321, 3.0]); self.assertEqual(r['temps'], [61])
+      self.assertEqual(r['load'], [8.5, 3.2, 1.1]); self.assertIsNone(r['camera_frame'])
+    finally:
+      shutil.rmtree(d)
 
 
 class TestRecorderPieces(unittest.TestCase):

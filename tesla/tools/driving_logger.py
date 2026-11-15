@@ -127,6 +127,7 @@ import glob
 import gzip
 import json
 import os
+import re
 import shutil
 import struct
 import sys
@@ -161,6 +162,15 @@ FRAME_KEEP_S = 10.0
 FRAME_AFTER_S = 6.0
 FRAME_PERIODIC_S = 60.0
 FRAMES_PER_CHUNK = 12
+FRAMES_PRIORITY_EXTRA = 12    # moments that matter most (FRAME_PRIORITY) may use this many more per chunk ...
+FRAME_PRIORITY = ('lead_out', 'lead_in', 'gap_short', 'cancel', 'fcw')   # ... and get the full window before/after;
+                              # routine moments (ACC press, |accel| > 0.5) get one frame before and one after
+                              # (15 Nov 19:47: the 12 were used up by 19:47:14, nothing of the 0.5 s-gap approach after)
+GAP_SHORT_S = 1.5             # picture trigger: following closer than this (lead seen, above 36 km/h)
+# RADAR OBJECTS: radard's liveTracks (every object the radar tracks, not only openpilot's two leads) are written
+# TRACKS_HZ times a second as {"src":"tracks","t":..,"o":[[trackId, dRel m, yRel m, vRel m/s], ...]}, within TRACKS_MAX_M
+TRACKS_HZ = 5
+TRACKS_MAX_M = 250.
 FRAMES_OFF = '/data/recorder_frames_off'      # touch to record no pictures (saves mobile data)
 
 
@@ -192,8 +202,9 @@ class ChunkWriter(object):
     self.frames = 0
 
   def add_frame(self, t_wall, data, why):
-    """PICTURES: one camera frame for this chunk (at most FRAMES_PER_CHUNK); returns True if kept"""
-    if self.frames >= FRAMES_PER_CHUNK:
+    """PICTURES: one camera frame for this chunk (at most FRAMES_PER_CHUNK, + FRAMES_PRIORITY_EXTRA for the moments in
+    FRAME_PRIORITY); returns True if kept"""
+    if self.frames >= FRAMES_PER_CHUNK + (FRAMES_PRIORITY_EXTRA if why in FRAME_PRIORITY else 0):
       return False
     d = os.path.join(self.dir, 'c%04d.frames' % self.n)
     os.makedirs(d, exist_ok=True)
@@ -277,6 +288,25 @@ class Frames(object):
       self.saved_t.add(b[0])
       if len(self.saved_t) > 200:
         self.saved_t = set(sorted(self.saved_t)[-50:])
+
+
+def frame_window(why):
+  """PICTURES: (seconds before, seconds after) to save around a moment - full window only for the priority ones"""
+  return (FRAME_KEEP_S, FRAME_AFTER_S) if why in FRAME_PRIORITY else (FRAME_EVERY_S, FRAME_EVERY_S)
+
+
+def tracks_line(lt, t_wall, max_m=TRACKS_MAX_M):
+  """RADAR OBJECTS: one 'tracks' line from a liveTracks list (any objects with trackId, dRel, yRel, vRel)"""
+  o = []
+  for p in lt:
+    try:
+      d = float(p.dRel)
+      if 0. < d <= max_m:
+        o.append([int(p.trackId), round(d, 1), round(float(p.yRel), 1), round(float(p.vRel), 1)])
+    except Exception:
+      pass
+  o.sort(key=lambda x: x[1])
+  return json.dumps({'src': 'tracks', 't': round(t_wall, 3), 'o': o}, separators=(',', ':'))
 
 
 class Follow(object):
@@ -438,7 +468,8 @@ class Classifier(object):
 
 
 # ---------------------------------------------------------------------------------------- lead vehicle fields
-LEAD_FIELDS = ('status', 'dRel', 'vRel', 'yRel', 'aRel', 'vLeadK', 'aLeadK')
+LEAD_FIELDS = ('status', 'dRel', 'vRel', 'yRel', 'aRel', 'vLeadK', 'aLeadK', 'vLead', 'aLeadTau', 'modelProb', 'radar', 'fcw')
+LEAD_BOOLS = ('status', 'radar', 'fcw')   # radar: False = camera-only lead; modelProb 0 = radar-only lead
 
 
 def model_dict(mm):
@@ -487,7 +518,7 @@ def lead_dict(lead):
   for f in LEAD_FIELDS:
     try:
       v = getattr(lead, f)
-      out[f] = bool(v) if f == 'status' else round(float(v), 3)
+      out[f] = bool(v) if f in LEAD_BOOLS else round(float(v), 3)
     except Exception:
       out[f] = None
   return out
@@ -549,6 +580,205 @@ def long_ctrl_dict(c):
   return out
 
 
+# ------------------------------------------------------------------ CLASSIFIED EXTRAS (field guide: LOG_FORMAT.md)
+CTRL_FIELDS = (('v_pid', 'vPid'), ('v_target_lead', 'vTargetLead'), ('a_target', 'aTarget'), ('up_accel', 'upAccelCmd'),
+               ('ui_accel', 'uiAccelCmd'), ('uf_accel', 'ufAccelCmd'), ('force_decel', 'forceDecel'), ('active', 'active'),
+               ('engageable', 'engageable'), ('angle_steers_des', 'angleSteersDes'))
+CC_FIELDS = (('pcm_speed', 'cruiseControl.speedOverride'), ('accel_override', 'cruiseControl.accelOverride'),
+             ('cancel', 'cruiseControl.cancel'), ('hud_lead', 'hudControl.leadVisible'), ('hud_set_speed', 'hudControl.setSpeed'),
+             ('gas', 'actuators.gas'), ('brake', 'actuators.brake'))
+MODEL_LEAD_FIELDS = (('prob', 'lead.prob'), ('dist', 'lead.dist'), ('std', 'lead.std'), ('rel_vel', 'lead.relVel'),
+                     ('rel_y', 'lead.relY'), ('future_prob', 'leadFuture.prob'), ('future_dist', 'leadFuture.dist'))
+PATH_FIELDS = (('d_poly', 'dPoly'), ('lane_width', 'laneWidth'), ('l_prob', 'lProb'), ('r_prob', 'rProb'),
+               ('angle_des', 'angleSteers'), ('mpc_valid', 'mpcSolutionValid'))
+ALERT_FIELDS = (('text1', 'alertText1'), ('text2', 'alertText2'), ('status', 'alertStatus'), ('type', 'alertType'))
+
+
+def fields_dict(obj, fields, nd=3):
+  """{key: value} for (key, 'attr.sub') pairs of a message; numbers rounded, bools kept, lists of numbers kept, enums as
+  text, anything missing -> None. Never raises (a field this schema does not have is just None)."""
+  out = {}
+  for k, a in fields:
+    try:
+      v = obj
+      for part in a.split('.'):
+        v = getattr(v, part)
+      if isinstance(v, bool):
+        out[k] = v
+      elif isinstance(v, (int, float)):
+        out[k] = round(float(v), nd)
+      elif isinstance(v, str):
+        out[k] = v
+      elif hasattr(v, '__len__'):
+        out[k] = [round(float(x), 5) for x in v]
+      else:
+        out[k] = str(v)
+    except Exception:
+      out[k] = None
+  return out
+
+
+SYS_PROCS = ('camerad', '_modeld', 'selfdrive.controls.controlsd', 'selfdrive.controls.plannerd',
+             'selfdrive.controls.radard', 'boardd', '_ui', 'manager.py')
+SYS_RESCAN_S = 5.0     # the process list is searched every 5 s; their CPU time is read every second
+
+
+class SysSampler(object):
+  """SYS class, once a second: what the EON itself is doing - so a camera hang, a crashing / restarting process, heat,
+  memory or disk trouble shows in the log instead of being guessed afterwards. Reads /proc and /sys only."""
+  def __init__(self, proc='/proc', sysfs='/sys', frame=FRAME_SRC, data='/data'):
+    self.proc, self.sysfs, self.frame, self.data = proc, sysfs, frame, data
+    self.pids, self.t_scan = {}, -1e9
+    try:
+      self.tick = os.sysconf('SC_CLK_TCK')
+    except Exception:
+      self.tick = 100
+
+  def _scan(self):
+    pids = {}
+    for pid in os.listdir(self.proc):
+      if not pid.isdigit():
+        continue
+      try:
+        cmd = open(os.path.join(self.proc, pid, 'cmdline'), 'rb').read().replace(b'\0', b' ').decode('utf8', 'replace')
+      except Exception:
+        continue
+      for w in SYS_PROCS:
+        if w in cmd and w not in pids:
+          pids[w] = int(pid)
+    self.pids = pids
+
+  def _cpu(self, pid):
+    try:
+      st = open(os.path.join(self.proc, str(pid), 'stat')).read().rsplit(')', 1)[1].split()
+      return round((int(st[11]) + int(st[12])) / float(self.tick), 1)
+    except Exception:
+      return None
+
+  def _read(self, *parts):
+    try:
+      return open(os.path.join(*parts)).read().strip()
+    except Exception:
+      return None
+
+  def sample(self, now_mono, t_wall):
+    if now_mono - self.t_scan >= SYS_RESCAN_S:
+      self.t_scan = now_mono
+      try:
+        self._scan()
+      except Exception:
+        pass
+    procs = {}
+    for w, pid in list(self.pids.items()):
+      cpu = self._cpu(pid)
+      if cpu is None:
+        del self.pids[w]                                # gone: found again (with a new pid) at the next scan
+      else:
+        procs[w] = [pid, cpu]
+    temps = []
+    tdir = os.path.join(self.sysfs, 'class', 'thermal')
+    try:
+      for z in sorted(os.listdir(tdir), key=lambda s: int(''.join(c for c in s if c.isdigit()) or 0)):
+        v = self._read(tdir, z, 'temp')
+        if v and v.lstrip('-').isdigit():
+          temps.append(int(v) // 1000 if abs(int(v)) > 1000 else int(v))
+    except Exception:
+      pass
+    mem = None
+    try:
+      for line in open(os.path.join(self.proc, 'meminfo')):
+        if line.startswith('MemAvailable:'):
+          mem = int(line.split()[1]) // 1024
+    except Exception:
+      pass
+    try:
+      sv = os.statvfs(self.data); free_gb = round(sv.f_bavail * sv.f_frsize / 1e9, 2)
+    except Exception:
+      free_gb = None
+    try:
+      st = os.stat(self.frame); frame = [round(t_wall - st.st_mtime, 2), st.st_size]
+    except Exception:
+      frame = None
+    load = self._read(self.proc, 'loadavg')
+    up = self._read(self.proc, 'uptime')
+    bat = self._read(self.sysfs, 'class', 'power_supply', 'battery', 'capacity')
+    usbfs = self._read(self.sysfs, 'module', 'usbcore', 'parameters', 'usbfs_memory_mb')
+    return {'src': 'sys', 't': round(t_wall, 3), 'procs': procs,
+            'temps': temps, 'temp_max': max(temps) if temps else None, 'mem_avail_mb': mem, 'data_free_gb': free_gb,
+            'load': [float(x) for x in load.split()[:3]] if load else None,
+            'uptime_s': round(float(up.split()[0]), 1) if up else None,
+            'battery_pct': int(bat) if bat and bat.isdigit() else None,
+            'camera_frame': frame, 'usbfs_mb': int(usbfs) if usbfs and usbfs.isdigit() else None}
+
+
+KMSG_KEEP = re.compile(r'usb|uvc|xhci|camera|ispif|msm_cam|thermal|oom|out of memory|killed process|panda', re.I)
+KMSG_DROP = re.compile(r'avc:|audit', re.I)
+
+
+class Kmsg(object):
+  """KERNEL class: new kernel messages about USB / the camera / heat / memory, read from /dev/kmsg without blocking
+  (e.g. 'usb 1-1.3: can't re-read device descriptor ... -110', 'usb_submit_urb returned -12' - the camera hangs)"""
+  def __init__(self, path='/dev/kmsg'):
+    try:
+      self.fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+      os.lseek(self.fd, 0, os.SEEK_END)
+    except Exception:
+      self.fd = None
+
+  def read(self, max_n=200):
+    out = []
+    if self.fd is None:
+      return out
+    for _ in range(max_n):
+      try:
+        rec = os.read(self.fd, 8192)
+      except BlockingIOError:
+        break
+      except OSError:
+        continue                                        # records overwritten while we were away (EPIPE): skip
+      if not rec:
+        break
+      line = kmsg_line(rec)
+      if line:
+        out.append(line)
+    return out
+
+
+def kmsg_line(rec):
+  """KERNEL class: the message text of one /dev/kmsg record if it is about USB / camera / heat / memory, else None"""
+  line = rec.decode('utf8', 'replace').split(';', 1)[-1].split('\n')[0].strip()
+  return line[:300] if KMSG_KEEP.search(line) and not KMSG_DROP.search(line) else None
+
+
+VERSION_FILES = (('acc', '/data/openpilot/selfdrive/car/tesla/ACC_module.py'),
+                 ('carcontroller', '/data/openpilot/selfdrive/car/tesla/carcontroller.py'),
+                 ('planner', PLANNER_FILE), ('radard', '/data/openpilot/selfdrive/controls/radard.py'),
+                 ('controlsd', '/data/openpilot/selfdrive/controls/controlsd.py'),
+                 ('camerad', '/data/openpilot/selfdrive/camerad/camerad'))
+
+
+def versions(files=VERSION_FILES, repo='/data/claude-stuff'):
+  """META class, at drive start: md5 of the installed openpilot files that matter + which patches are in, + the
+  claude-stuff commit - so every drive says exactly what was running"""
+  import hashlib
+  out = {}
+  for k, p in files:
+    try:
+      out[k] = hashlib.md5(open(p, 'rb').read()).hexdigest()
+    except Exception:
+      out[k] = None
+  try:
+    out['radard_lead_patch'] = 'RADARLEAD (tesla/tools/patch_radard_lead.py)' in open(dict(files)['radard']).read()
+  except Exception:
+    out['radard_lead_patch'] = None
+  try:
+    head = open(os.path.join(repo, '.git', 'HEAD')).read().strip()
+    out['claude_stuff'] = open(os.path.join(repo, '.git', head[5:])).read().strip()[:10] if head.startswith('ref: ') else head[:10]
+  except Exception:
+    out['claude_stuff'] = None
+  return out
+
+
 def sl_hypotheticals(sl, request, prev_request, measured, v_ego, t_659=None, prev_t_659=None):
   """pure wrapper around steer_limits.limit_angle() for the two candidate strengths; see module
   docstring (STEER_LIMITS HYPOTHETICALS). None in, None out - never raises, never applied anywhere."""
@@ -580,7 +810,7 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
   import cereal.messaging as messaging  # local import: keeps this file importable/testable off-car
   sl = _load_steer_limits()
 
-  topics = ('controlsState', 'carState', 'radarState', 'model', 'carControl', 'gpsLocationExternal') + (('plan',) if auto else ())
+  topics = ('controlsState', 'carState', 'radarState', 'model', 'carControl', 'gpsLocationExternal') + (('plan', 'liveTracks', 'pathPlan') if auto else ())
   # openpilot's message queues allow a limited number of readers per message and may not exist yet right after boot:
   # connecting can raise MessagingError. The essential ones are retried until they work; the extras are optional and
   # retried every 30 s, so one busy queue (model is the busiest) can never stop the recording.
@@ -624,7 +854,12 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
   reported_fields = False
   last_leads, t_rad = (lead_dict(None), lead_dict(None)), None
   last_plan, t_plan, last_long_ctrl = plan_dict(None), None, {'long_control_state': None, 'v_cruise_kph': None}
-  last_mode, t_mode = None, None          # MODELOG: ACC button mode, re-read every 2 s (you can change it while driving)
+  last_mode, t_mode = None, None
+  last_tracks, t_tracks = None, None      # RADAR OBJECTS: last liveTracks list
+  last_ctrl_x, last_cc_x = fields_dict(None, CTRL_FIELDS), fields_dict(None, CC_FIELDS)    # CLASSIFIED EXTRAS (LOG_FORMAT.md)
+  last_model_lead, last_path = fields_dict(None, MODEL_LEAD_FIELDS), fields_dict(None, PATH_FIELDS)
+  last_alert, written_alert = None, None
+  sysm, kmsg, t_sys = (SysSampler(), Kmsg(), -1e9) if auto else (None, None, -1e9)          # MODELOG: ACC button mode, re-read every 2 s (you can change it while driving)
 
   # RECORDER: in --auto the output is a ChunkWriter opened when a drive starts and closed when it ends
   follows, shadow, last_car_t, last_plan_fcw, last_mm = [], None, None, False, None
@@ -677,6 +912,8 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
         except Exception:
           last_ctrl = None
         last_long_ctrl = long_ctrl_dict(cs.controlsState)
+        last_ctrl_x = fields_dict(cs.controlsState, CTRL_FIELDS)
+        last_alert = fields_dict(cs.controlsState, ALERT_FIELDS)
         t_ctrl = now_mono
 
       car = rx('carState')
@@ -699,7 +936,7 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
           if fcw_shadow is not None:
             shadow = fcw_shadow.ShadowCompare()
           f.write(json.dumps({'src': 'meta', 'meta': 'drive start', 't': round(time.time(), 3), 'hz': hz, 'drive': f.drive,
-                              'acc_mode': acc_mode(), 'planner_gap_patch': gap_patch_active()}) + '\n')
+                              'acc_mode': acc_mode(), 'planner_gap_patch': gap_patch_active(), 'versions': versions()}) + '\n')
           log('driving_logger: drive %s started' % f.drive)
         elif not driving and f is not None:             # the drive ended: last chunk out, keep the disk in bounds
           f.write(json.dumps({'src': 'meta', 'meta': 'drive end', 't': round(time.time(), 3)}) + '\n')
@@ -716,6 +953,10 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
           last_actuator_angle = float(cc.carControl.actuators.steerAngle)
         except Exception:
           last_actuator_angle = None
+        last_cc_x = fields_dict(cc.carControl, CC_FIELDS)
+      pp = rx('pathPlan') if auto else None
+      if pp is not None:
+        last_path = fields_dict(pp.pathPlan, PATH_FIELDS)
 
       mm = rx('model')
       if mm is not None:
@@ -724,6 +965,7 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
           last_model = model_dict(mm.model)
         except Exception:
           pass
+        last_model_lead = fields_dict(mm.model, MODEL_LEAD_FIELDS)
       gp = rx('gpsLocationExternal')
       if gp is not None:
         try:
@@ -802,6 +1044,11 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
       sample['acc_mode'] = last_mode
       sample.update(last_long_ctrl if t_ctrl is not None and now_mono - t_ctrl < STALE_S else long_ctrl_dict(None))
       sample['model'] = last_model
+      if auto:                                     # CLASSIFIED EXTRAS - see LOG_FORMAT.md
+        sample['ctrl'] = last_ctrl_x               # openpilot's longitudinal control (controlsState)
+        sample['cc'] = last_cc_x                   # what openpilot sent: pcm_speed (speed to cruise), HUD lead ...
+        sample['model_lead'] = last_model_lead     # the CAMERA model's own lead (prob < 0.5 -> no camera lead)
+        sample['path'] = last_path                 # predicted path / lanes (pathPlan) - places radar objects
       sample['gps'] = last_gps
 
       if not reported_fields and car is not None and rad is not None:
@@ -817,17 +1064,44 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
         for src, key, fo in follows:                     # ACC decisions + radar/map lines written since the last tick
           for line in fo.read():
             f.write('{"src":"%s","%s":%s}\n' % (src, key, line))
-            if src == 'acc' and trig is None:
+            if src == 'acc' and trig != 'cancel':
               try:
-                if json.loads(line)[10]:
+                b_ = json.loads(line)[10]
+                if b_ == 1:
+                  trig = 'cancel'                        # cruise cancelled (regen): a priority moment
+                elif b_ and trig is None:
                   trig = 'acc_press'
               except Exception:
                 pass
         # PICTURES: what happened this tick that is worth a look
         seen = bool((sample.get('lead1') or {}).get('status'))
-        if last_lead_seen is not None and seen != last_lead_seen and trig is None:
+        if last_lead_seen is not None and seen != last_lead_seen and trig in (None, 'acc_press'):
           trig = 'lead_in' if seen else 'lead_out'
         last_lead_seen = seen
+        l1_ = sample.get('lead1') or {}
+        v_ = sample.get('v_ego') or 0.
+        if seen and v_ > 10. and l1_.get('dRel') and l1_['dRel'] / v_ < GAP_SHORT_S and trig in (None, 'acc_press'):
+          trig = 'gap_short'                             # following closer than 1.5 s
+        # RADAR OBJECTS: everything the radar tracks, TRACKS_HZ times a second
+        lt_ = rx('liveTracks')
+        if lt_ is not None:
+          last_tracks, t_tracks = lt_.liveTracks, now_mono
+        if last_tracks is not None and now_mono - t_tracks < 0.5 and n % max(1, int(hz / TRACKS_HZ)) == 0:
+          f.write(tracks_line(last_tracks, time.time()) + '\n')
+        # ALERT class: what openpilot showed you, when it changes
+        if last_alert is not None and last_alert != written_alert:
+          written_alert = last_alert
+          f.write(json.dumps(dict(last_alert, src='alert', t=round(time.time(), 3))) + '\n')
+        # SYS + KERNEL classes, once a second
+        if now_mono - t_sys >= 1.0:
+          t_sys = now_mono
+          try:
+            f.write(json.dumps(sysm.sample(now_mono, time.time()), separators=(',', ':')) + '\n')
+          except Exception:
+            pass
+          kl = kmsg.read()
+          if kl:
+            f.write(json.dumps({'src': 'kernel', 't': round(time.time(), 3), 'lines': kl}) + '\n')
         if abs(sample.get('a_ego') or 0.) > 0.5 and trig is None:
           trig = 'accel' if (sample.get('a_ego') or 0.) > 0 else 'decel'
         if shadow is not None and car is not None and rad is not None:   # FCW comparison (fcw_shadow.py's logic)
@@ -844,7 +1118,7 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
         if not os.path.exists(FRAMES_OFF):
           now_w = time.time()
           if trig and now_w - t_trig > 4.:              # one moment at a time; the window covers the next seconds
-            t_trig = now_w; frames.mark(now_w, trig, f)
+            t_trig = now_w; before_, after_ = frame_window(trig); frames.mark(now_w, trig, f, before=before_, after=after_)
           frames.tick(now_w, f)
       if n % (int(hz) * 30) == 0:   # flush roughly every 30s of samples, not every line
         f.flush()
