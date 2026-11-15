@@ -513,8 +513,37 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
   sl = _load_steer_limits()
 
   topics = ('controlsState', 'carState', 'radarState', 'model', 'carControl', 'gpsLocationExternal') + (('plan',) if auto else ())
-  subs = {t: messaging.sub_sock(t, conflate=True) for t in topics}
-  sc = messaging.sub_sock('sendcan')    # drained in full every tick, like lightdash - a flood here never starves us
+  # openpilot's message queues allow a limited number of readers per message and may not exist yet right after boot:
+  # connecting can raise MessagingError. The essential ones are retried until they work; the extras are optional and
+  # retried every 30 s, so one busy queue (model is the busiest) can never stop the recording.
+  REQUIRED = ('controlsState', 'carState', 'radarState')
+  def connect(name, conflate=True):
+    try:
+      return messaging.sub_sock(name, conflate=conflate)
+    except Exception as e:
+      return e
+  subs, retry_at = {}, {}
+  for name in topics + ('sendcan',):
+    while True:
+      s = connect(name, conflate=(name != 'sendcan'))
+      if not isinstance(s, Exception):
+        subs[name] = s; break
+      if name not in REQUIRED:
+        log('driving_logger: %s not available yet (%r) - recording without it, retry in 30 s' % (name, s))
+        subs[name] = None; retry_at[name] = time.monotonic() + 30.; break
+      log('driving_logger: cannot subscribe to %s yet (%r) - retrying in 5 s' % (name, s)); time.sleep(5.)
+  sc = subs['sendcan']    # drained in full every tick, like lightdash - a flood here never starves us
+  def rx(name):
+    s = subs.get(name)
+    if s is None:
+      if name in retry_at and time.monotonic() >= retry_at[name]:
+        s = connect(name, conflate=(name != 'sendcan'))
+        if isinstance(s, Exception):
+          retry_at[name] = time.monotonic() + 30.; return None
+        subs[name] = s; del retry_at[name]; log('driving_logger: %s connected' % name)
+      else:
+        return None
+    return messaging.recv_one_or_none(s)
 
   clf = Classifier()
   last_ctrl = last_long = last_steer = None
@@ -558,14 +587,20 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
       if t_end is not None and now_mono >= t_end:
         break
 
-      for ev in messaging.drain_sock(sc, wait_for_one=False):
+      if sc is None and 'sendcan' in retry_at and time.monotonic() >= retry_at['sendcan']:
+        s_ = connect('sendcan', conflate=False)
+        if isinstance(s_, Exception):
+          retry_at['sendcan'] = time.monotonic() + 30.
+        else:
+          sc = subs['sendcan'] = s_; del retry_at['sendcan']; log('driving_logger: sendcan connected')
+      for ev in (messaging.drain_sock(sc, wait_for_one=False) if sc is not None else ()):
         for c in ev.sendcan:
           if c.address == 0x659 and c.src == 0:
             last_das = decode_0x659(bytes(c.dat))
             last_long, last_steer = last_das['long_enabled'], last_das['steer_enabled']
             t_659 = now_mono
 
-      cs = messaging.recv_one_or_none(subs['controlsState'])
+      cs = rx('controlsState')
       if cs is not None:
         try:
           last_ctrl = bool(cs.controlsState.enabled)
@@ -573,10 +608,10 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
           last_ctrl = None
         t_ctrl = now_mono
 
-      car = messaging.recv_one_or_none(subs['carState'])
-      rad = messaging.recv_one_or_none(subs['radarState'])
+      car = rx('carState')
+      rad = rx('radarState')
       if auto:
-        pl = messaging.recv_one_or_none(subs['plan'])
+        pl = rx('plan')
         if pl is not None:
           try:
             last_plan_fcw = bool(pl.plan.fcw)
@@ -601,21 +636,21 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
         if f is None:                                   # not driving: nothing to record, poll slowly
           time.sleep(0.5); next_t = time.monotonic()
           continue
-      cc = messaging.recv_one_or_none(subs['carControl'])
+      cc = rx('carControl')
       if cc is not None:
         try:
           last_actuator_angle = float(cc.carControl.actuators.steerAngle)
         except Exception:
           last_actuator_angle = None
 
-      mm = messaging.recv_one_or_none(subs['model'])
+      mm = rx('model')
       if mm is not None:
         last_mm = mm
         try:
           last_model = model_dict(mm.model)
         except Exception:
           pass
-      gp = messaging.recv_one_or_none(subs['gpsLocationExternal'])
+      gp = rx('gpsLocationExternal')
       if gp is not None:
         try:
           last_gps = gps_dict(gp.gpsLocationExternal)
@@ -770,7 +805,19 @@ def main(argv=None):
     print('%s %s' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg), flush=True)
   if args.auto:
     log('driving_logger: recorder running, waiting for a drive (openpilot started)')
-  run(args.out, hz=args.hz, duration=args.duration, log=log, auto=args.auto)
+  if not args.auto:
+    run(args.out, hz=args.hz, duration=args.duration, log=log)
+    return
+  while True:                                          # the recorder never stays down: any error -> restart in 10 s
+    try:
+      run(args.out, hz=args.hz, duration=args.duration, log=log, auto=True)
+      return
+    except KeyboardInterrupt:
+      return
+    except Exception as e:
+      import traceback
+      log('driving_logger: recorder error %r - restarting in 10 s\n%s' % (e, traceback.format_exc()))
+      time.sleep(10.)
 
 
 if __name__ == '__main__':
