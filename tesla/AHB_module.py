@@ -28,6 +28,7 @@ AHB_AUTO_OFF_MS = 20.0 / 3.6     # ... and dipped again below 20 km/h (the gap s
 #   stalk in normal position    -> high on / off   (does the car obey DAS "on"? needed for code-managed high beam)
 # rm the file when done.
 AHB_TEST_FILE = '/data/ahb_test'
+DIAG_PERIOD_MS = 100      # CPULIGHT: the diagnostic engine runs at most 10x a second (it never drives the beams)
 
 class AHBReason():
   HIGH_BEAM_ON = 0
@@ -108,7 +109,12 @@ class AHBController():
     """Run the 4-state decision engine for diagnostics/logging and record this cycle's state. It does NOT drive the
     DAS output (the proven update() logic above remains the authority, so existing behaviour and tests are preserved);
     it is the richer engine, ready to take over once the luminance thresholds are calibrated on a night drive.
-    Cheap: one dict per cycle. Optionally dumped to /data/ahb_diag.json at <=2 Hz when /data/ahb_debug exists."""
+    Optionally dumped to /data/ahb_diag.json at <=2 Hz when /data/ahb_debug exists.
+    CPULIGHT: at most every DIAG_PERIOD_MS (it ran 100x a second inside controlsd: 3.2 % of controlsd's CPU, and the
+    debug-file check below ran every cycle because its timer only moved when the file existed: most of a further 4.3 %)"""
+    if tms_now - getattr(self, '_diag_run_t', -1e9) < DIAG_PERIOD_MS:
+      return
+    self._diag_run_t = tms_now
     info = self.ahbInfoData
     oncoming = bool(info and getattr(info, 'cameraCarDetected', False))
     lead = bool(info and getattr(info, 'radarCarDetected', False))
@@ -127,8 +133,10 @@ class AHBController():
     self.diag = dict(self.lum.diagnostics())
     self.diag.update({'frame_gain': self.frameInfoGain, 'sm_state': sm['state'], 'sm_high': sm['high'],
                       'sm_reason': sm['reason'], 'oncoming': oncoming, 'lead': lead, 'v_ego': round(CS.v_ego, 1)})
-    if tms_now - self._diag_t > 500 and os.path.exists('/data/ahb_debug'):
-      self._diag_t = tms_now
+    if tms_now - self._diag_t > 500:
+      self._diag_t = tms_now                     # CPULIGHT: the timer moves whether or not the file exists
+      if not os.path.exists('/data/ahb_debug'):
+        return
       try:
         import json
         with open('/data/ahb_diag.json', 'w') as f:
