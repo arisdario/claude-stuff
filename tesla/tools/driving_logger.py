@@ -663,7 +663,11 @@ def main(argv=None):
       fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)        # one recorder only (boot line + a manual start)
     except OSError:
       print('driving_logger: the recorder is already running'); return
-  run(args.out, hz=args.hz, duration=args.duration, auto=args.auto)
+  def log(msg):                                        # flushed: the boot line sends this to a file (/data/recorder.log)
+    print('%s %s' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg), flush=True)
+  if args.auto:
+    log('driving_logger: recorder running, waiting for a drive (openpilot started)')
+  run(args.out, hz=args.hz, duration=args.duration, log=log, auto=args.auto)
 
 
 if __name__ == '__main__':
