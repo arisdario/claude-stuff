@@ -351,13 +351,14 @@ class ACCController():
       a_lead_raw = getattr(lead_car, 'aRel', 0.) + getattr(CS, 'a_ego', 0.)
     # radar blips: one reading jumps +15..+30 km/h for a single sample (seen on 15 Nov) - use the median of the last 5
     if lead_dist_m > 0:
-      self.lead_hist = (self.lead_hist + [(lead_speed_raw_kph, a_lead_raw)])[-5:]
+      self.lead_hist = (self.lead_hist + [(lead_speed_raw_kph, a_lead_raw, lead_dist_m)])[-5:]
     else:
       self.lead_hist = []
     if self.lead_hist:
-      srt = sorted(self.lead_hist)
-      lead_speed_kph = srt[len(srt) // 2][0]
-      a_lead_med = sorted(a for _, a in self.lead_hist)[len(self.lead_hist) // 2]
+      mid = len(self.lead_hist) // 2
+      lead_speed_kph = sorted(h[0] for h in self.lead_hist)[mid]
+      a_lead_med = sorted(h[1] for h in self.lead_hist)[mid]
+      lead_dist_m = sorted(h[2] for h in self.lead_hist)[mid]   # far leads jump 95 <-> 130 m (two cars): median too
     else:
       lead_speed_kph, a_lead_med = lead_speed_raw_kph, 0.
     # Relative velocity between the lead car and our set cruise speed.
@@ -404,12 +405,14 @@ class ACCController():
           msg =  "-5 (Significantly too close)"
           button = CruiseButtons.DECEL_2ND
           self.new_speed = CS.v_ego * CV.MS_TO_KPH - full_press_kph
-        # Don't rush up to lead car
-        elif future_vrel_kph < -15:
+        # Don't rush up to lead car - but only when it matters: within 1.3x the safe distance, or reaching the safe
+        # distance within 8 s at the current closing speed. A car 120 m ahead at 114 km/h (4 s) closing at 10 km/h is
+        # 15+ s away from mattering: those presses (-1 every 0.3 s on noisy far readings) were the sag on 15 Nov 16:44.
+        elif future_vrel_kph < -15 and self._lead_matters(CS, lead_dist_m, lead_speed_kph, safe_dist_m):
           msg =  "-5 (approaching too fast)"
           button = CruiseButtons.DECEL_2ND
           self.new_speed = CS.v_ego * CV.MS_TO_KPH - full_press_kph
-        elif future_vrel_kph < -8:
+        elif future_vrel_kph < -8 and self._lead_matters(CS, lead_dist_m, lead_speed_kph, safe_dist_m):
           msg =  "-1 (approaching too fast)"
           button = CruiseButtons.DECEL_SET
           self.new_speed = CS.v_ego * CV.MS_TO_KPH - half_press_kph
@@ -517,6 +520,14 @@ class ACCController():
       return sys.maxsize
     return abs(float(lead_car.dRel) / lead_car.vRel)
     
+  @staticmethod
+  def _lead_matters(CS, dist_m, lead_kph, safe_dist_m):
+    """the lead is close enough for the quick 'approaching too fast' presses"""
+    closing_ms = CS.v_ego - lead_kph * CV.KPH_TO_MS
+    if dist_m < 1.3 * safe_dist_m:
+      return True
+    return closing_ms > 0.5 and (dist_m - safe_dist_m) / closing_ms < 8.
+
   def _lead_speed_filtered(self, lead_kph, now_ms):
     """SMOOTHFOLLOW: lead speed smoothed with a ~1.5 s time constant; restarts if the lead was not seen for 2 s"""
     if self.lead_kph_f is None or now_ms - self.lead_kph_t > 2000:
