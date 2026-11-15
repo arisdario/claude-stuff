@@ -274,7 +274,15 @@ class ACCController():
     elif self._last_lead is not None and current_time_ms - self._last_lead[1] <= LEAD_HOLD_MS:
         lead_1 = self._last_lead[0]      # no new message this cycle: the lead did not vanish, keep the last one
     if self.enable_adaptive_cruise and enabled: # and (button_to_press == None):
-      if CS.cstm_btns.get_button_label2(ACCMode.BUTTON_NAME) in ["OP", "AutoOP", ACCMode.XNOR.label]:
+      if CS.cstm_btns.get_button_label2(ACCMode.BUTTON_NAME) == ACCMode.XNOR.label:
+        # XNOR (as tesla-unity LONG_module): the cruise speed goes to where openpilot's MPC plans to be in the future
+        # (tesla-unity: longitudinalPlan.speeds[-1]; on 0.7.5 the plan's vTargetFuture), decided 5 times a second
+        self._xnor_calls = (getattr(self, '_xnor_calls', 0) + 1) % 4          # update_acc runs at 20 Hz
+        v_future = self._plan_future_speed(current_time_ms)
+        if self._xnor_calls == 0 and v_future is not None:
+          button_to_press = self._calc_button(CS, v_future, lead_1)
+          self.new_speed = v_future * CV.MS_TO_KPH
+      elif CS.cstm_btns.get_button_label2(ACCMode.BUTTON_NAME) in ["OP", "AutoOP"]:
         button_to_press = self._calc_button(CS, pcm_speed, lead_1)
         self.new_speed = pcm_speed * CV.MS_TO_KPH
       else:
@@ -701,6 +709,25 @@ class ACCController():
           button_to_press = CruiseButtons.RES_ACCEL
     return button_to_press
     
+  def _plan_future_speed(self, now_ms):
+    """XNOR: openpilot's planned future speed (plan.vTargetFuture, m/s), None when there is no fresh plan.
+    The 'plan' connection is opened only here, never at start, and can never raise inside controlsd: openpilot's message
+    queues allow only a few readers per message, so a refused connection just means no plan (tried again every 5 s)."""
+    try:
+      if getattr(self, '_plan_sock', None) is None and now_ms >= getattr(self, '_plan_retry_ms', 0):
+        self._plan_retry_ms = now_ms + 5000
+        self._plan_sock = messaging.sub_sock('plan', conflate=True)
+      if getattr(self, '_plan_sock', None) is not None:
+        msg = messaging.recv_one_or_none(self._plan_sock)
+        if msg is not None and msg.valid:
+          self._plan_future = (float(msg.plan.vTargetFuture), now_ms)
+    except Exception:
+      self._plan_sock = None
+    pf = getattr(self, '_plan_future', None)
+    if pf is None or now_ms - pf[1] > 500:
+      return None
+    return pf[0]
+
   def _no_human_action_for(self, milliseconds):
     return _current_time_millis() > self.human_cruise_action_time + milliseconds
     
