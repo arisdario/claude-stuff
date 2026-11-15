@@ -38,7 +38,7 @@ class T(unittest.TestCase):
     self.assertNotIn(':wait', self_sec)                        # waiting is not counted as CPU
 
   def test_patch(self):
-    src = "import os\n\ndef controlsd_thread(sm, pm, logcan):\n  pass\n\n\ndef main(sm=None, pm=None, logcan=None):\n  controlsd_thread(sm, pm, logcan)\n"
+    src = "#!/usr/bin/env python3\nimport os\n\ndef controlsd_thread(sm, pm, logcan):\n  pass\n\n\ndef main(sm=None, pm=None, logcan=None):\n  controlsd_thread(sm, pm, logcan)\n"
     new, msg = PP.patch(src); self.assertEqual(msg, 'patched'); compile(new, 'controlsd.py', 'exec')
     self.assertIn("os.path.exists('/data/profile_controlsd')", new); self.assertEqual(PP.patch(new)[1], 'already patched')
     with self.assertRaises(SystemExit):
