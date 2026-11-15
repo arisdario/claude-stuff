@@ -95,7 +95,8 @@ class ACCController():
     self.human_cruise_action_time = 0
     self.automated_cruise_action_time = 0
     self.radarState = messaging.sub_sock('radarState', conflate=True)
-    self.plan_sock = messaging.sub_sock('plan', conflate=True)   # ACCPLAN
+    self.plan_sock = None        # ACCPLAN: connected lazily in _read_plan - never at start (see there)
+    self._plan_retry_ms = 0
     self.last_update_time = 0
     self.enable_adaptive_cruise = False
     self.prev_enable_adaptive_cruise = False
@@ -484,7 +485,18 @@ class ACCController():
     The speed is interpolated like controlsd does (plan.vStart/aStart -> aTarget over the 0.2 s planner step). The
     planner's camera-curve slowing ('model' source) is ignored when no car is ahead: its own cruise solution is used
     (curve slowing is off on this car - night path blips made 'curves' on straight roads)."""
-    msg = messaging.recv_one_or_none(self.plan_sock)
+    # openpilot's message queues allow only a few readers per message: connecting can fail (MessagingError). This
+    # runs inside controlsd, so it must NEVER raise - no connection means no plan (no presses; the safety cancel and
+    # your stalk still work), and it is tried again every 5 s.
+    msg = None
+    try:
+      if self.plan_sock is None and now_ms >= self._plan_retry_ms:
+        self._plan_retry_ms = now_ms + 5000
+        self.plan_sock = messaging.sub_sock('plan', conflate=True)
+      if self.plan_sock is not None:
+        msg = messaging.recv_one_or_none(self.plan_sock)
+    except Exception:
+      self.plan_sock, msg = None, None
     if msg is not None:
       p = msg.plan
       self._plan = (p.vStart, p.aStart, p.vTarget, p.aTarget, bool(p.hasLead), str(p.longitudinalPlanSource),
