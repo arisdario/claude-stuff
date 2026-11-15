@@ -253,6 +253,30 @@ class TestLeadDict(unittest.TestCase):
 
 
 
+class TestPlanLog(unittest.TestCase):
+  class FakePlan(object):
+    longitudinalPlanSource = 'mpc1'; vStart = 25.1234; aStart = -0.2; vTarget = 25.0; aTarget = -0.31; vTargetFuture = 24.0
+    vCruise = 27.0; aCruise = 0.1; hasLead = True
+
+  def test_none_is_all_none(self):
+    d = DL.plan_dict(None)
+    self.assertEqual(set(d), {k for k, _ in DL.PLAN_FIELDS}); self.assertTrue(all(v is None for v in d.values()))
+    self.assertEqual(DL.long_ctrl_dict(None), {'long_control_state': None, 'v_cruise_kph': None})
+
+  def test_fields_pulled_through(self):
+    d = DL.plan_dict(self.FakePlan())
+    self.assertEqual(d['src'], 'mpc1'); self.assertEqual(d['v_start'], 25.123); self.assertEqual(d['a_target'], -0.31)
+    self.assertIs(d['has_lead'], True)
+    c = type('C', (), {'longControlState': 'pid', 'vCruise': 104.04})()
+    self.assertEqual(DL.long_ctrl_dict(c), {'long_control_state': 'pid', 'v_cruise_kph': 104.0})
+
+  def test_missing_field_is_none_not_a_crash(self):
+    class Partial(object):
+      vStart = 3.0
+    d = DL.plan_dict(Partial())
+    self.assertEqual(d['v_start'], 3.0); self.assertIsNone(d['src']); self.assertIsNone(d['a_target'])
+
+
 class TestRecorderPieces(unittest.TestCase):
   def setUp(self):
     import tempfile
