@@ -31,6 +31,7 @@ class TestAHB(unittest.TestCase):
   def setUp(self):
     d = tempfile.mkdtemp()
     A.AHB_AUTO_FILE = os.path.join(d, 'ahb_auto'); A.AHB_TEST_FILE = os.path.join(d, 'ahb_test')
+    A.AHB_OFF_FILE = os.path.join(d, 'ahb_off')
     self.now = [1000000]
     A._current_time_millis = lambda: self.now[0]
     self.c = A.AHBController(None)
@@ -46,6 +47,13 @@ class TestAHB(unittest.TestCase):
     self.now[0] += ms
     st, reason, en = self.c.update(cs, 0, None)
     return st, reason, en
+
+  def test_off_switch(self):
+    self.assertFalse(self.c.is_off())                # no file: the module runs as before
+    self.flag(A.AHB_OFF_FILE)
+    self.assertTrue(self.c.is_off())                 # /data/ahb_off: carcontroller skips AHB entirely
+    self.flag(A.AHB_OFF_FILE, on=False)
+    self.assertFalse(self.c.is_off())
 
   def test_without_flag_mcu_setting_still_blocks(self):
     st, reason, en = self.step(CS())

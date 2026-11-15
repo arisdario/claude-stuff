@@ -28,6 +28,7 @@ AHB_AUTO_OFF_MS = 20.0 / 3.6     # ... and dipped again below 20 km/h (the gap s
 #   stalk in normal position    -> high on / off   (does the car obey DAS "on"? needed for code-managed high beam)
 # rm the file when done.
 AHB_TEST_FILE = '/data/ahb_test'
+AHB_OFF_FILE = '/data/ahb_off'     # AHBOFF: this file switches the whole module off (carcontroller skips it)
 DIAG_PERIOD_MS = 100      # CPULIGHT: the diagnostic engine runs at most 10x a second (it never drives the beams)
 
 class AHBReason():
@@ -85,7 +86,14 @@ class AHBController():
     if tms_now - self._flags_t > 1000:
       self._flags_t = tms_now
       self._flags = (os.path.exists(AHB_AUTO_FILE), os.path.exists(AHB_TEST_FILE))
+      self._off = os.path.exists(AHB_OFF_FILE)
     return self._flags
+
+  def is_off(self):
+    """AHBOFF: True while /data/ahb_off exists (checked once a second): carcontroller then skips AHB entirely.
+    On a car whose cluster does not accept automatic high-beam requests the module only costs CPU."""
+    self._flag_files(_current_time_millis())
+    return getattr(self, '_off', False)
 
   def set_and_return(self,CS,frame,highLowBeamStatus,highLowBeamReason):
     self.prev_light_stalk_position = CS.ahbHighBeamStalkPosition
