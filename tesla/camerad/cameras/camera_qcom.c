@@ -375,9 +375,12 @@ void cameras_init(DualCameraState *s) {
     FILE *rf = fopen("/dev/c920_boot_retries", "r");
     if (rf) { if (fscanf(rf, "%d", &n) != 1) n = 0; fclose(rf); }
     if (n >= C920_BOOT_RETRIES) {
-      LOGE("*** external road camera requested but the C920 failed %d times since boot: using the phone's rear camera ***", n);
-      fprintf(stderr, "external camera: %d tries failed since boot: using the phone's rear camera (replug the C920 + pkill -9 camerad to try again)\n", n);
-    } else {
+      // NOFALLBACK: on this car the phone's own camera looks at the inside of the EON's case - starting openpilot on a
+      // black picture is worse than not starting. Keep trying the C920 (every ~20 s), never switch to the phone camera.
+      LOGE("*** external road camera: %d tries failed since boot, still trying the C920 (no phone-camera fallback) ***", n);
+      fprintf(stderr, "external camera: %d tries failed since boot - still only the C920: waiting 20 s, then camerad restarts (replug the C920 if it stays stuck)\n", n);
+    }
+    {
       rf = fopen("/dev/c920_boot_retries", "w");
       if (rf) { fprintf(rf, "%d\n", n + 1); fclose(rf); }
       ext_c920_wait_settled(up < 300. ? 90000 : 30000);
@@ -388,8 +391,9 @@ void cameras_init(DualCameraState *s) {
         unlink("/dev/c920_boot_retries");
         LOG("*** ROAD CAMERA: external C920 (phone rear camera not used) ***");
       } else if (!do_exit) {
-        fprintf(stderr, "external camera: C920 not ready (try %d of %d): camerad exits so it is started again\n", n + 1, C920_BOOT_RETRIES);
-        LOGE("*** external road camera not ready (try %d of %d): restarting camerad ***", n + 1, C920_BOOT_RETRIES);
+        fprintf(stderr, "external camera: C920 not ready (try %d): camerad exits so it is started again\n", n + 1);
+        LOGE("*** external road camera not ready (try %d): restarting camerad ***", n + 1);
+        if (n + 1 > C920_BOOT_RETRIES) sleep(20);                    // NOFALLBACK: after 5 quick tries, one every ~20 s
         exit(1);
       }
     }
