@@ -150,6 +150,17 @@ DRIVE_END_S = 30.0            # no carState for this long = the drive ended (ope
 FOLLOW = (('acc', 'r', '/data/acclog/acc_*.jsonl'), ('map', 'd', '/data/maplog/map_*.jsonl'))
 MAPLOG_MAX_BYTES = 500 * 1024 * 1024   # radarweb's /data/maplog: oldest files deleted above this (all merged into chunks)
 DRIVELOG_MAX_BYTES = 1024 * 1024 * 1024  # chunks not uploaded yet (e.g. no internet for days): oldest deleted above this
+# PICTURES: camerad publishes the road camera's frame as /dev/c920_live.jpg (~10/s, ~230 kB). The recorder keeps the last
+# FRAME_KEEP_S seconds (one frame per FRAME_EVERY_S) in memory and saves them around interesting moments - an ACC press,
+# |accel| > 0.5 m/s2, the lead appearing/disappearing, an FCW event - plus one picture every FRAME_PERIODIC_S; at most
+# FRAMES_PER_CHUNK per 2-minute chunk, packed as cNNNN.frames.tar next to the chunk (uploaded live too).
+FRAME_SRC = '/dev/c920_live.jpg'
+FRAME_EVERY_S = 2.0
+FRAME_KEEP_S = 10.0
+FRAME_AFTER_S = 6.0
+FRAME_PERIODIC_S = 60.0
+FRAMES_PER_CHUNK = 12
+FRAMES_OFF = '/data/recorder_frames_off'      # touch to record no pictures (saves mobile data)
 
 
 def gzip_file(src, dst):
@@ -177,14 +188,32 @@ class ChunkWriter(object):
     self.part = os.path.join(self.dir, 'c%04d.jsonl.part' % self.n)
     self.f = open(self.part, 'w')
     self.t0 = self.clock()
+    self.frames = 0
+
+  def add_frame(self, t_wall, data, why):
+    """PICTURES: one camera frame for this chunk (at most FRAMES_PER_CHUNK); returns True if kept"""
+    if self.frames >= FRAMES_PER_CHUNK:
+      return False
+    d = os.path.join(self.dir, 'c%04d.frames' % self.n)
+    os.makedirs(d, exist_ok=True)
+    name = '%s_%s.jpg' % (time.strftime('%H%M%S', time.localtime(t_wall)) + ('%.1f' % (t_wall % 1))[1:], why)
+    with open(os.path.join(d, name), 'wb') as h:
+      h.write(data)
+    self.frames += 1
+    return True
 
   def _finish(self):
     self.f.close()
     part, dst = self.part, self.part[:-len('.part')] + '.gz'
-    if self.background:
-      th = threading.Thread(target=gzip_file, args=(part, dst)); th.start(); self._threads.append(th)
-    else:
+    fdir = os.path.join(self.dir, 'c%04d.frames' % self.n)
+    def work():
       gzip_file(part, dst)
+      if os.path.isdir(fdir):
+        tar_dir(fdir, fdir + '.tar')
+    if self.background:
+      th = threading.Thread(target=work); th.start(); self._threads.append(th)
+    else:
+      work()
 
   def write(self, s):
     self.f.write(s)
@@ -198,6 +227,55 @@ class ChunkWriter(object):
     self._finish()
     for th in self._threads:
       th.join()
+
+
+def tar_dir(src_dir, dst):
+  """pictures of one chunk -> one .tar (jpgs are compressed already), atomically; the folder is removed"""
+  import tarfile
+  tmp = dst + '.tmp'
+  with tarfile.open(tmp, 'w') as tf:
+    for n in sorted(os.listdir(src_dir)):
+      tf.add(os.path.join(src_dir, n), arcname=n)
+  os.rename(tmp, dst)
+  shutil.rmtree(src_dir, ignore_errors=True)
+
+
+class Frames(object):
+  """PICTURES: rolling memory of recent camera frames; save() writes the ones around a moment into the chunk"""
+  def __init__(self, src=FRAME_SRC):
+    self.src, self.buf, self.t_grab, self.save_until, self.saved_t, self.t_periodic = src, [], 0., 0., set(), 0.
+
+  def tick(self, now, writer):
+    if now - self.t_grab >= FRAME_EVERY_S:
+      self.t_grab = now
+      try:
+        if now - os.path.getmtime(self.src) < 2.:
+          with open(self.src, 'rb') as h:
+            self.buf.append((now, h.read()))
+      except OSError:
+        pass
+      self.buf = [b for b in self.buf if now - b[0] <= FRAME_KEEP_S]
+      if now - self.t_periodic >= FRAME_PERIODIC_S:
+        self.t_periodic = now
+        self.mark(now, 'periodic', writer, before=0., after=0.)
+      elif now <= self.save_until and self.buf:
+        self._save(self.buf[-1], self.why, writer)
+
+  def mark(self, now, why, writer, before=FRAME_KEEP_S, after=FRAME_AFTER_S):
+    """something happened: keep the frames of the last `before` seconds and the next FRAME_AFTER_S"""
+    self.why = why
+    for b in self.buf:
+      if now - b[0] <= before or b is self.buf[-1]:
+        self._save(b, why, writer)
+    self.save_until = max(self.save_until, now + after)
+
+  def _save(self, b, why, writer):
+    if b[0] in self.saved_t:
+      return
+    if writer.add_frame(b[0], b[1], why):
+      self.saved_t.add(b[0])
+      if len(self.saved_t) > 200:
+        self.saved_t = set(sorted(self.saved_t)[-50:])
 
 
 class Follow(object):
@@ -455,6 +533,8 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
     f = None
     finish_leftovers()
     follows = [(src, key, Follow(p)) for src, key, p in FOLLOW]
+    frames = Frames()
+    last_lead_seen, t_trig = None, 0.
     try:
       sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
       import fcw_shadow
@@ -618,9 +698,23 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
       f.write(json.dumps(sample) + '\n')
       n += 1
       if auto:
+        trig = None
         for src, key, fo in follows:                     # ACC decisions + radar/map lines written since the last tick
           for line in fo.read():
             f.write('{"src":"%s","%s":%s}\n' % (src, key, line))
+            if src == 'acc' and trig is None:
+              try:
+                if json.loads(line)[10]:
+                  trig = 'acc_press'
+              except Exception:
+                pass
+        # PICTURES: what happened this tick that is worth a look
+        seen = bool((sample.get('lead1') or {}).get('status'))
+        if last_lead_seen is not None and seen != last_lead_seen and trig is None:
+          trig = 'lead_in' if seen else 'lead_out'
+        last_lead_seen = seen
+        if abs(sample.get('a_ego') or 0.) > 0.5 and trig is None:
+          trig = 'accel' if (sample.get('a_ego') or 0.) > 0 else 'decel'
         if shadow is not None and car is not None and rad is not None:   # FCW comparison (fcw_shadow.py's logic)
           try:
             l1, cs_ = rad.radarState.leadOne, car.carState
@@ -629,8 +723,14 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
                                  cs_.leftBlinker or cs_.rightBlinker, last_plan_fcw, mf):
               e['src'] = 'fcw'
               f.write(json.dumps(e) + '\n')
+              trig = trig or 'fcw'
           except Exception:
             pass
+        if not os.path.exists(FRAMES_OFF):
+          now_w = time.time()
+          if trig and now_w - t_trig > 4.:              # one moment at a time; the window covers the next seconds
+            t_trig = now_w; frames.mark(now_w, trig, f)
+          frames.tick(now_w, f)
       if n % (int(hz) * 30) == 0:   # flush roughly every 30s of samples, not every line
         f.flush()
         log('driving_logger: %d samples written' % n)

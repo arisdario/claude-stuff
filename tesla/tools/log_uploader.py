@@ -65,7 +65,7 @@ GROWING = ['/data/fcw_shadow.jsonl']          # appended forever: snapshots, nev
 QUIET_S = 600                                 # a file not written for this long is finished
 OFFROAD_S = 120                               # controlsd gone for this long = parked
 PASS_EVERY_S = 300
-LIVE_GLOB = '/data/drivelog/*/c*.jsonl.gz'
+LIVE_GLOB = '/data/drivelog/*/c*.jsonl.gz'      # + the chunk's pictures, cNNNN.frames.tar (same folder)
 LIVE_EVERY_S = 20
 RECORDER_SINCE = '/data/drivelog/.since'      # written by the recorder at its first start: merged files after this are not sent alone
 MERGED = ('/data/maplog/', '/data/acclog/', '/data/drivelog_', '/data/fcw_shadow')
@@ -313,14 +313,15 @@ class GitHub(object):
       raise RuntimeError('cannot create release %s: HTTP %s %s (does the repo have a first commit, e.g. a README?)' % (tag, code, (r or {}).get('message')))
     return r
 
-  def upload(self, rel, name, path, stop):
+  def upload(self, rel, name, path, stop, ctype=None):
     for a in rel.get('assets') or []:               # same name already there (e.g. an earlier upload broke off): replace it
       if a.get('name') == name:
         self.call('DELETE', '/repos/%s/releases/assets/%d' % (self.repo, a['id']))
     url = rel['upload_url'].split('{')[0] + '?name=' + urllib.request.quote(name)
     size = os.path.getsize(path)
     with open(path, 'rb') as f:
-      code, r = self.call('POST', url, StopReader(f, stop), {'Content-Type': 'application/gzip'}, length=size, timeout=600)
+      code, r = self.call('POST', url, StopReader(f, stop), {'Content-Type': ctype or ('application/x-tar' if name.endswith('.tar') else 'application/gzip')},
+                          length=size, timeout=600)
     if code != 201:
       raise RuntimeError('upload %s: HTTP %s %s' % (name, code, (r or {}).get('message')))
     return r
@@ -381,7 +382,7 @@ def run_pass(gh, st, stop, now=None):
 def run_live(gh, rels, log_fail=True):
   """send every finished recorder chunk (oldest first), delete it locally once uploaded; returns (sent, failed)"""
   sent = failed = 0
-  for p in sorted(glob.glob(LIVE_GLOB)):
+  for p in sorted(glob.glob(LIVE_GLOB) + glob.glob(LIVE_GLOB.replace('.jsonl.gz', '.frames.tar'))):
     drive = os.path.basename(os.path.dirname(p))
     tag = 'drive-' + drive
     try:
