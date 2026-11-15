@@ -25,6 +25,15 @@ FOLLOW_ANTICIPATE_S = 2.0   # aim at the lead's speed this many seconds ahead wh
 FOLLOW_ANTICIPATE_MAX = 0.6 # m/s2 - the lead's acceleration used for that is capped (radar blips gave 13 km/h jumps)
 FOLLOW_REVERSE_MS = 3000    # after a press in one direction, the other direction waits this long (no +1/-1 flip-flop)
 ROAD_CLEAR_PRESS_MS = 800   # no lead: +1 at most every 0.8 s back to your speed (was every 0.5 s: a +0.7 m/s2 push)
+XNOR_PRESS_MS = 400        # XNOR: at most one press per 0.4 s (as tesla-unity)
+XNOR_TAU_S = 2.0           # XNOR v2: the planned future speed is smoothed over 2 s ...
+XNOR_FAST_DOWN_KPH = 1.5   # ... but never kept more than 1.5 km/h above it (slowing goes through at once)
+XNOR_UP_KPH_S = 1.0        # XNOR v2: the set speed rises at most 1 km/h per second (~0.3 m/s2)
+XNOR_HOLD_MS = 6000        # XNOR v2: no speed-up for 6 s after the car ahead disappeared
+XNOR_CLOSING_MS = 2.5      # XNOR v2: no speed-up while closing on the car ahead faster than this (m/s)
+XNOR_DOWN_HYST_KPH = 0.7   # XNOR v2: press -1 when the aim is this far below the set speed ...
+XNOR_UP_HYST_KPH = 1.3     # ... +1 when this far above
+XNOR_CANCEL_NEED_MS2 = 0.6 # XNOR v2: cancel (regen) only when stopping the closing before 6 m needs more than presses give
 LEAD_HOLD_MS = 500          # radarState arrives at ~20 Hz like this loop: keep the last lead this long between messages
 ACC_CURVES_ON = '/data/acc_curves_on'   # curve slowing with the cruise buttons is OFF unless this file exists (the
                                         # focus is smooth lead following; curves come back once that is right)
@@ -280,7 +289,7 @@ class ACCController():
         self._xnor_calls = (getattr(self, '_xnor_calls', 0) + 1) % 4          # update_acc runs at 20 Hz
         v_future = self._plan_future_speed(current_time_ms)
         if self._xnor_calls == 0 and v_future is not None:
-          button_to_press = self._calc_button(CS, v_future, lead_1)
+          button_to_press = self._calc_xnor_button(CS, v_future * CV.MS_TO_KPH, lead_1, current_time_ms)
           self.new_speed = v_future * CV.MS_TO_KPH
       elif CS.cstm_btns.get_button_label2(ACCMode.BUTTON_NAME) in ["OP", "AutoOP"]:
         button_to_press = self._calc_button(CS, pcm_speed, lead_1)
@@ -709,6 +718,71 @@ class ACCController():
           button_to_press = CruiseButtons.RES_ACCEL
     return button_to_press
     
+  def _calc_xnor_button(self, CS, want_raw_kph, lead_car, now_ms):
+    """XNOR v2: the set speed follows openpilot's planned future speed, but
+      - smoothed over XNOR_TAU_S (radar noise moves the plan; 15 Nov: 14-37 presses per 20 s), a drop of more than
+        XNOR_FAST_DOWN_KPH below the smoothed value passes at once (slowing is not delayed)
+      - rising at most XNOR_UP_KPH_S (a gentle ~0.3 m/s2), and NOT rising for XNOR_HOLD_MS after the car ahead
+        disappeared, nor while closing on it faster than XNOR_CLOSING_MS (15 Nov 19:46: lead lost at 125 m ->
+        accelerated 115 -> 133 km/h toward it)
+      - -5 instead of xnor's cancel when the plan is far below the set speed (15 Nov: 11 cancels, almost all needless);
+        cancel only when presses cannot brake enough (collision < 4 s, lead slower than cruise, or the braking needed
+        to stop closing before 6 m is above what presses give)
+      - engaging with SET (current speed), not RES (RES restored 125 at 84 km/h, then cancelled)"""
+    half_press_kph, full_press_kph = self._get_cc_units_kph(CS.imperial_speed_units)
+    v_kph = CS.v_ego * CV.MS_TO_KPH
+    lead_seen = lead_car is not None and lead_car.dRel > 0
+    msg = None
+    button = None
+    if self._should_autoengage_cc(CS, lead_car=lead_car if lead_seen else None) and want_raw_kph >= v_kph - 2. \
+        and self._no_action_for(milliseconds=XNOR_PRESS_MS):
+      self._xw, self._xw_ms = v_kph, now_ms
+      button, msg = CruiseButtons.DECEL_SET, "xnor: engage at current speed (SET)"
+    elif CS.pcm_acc_status == CruiseState.ENABLED:
+      need = 0.
+      if lead_seen:
+        closing = max(0., -lead_car.vRel)
+        room = lead_car.dRel - 6.
+        need = 99. if room <= 0.5 else closing ** 2 / (2. * room)
+      if lead_seen and (self._fast_decel_required(CS, lead_car) or need > XNOR_CANCEL_NEED_MS2) \
+          and self._no_human_action_for(milliseconds=500):
+        button, msg = CruiseButtons.CANCEL, "xnor: cancel (braking needed %.1f m/s2)" % min(need, 9.9)
+      else:
+        raw = min(want_raw_kph, self.acc_speed_kph)
+        xw = getattr(self, '_xw', None)
+        dt = (now_ms - getattr(self, '_xw_ms', now_ms)) / 1000.
+        if xw is None or dt > 1.5 or dt < 0:
+          xw, dt = CS.v_cruise_actual, 0.
+        if raw > xw:
+          xw += min((raw - xw) * min(1., dt / XNOR_TAU_S), XNOR_UP_KPH_S * dt)
+        else:
+          xw += (raw - xw) * min(1., dt / XNOR_TAU_S)
+        hold = ((not lead_seen and now_ms - self.lead_last_seen_time_ms < XNOR_HOLD_MS)
+                or (lead_seen and lead_car.vRel < -XNOR_CLOSING_MS))
+        if hold:
+          xw = min(xw, CS.v_cruise_actual)    # no speed-up now, and none building up: afterwards it rises from here
+        xw = min(xw, raw + XNOR_FAST_DOWN_KPH)
+        self._xw, self._xw_ms = xw, now_ms
+        want = xw
+        self.follow_target_kph = want
+        if self._no_automated_action_for(milliseconds=XNOR_PRESS_MS) and self._no_human_action_for(milliseconds=3000):
+          diff = want - CS.v_cruise_actual
+          available = self.acc_speed_kph - CS.v_cruise_actual
+          if diff <= -full_press_kph:
+            button = CruiseButtons.DECEL_2ND
+          elif diff <= -XNOR_DOWN_HYST_KPH * half_press_kph:
+            button = CruiseButtons.DECEL_SET
+          elif CS.v_ego > self.MIN_CRUISE_SPEED_MS and diff >= full_press_kph and available >= full_press_kph:
+            button = CruiseButtons.RES_ACCEL_2ND
+          elif CS.v_ego > self.MIN_CRUISE_SPEED_MS and diff >= XNOR_UP_HYST_KPH * half_press_kph and available >= half_press_kph:
+            button = CruiseButtons.RES_ACCEL
+          if button is not None:
+            msg = "xnor: %s (plan %.0f -> aim %.1f%s)" % ({CruiseButtons.DECEL_2ND: '-5', CruiseButtons.DECEL_SET: '-1',
+                  CruiseButtons.RES_ACCEL_2ND: '+5', CruiseButtons.RES_ACCEL: '+1'}[button], raw, want, ', hold' if hold else '')
+    if msg is not None:
+      self.last_follow_msg = msg        # ACCLOG: the reason of this decision
+    return button
+
   def _plan_future_speed(self, now_ms):
     """XNOR: openpilot's planned future speed (plan.vTargetFuture, m/s), None when there is no fresh plan.
     The 'plan' connection is opened only here, never at start, and can never raise inside controlsd: openpilot's message
