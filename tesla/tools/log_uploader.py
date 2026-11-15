@@ -93,13 +93,25 @@ def onroad():
   return False
 
 
-def default_iface(route_text=None):
-  """the interface of the default route from /proc/net/route (wlan0 = Wi-Fi, rmnet* = mobile data)"""
+def default_iface(route_text=None, ip_get_text=None):
+  """the interface internet traffic leaves by (wlan0 = Wi-Fi, rmnet* = mobile data). Android keeps its routes in
+  per-network tables (ip rule), so the main table in /proc/net/route often has NO default route: ask the kernel which
+  way an internet address goes (`ip route get`, follows the rules) first, /proc/net/route only as the fallback."""
+  text = ip_get_text
+  if text is None and route_text is None:
+    try:
+      text = subprocess.check_output(['ip', 'route', 'get', '1.1.1.1'], stderr=subprocess.DEVNULL, timeout=5).decode('utf-8', 'replace')
+    except Exception:
+      text = None
+  if text:
+    f = text.split()
+    if 'dev' in f and f.index('dev') + 1 < len(f):
+      return f[f.index('dev') + 1]
   try:
-    text = route_text if route_text is not None else open('/proc/net/route').read()
+    rt = route_text if route_text is not None else open('/proc/net/route').read()
   except Exception:
     return None
-  for line in text.splitlines()[1:]:
+  for line in rt.splitlines()[1:]:
     f = line.split()
     if len(f) > 2 and f[1] == '00000000':
       return f[0]
@@ -381,10 +393,12 @@ def main(argv):
     repo, token = read_config()
     ok, why = network_ok()
     ready = repo and offroad_since is not None and (once or now - offroad_since >= OFFROAD_S) and (ok or once)
+    if once and not ready:
+      print('not uploading: %s' % ('no repo/token (%s, %s)' % (REPO_FILE, TOKEN_FILE) if not repo else 'openpilot is driving (controlsd running)'))
     if ready:
       try:
         sent, failed = run_pass(GitHub(repo, token), load_state(), onroad)
-        if sent or failed:
+        if sent or failed or once:
           log('pass done: %d sent, %d failed' % (sent, failed))
       except Abort:
         log('car started: upload stopped, will continue when parked')
