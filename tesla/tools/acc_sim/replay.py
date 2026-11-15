@@ -18,7 +18,13 @@ def interp(x, xp, fp):
   if x >= xp[-1]: return fp[-1]
   for i in range(len(xp) - 1):
     if xp[i] <= x <= xp[i + 1]: return fp[i] + (fp[i + 1] - fp[i]) * (x - xp[i]) / (xp[i + 1] - xp[i])
+TESLA = True   # Tinkla 0.7.5.a planner.py (on the car, 15 Nov): is_tesla limits - cruise braking -4.0 at every speed,
+               # acceleration [2.0, 1.6, 1.0, 0.7] (following [1.6, 1.6, 0.65, 0.4]) at [0, 6.4, 22.5, 40] m/s
 def cruise_limits(v, following):
+  if TESLA:
+    amin = -4.0
+    amax = interp(v, [0., 6.4, 22.5, 40.], [1.6, 1.6, 0.65, .4] if following else [2.0, 1.6, 1.0, 0.7])
+    return amin, amax
   amin = interp(v, [0., 5., 10., 20., 40.], [-1.0, -.8, -.67, -.5, -.30])
   amax = interp(v, [0., 6.4, 22.5, 40.], [1.6, 1.6, 0.65, .4] if following else [1.2, 1.2, 0.65, .4])
   return amin, amax

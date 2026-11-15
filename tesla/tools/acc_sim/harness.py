@@ -25,6 +25,7 @@ BOX = {}
 def recv(sock):
   return BOX.pop(sock, None)
 mod('cereal.messaging', sub_sock=lambda name, **k: name, recv_one_or_none=recv); sys.modules['cereal'].messaging = sys.modules['cereal.messaging']
+sys.modules['cereal'].car = types.SimpleNamespace()       # xnor's file imports it (unused)
 spec = importlib.util.spec_from_file_location('values', REPO + '/values.py'); vals = importlib.util.module_from_spec(spec); spec.loader.exec_module(vals)
 sys.modules['selfdrive.car.tesla.values'] = vals
 CB, CSt = vals.CruiseButtons, vals.CruiseState
@@ -58,7 +59,8 @@ def scenarios():
   S['slower car ahead from 150 m'] = dict(v=lambda t, v0: v0 - 30, d0=150.)
   S['lead leaves at 30 s'] = dict(v=lambda t, v0: v0, gone=30.)
   S['noisy + drop-outs'] = dict(v=lambda t, v0: v0 + 1.5 * math.sin(t / 9.), noisy=True)
-  S['your -5 press at 40 s'] = dict(v=lambda t, v0: v0, human=(40., -5))
+  S['your -5 press at 40 s'] = dict(v=lambda t, v0: v0, human=[(40., -5)])
+  S['no car ahead, you press -5 -5'] = dict(v=lambda t, v0: v0, gone=0., human=[(40., -5), (40.6, -5)])
   S['lead brakes to a stop -4'] = dict(v=lambda t, v0: v0 if t < 30 else max(0., v0 - 14.4 * (t - 30)), brake_t=30., beyond=True)
   return S
 
@@ -72,7 +74,7 @@ def run(path, scen, v0, seed=1, dur=90., tag='new', user_set=None):
   acc.acc_speed_kph = user_set if user_set is not None else v0 + 15
   v = v0 / 3.6; a = 0.
   cs = NS(UE=UE(), cstm_btns=Btns(), imperial_speed_units=False, turn_signal_blinking=False, angle_steers=0., apFollowTimeInS=2.5,
-          pcm_acc_status=CSt.ENABLED, cruise_buttons=CB.IDLE, v_ego=v, v_ego_raw=v, a_ego=0., v_cruise_actual=float(v0),
+          pcm_acc_status=CSt.ENABLED, cruise_buttons=CB.IDLE, speed_units='KPH', HSO=NS(human_control=False), v_ego=v, v_ego_raw=v, a_ego=0., v_cruise_actual=float(v0),
           brake_pressed=False, user_gas_pressed=False)
   lead_v = scen['v'](0, v0) / 3.6; prev_lv = lead_v
   d = scen['d0'] if 'd0' in scen else gap_s(v) * v
@@ -99,21 +101,26 @@ def run(path, scen, v0, seed=1, dur=90., tag='new', user_set=None):
     if pending_plan is not None: BOX['plan'] = pending_plan
     # your stalk press
     cs.cruise_buttons = CB.IDLE
-    if 'human' in scen and abs(t - scen['human'][0]) < dt / 2:
-      step = scen['human'][1]
+    for th, step in scen.get('human', ()):
+      if abs(t - th) >= dt / 2: continue
       cs.cruise_buttons = CB.DECEL_2ND if step == -5 else CB.RES_ACCEL_2ND
       acc.acc_speed_kph += step; queue.append((t + 0.2, ('human', step))); out['press'].append((t, step, 'YOU'))
     cs.v_ego = cs.v_ego_raw = v; cs.a_ego = a; cs.v_cruise_actual = set_kph; cs.pcm_acc_status = CSt.ENABLED if cc_on else CSt.STANDBY
+    cs.out = NS(vEgo=v, vEgoRaw=v, aEgo=a); cs.cruise_state = cs.pcm_acc_status       # xnor's names for the same values
+    # xnor: pcm_speed = openpilot's speed target as controlsd interpolates the plan (brake_discount not modelled)
+    pcm = None
+    if pending_plan is not None:
+      pp = pending_plan.plan; dtp = 0.06; a_s = pp.aStart + dtp / 0.2 * (pp.aTarget - pp.aStart); pcm = pp.vStart + dtp * (a_s + pp.aStart) / 2.
     with contextlib.redirect_stdout(io.StringIO()):
-      btn = acc.update_acc(True, cs, int(t * 100), None, 0., 0., False, 0.)
+      btn = acc.update_acc(True, cs, int(t * 100), None, pcm if tag == 'xnor' else 0., 0., False, 0.)
     # the planner (runs on every radarState, ~20 Hz) with the gap patch; its result reaches the module next cycle
-    L = None if not lead.status else dict(d=gap_distance(lead.dRel, v), v=lead.vLead, a=lead.aLeadK)
+    L = None if not lead.status else dict(d=lead.dRel if tag == 'xnor' else gap_distance(lead.dRel, v), v=lead.vLead, a=lead.aLeadK)   # xnor: stock 1.8 s
     vs, as_ = (planner.v_start, planner.a_start) if planner.v_start is not None else (v, 0.)
     p = planner.step(v, a, L, acc.acc_speed_kph / 3.6)
     pending_plan = NS(valid=True, plan=NS(vStart=vs, aStart=as_, vTarget=p['v_target'], aTarget=p['a_target'], hasLead=L is not None,
                                           longitudinalPlanSource=p['src'], vCruise=p['v_target'], aCruise=p['a_target']))
     if btn:
-      out['press'].append((t, btn, acc.last_follow_msg or ''))
+      out['press'].append((t, btn, getattr(acc, 'last_follow_msg', None) or ''))
       queue.append((t + 0.2, btn))
       if CB.is_accel(btn):
         b_true = max(0., -sum(la_hist) / len(la_hist)); closing = max(0., v - lead_v); room = d - 6.
@@ -201,7 +208,7 @@ def failures(name, scen, v0, m):
 
 if __name__ == '__main__':
   which = sys.argv[1] if len(sys.argv) > 1 else 'new'
-  path = REPO + '/ACC_module.py' if which == 'new' else os.path.join(H, 'ACC_before.py')   # git show d15539e:tesla/ACC_module.py > ACC_before.py
+  path = {'new': REPO + '/ACC_module.py', 'xnor': os.path.join(H, 'ACC_xnor.py')}.get(which, os.path.join(H, 'ACC_before.py'))   # git show d15539e:tesla/ACC_module.py > ACC_before.py
   res = {}
   for name, sc in scenarios().items():
     for v0 in (60, 90, 120):
