@@ -11,6 +11,7 @@ NOT as git commits: no 100 MB file limit, nothing piles up in git history, and a
             /data/drivelog_*.jsonl            driving_logger.py
             /data/interventions/ev_*.json     radarevents.py
             /data/lightlog/ll_*.csv           diag/lightlog.py
+            /data/acclog/acc_*.jsonl          ACC_module.py: what the stalk-ACC saw and pressed (for tuning)
             /data/fcw_shadow.jsonl            grows forever: a dated snapshot is sent when it changed
           each file once (state in /data/log_upload_state.json); a file that grew is sent again under a new name.
   setup (once, see the chat):
@@ -52,7 +53,8 @@ OFF = '/data/log_upload_off'
 STRIP = '/data/log_upload_strip_gps'
 DELETE = '/data/log_upload_delete'
 SSIDS = '/data/log_upload_ssids'
-SOURCES = ['/data/maplog/map_*.jsonl', '/data/drivelog_*.jsonl', '/data/interventions/ev_*.json', '/data/lightlog/ll_*.csv']
+SOURCES = ['/data/maplog/map_*.jsonl', '/data/drivelog_*.jsonl', '/data/interventions/ev_*.json', '/data/lightlog/ll_*.csv',
+           '/data/acclog/acc_*.jsonl']
 GROWING = ['/data/fcw_shadow.jsonl']          # appended forever: snapshots, never deleted
 QUIET_S = 600                                 # a file not written for this long is finished
 OFFROAD_S = 120                               # controlsd gone for this long = parked

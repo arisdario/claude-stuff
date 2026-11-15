@@ -2,8 +2,14 @@ from selfdrive.car.tesla.speed_utils.fleet_speed import FleetSpeed
 from selfdrive.car.tesla.values import CruiseButtons, CruiseState
 from selfdrive.config import Conversions as CV
 import cereal.messaging as messaging
+import json
+import os
 import sys
 import time
+
+ACC_LOG_DIR = '/data/acclog'          # ACCLOG: one line per ACC cycle (20/s) while ACC is on - see _acc_log()
+ACC_LOG_OFF = '/data/acc_log_off'
+ACC_LOG_MAX_BYTES = 300 * 1024 * 1024
 
 
 class ACCState():
@@ -89,6 +95,12 @@ class ACCController():
     self.curve_cap_kph = 999.
     self.curve_lowered = False
     self.curve_warn_time_ms = 0
+    # ACCLOG state
+    self.last_follow_msg = None
+    self._log_f = None
+    self._log_buf = []
+    self._log_check_t = 0.
+    self._log_off = False
 
   # Updates the internal state of this controller based on user input,
   # specifically the steering wheel mounted cruise control stalk, and OpenPilot
@@ -252,7 +264,45 @@ class ACCController():
         self.fast_decel_time = current_time_ms
       # Debug logging (disable in production to reduce latency of commands)
       #print "***ACC command: %s***" % button_to_press
+    if self.enable_adaptive_cruise:
+      self._acc_log(CS, lead_1, button_to_press)
     return button_to_press
+
+  def _acc_log(self, CS, lead, button):
+    """ACCLOG: what ACC saw and decided, for tuning the following behaviour offline. One JSON list per cycle:
+    [t, v_ego m/s, a_ego m/s2, car set speed kph, your speed kph, lead seen 0/1, lead dist m, lead vRel m/s, lead aRel,
+     curve cap kph (999 none), button (0 none), reason, cruise state, brake 0/1, gas 0/1]. Buffered, written once a second,
+    new file per start in /data/acclog, oldest files deleted above 300 MB. Off: touch /data/acc_log_off. Never raises."""
+    try:
+      now = time.time()
+      if now - self._log_check_t > 10.:                # the off switch is looked at every 10 s, not every cycle
+        self._log_check_t = now
+        self._log_off = os.path.exists(ACC_LOG_OFF)
+        if self._log_off and self._log_f is not None:
+          self._log_f.close(); self._log_f = None
+      if self._log_off:
+        self._log_buf = []
+        return
+      seen = bool(lead is not None and lead.status and lead.dRel > 0)
+      self._log_buf.append([round(now, 2), round(CS.v_ego, 2), round(getattr(CS, 'a_ego', 0.), 2), round(CS.v_cruise_actual, 1),
+                            round(self.acc_speed_kph, 1), int(seen), round(lead.dRel, 1) if seen else None,
+                            round(lead.vRel, 2) if seen else None, round(getattr(lead, 'aRel', 0.), 2) if seen else None,
+                            round(self.curve_cap_kph), button or 0, self.last_follow_msg, int(CS.pcm_acc_status),
+                            int(bool(getattr(CS, 'brake_pressed', 0))), int(bool(getattr(CS, 'user_gas_pressed', 0)))])
+      self.last_follow_msg = None
+      if len(self._log_buf) >= 20:
+        if self._log_f is None:
+          os.makedirs(ACC_LOG_DIR, exist_ok=True)
+          files = sorted(os.path.join(ACC_LOG_DIR, f) for f in os.listdir(ACC_LOG_DIR) if f.startswith('acc_'))
+          total = sum(os.path.getsize(f) for f in files)
+          while files and total > ACC_LOG_MAX_BYTES:
+            total -= os.path.getsize(files[0]); os.remove(files.pop(0))
+          self._log_f = open(os.path.join(ACC_LOG_DIR, time.strftime('acc_%Y%m%d_%H%M%S.jsonl')), 'a')
+        self._log_f.write(''.join(json.dumps(r, separators=(',', ':')) + '\n' for r in self._log_buf))
+        self._log_f.flush()
+        self._log_buf = []
+    except Exception:
+      self._log_buf = []
 
   # function to calculate the cruise button based on a safe follow distance
   def _calc_follow_button(self, CS, lead_car, speed_limit_kph, set_speed_limit_active, speed_limit_offset, frame):
@@ -367,6 +417,8 @@ class ACCController():
       self.last_update_time = current_time_ms
       if msg is not None:
         print ("ACC: " + msg)
+    if msg is not None:
+      self.last_follow_msg = msg      # ACCLOG: the reason of this cycle's decision
     return button
     
   def _should_autoengage_cc(self, CS, lead_car=None):
@@ -436,10 +488,10 @@ class ACCController():
     target_kph = min(self.acc_speed_kph, self.curve_cap_kph)
     over_kph = CS.v_cruise_actual - target_kph
     if over_kph >= full_press_kph and self._no_action_for(milliseconds=300):
-      self.curve_lowered = True
+      self.curve_lowered = True; self.last_follow_msg = "curve -5"
       return CruiseButtons.DECEL_2ND
     if over_kph >= half_press_kph * 1.5 and self._no_action_for(milliseconds=500):
-      self.curve_lowered = True
+      self.curve_lowered = True; self.last_follow_msg = "curve -1"
       return CruiseButtons.DECEL_SET
     if self.curve_lowered:
       lead_close = (lead_car is not None and lead_car.status and lead_car.dRel > 0 and
@@ -449,6 +501,7 @@ class ACCController():
         if self.curve_cap_kph >= self.acc_speed_kph:
           self.curve_lowered = False                  # curve over and back at your speed
       elif not lead_close and self._no_human_action_for(milliseconds=1000) and self._no_action_for(milliseconds=700):
+        self.last_follow_msg = "after curve +5" if under_kph >= full_press_kph else "after curve +1"
         return CruiseButtons.RES_ACCEL_2ND if under_kph >= full_press_kph else CruiseButtons.RES_ACCEL
     return None
 
