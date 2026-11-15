@@ -329,11 +329,22 @@ def cap_dir(pattern, max_bytes, keep=()):
       pass
 
 
-def finish_leftovers(root=DRIVE_ROOT):
-  """chunks left half-written by a reboot / crash: gzip them so they get uploaded too"""
+def finish_leftovers(root=DRIVE_ROOT, active=None):
+  """chunks left half-written by a reboot / crash: gzip them so they get uploaded too; picture folders whose chunk is
+  finished (no .part next to them) are packed into their .tar. `active`: the folder of the drive being recorded now -
+  its open chunk is left alone."""
   for part in glob.glob(os.path.join(root, '*', 'c*.jsonl.part')):
+    if active and os.path.dirname(part) == active:
+      continue
     try:
       gzip_file(part, part[:-len('.part')] + '.gz')
+    except Exception:
+      pass
+  for fdir in glob.glob(os.path.join(root, '*', 'c*.frames')):
+    if os.path.exists(fdir[:-len('.frames')] + '.jsonl.part'):
+      continue                                        # its chunk is still being written
+    try:
+      tar_dir(fdir, fdir + '.tar')
     except Exception:
       pass
 
@@ -631,6 +642,7 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
         elif not driving and f is not None:             # the drive ended: last chunk out, keep the disk in bounds
           f.write(json.dumps({'src': 'meta', 'meta': 'drive end', 't': round(time.time(), 3)}) + '\n')
           f.close(); log('driving_logger: drive %s ended, %d chunks' % (f.drive, f.n)); f = None
+          finish_leftovers()                              # anything the last chunk left behind goes up too
           cap_dir('/data/maplog/map_*.jsonl', MAPLOG_MAX_BYTES)
           cap_dir(os.path.join(DRIVE_ROOT, '*', 'c*.jsonl.gz'), DRIVELOG_MAX_BYTES)
         if f is None:                                   # not driving: nothing to record, poll slowly
