@@ -56,12 +56,15 @@ class ACCMode():
   FOLLOW = _Mode(label="follow",   autoresume=False, state=ACCState.STANDBY, adaptive=True)
   AUTO =   _Mode(label="auto", autoresume=True,  state=ACCState.STANDBY, adaptive=True)
   PLAINCC = _Mode(label="cc",   autoresume=False, state=ACCState.STANDBY, adaptive=False)
+  # XNOR: openpilot's own planner (MPC) sets the speed through the cruise stalk, as in xnor-tech tesla-unity's ACC_module
+  # (pcm_speed -> _calc_button). Pick it on the ACC button; the other modes are unchanged.
+  XNOR = _Mode(label="xnor", autoresume=False, state=ACCState.STANDBY, adaptive=True)
   
   BUTTON_NAME = 'acc'
   BUTTON_ABREVIATION = 'ACC'
   
   # Toggle order: OFF -> ON -> AUTO -> OFF
-  _all_modes = [FOLLOW, AUTO,PLAINCC]
+  _all_modes = [FOLLOW, AUTO, PLAINCC, XNOR]
   for index, mode in enumerate(_all_modes):
     mode.next = _all_modes[(index + 1) % len(_all_modes)]
     
@@ -271,8 +274,8 @@ class ACCController():
     elif self._last_lead is not None and current_time_ms - self._last_lead[1] <= LEAD_HOLD_MS:
         lead_1 = self._last_lead[0]      # no new message this cycle: the lead did not vanish, keep the last one
     if self.enable_adaptive_cruise and enabled: # and (button_to_press == None):
-      if CS.cstm_btns.get_button_label2(ACCMode.BUTTON_NAME) in ["OP", "AutoOP"]:    
-        button_to_press = self._calc_button(CS, pcm_speed)
+      if CS.cstm_btns.get_button_label2(ACCMode.BUTTON_NAME) in ["OP", "AutoOP", ACCMode.XNOR.label]:
+        button_to_press = self._calc_button(CS, pcm_speed, lead_1)
         self.new_speed = pcm_speed * CV.MS_TO_KPH
       else:
         # Alternative speed decision logic that uses the lead car's distance
@@ -650,17 +653,23 @@ class ACCController():
   # is inoperable because the planner crashes when given only visual radar
   # inputs. (Perhaps this can be used in the future with a radar install, or if
   # OpenPilot planner changes.)
-  def _calc_button(self, CS, desired_speed_ms):
+  def _calc_button(self, CS, desired_speed_ms, lead_car=None):
     button_to_press = None
     # Automatically engange traditional cruise if appropriate.
-    if self._should_autoengage_cc(CS) and desired_speed_ms >= CS.v_ego:
+    # XNOR: the lead car is passed, so cruise is not resumed (RES) while closing on a slower car (xnor passes none)
+    if self._should_autoengage_cc(CS, lead_car=lead_car) and desired_speed_ms >= CS.v_ego:
       button_to_press = CruiseButtons.RES_ACCEL
+    # XNOR safety: cancel (full regen) when a collision is less than 4 s away or the car ahead is slower than cruise can
+    # go - this car's own _fast_decel_required, which xnor only uses before engaging
+    elif (CS.pcm_acc_status == CruiseState.ENABLED and lead_car is not None and self._fast_decel_required(CS, lead_car)
+          and self._no_human_action_for(milliseconds=500)):
+      button_to_press = CruiseButtons.CANCEL
     # If traditional cruise is engaged, then control it.
     elif (CS.pcm_acc_status == CruiseState.ENABLED
           # But don't make adjustments if a human has manually done so in
           # the last 3 seconds. Human intention should not be overridden.
           and self._no_human_action_for(milliseconds=3000)
-          and self._no_automated_action_for(milliseconds=500)):
+          and self._no_automated_action_for(milliseconds=400)):     # XNOR: 400 ms between presses (Tinkla had 500)
       # The difference between OP's target speed and the current cruise
       # control speed, in KPH.
       speed_offset_kph = (desired_speed_ms * CV.MS_TO_KPH - CS.v_cruise_actual)
