@@ -128,6 +128,7 @@ import gzip
 import json
 import os
 import shutil
+import struct
 import sys
 import threading
 import time
@@ -509,6 +510,31 @@ def plan_dict(p):
   return out
 
 
+BUTTONS_FILE = '/data/openpilot/selfdrive/car/tesla/buttons.msg'   # the screen's custom buttons (UIBT_module): name, label, label2
+PLANNER_FILE = '/data/openpilot/selfdrive/controls/lib/planner.py'
+
+
+def acc_mode(path=BUTTONS_FILE):
+  """MODELOG: the ACC button's mode as shown on the screen ('follow', 'auto', 'cc', 'xnor' ...), None if unknown"""
+  try:
+    d = open(path, 'rb').read()
+    for i in range(0, len(d) - 22, 23):
+      name, _, label2 = struct.unpack('6s6s11s', d[i:i + 23])
+      if name.rstrip(b'\0') == b'acc':
+        return label2.rstrip(b'\0').decode('utf8', 'replace') or None
+  except Exception:
+    pass
+  return None
+
+
+def gap_patch_active(path=PLANNER_FILE):
+  """MODELOG: True when tools/patch_planner_gap.py is applied to the installed planner (driver's gap), None if unknown"""
+  try:
+    return 'GAPSHIFT (tesla/tools/patch_planner_gap.py)' in open(path).read()
+  except Exception:
+    return None
+
+
 def long_ctrl_dict(c):
   """PLANLOG: openpilot's longitudinal state (the planner only plans in 'pid') and the set speed it plans for (km/h)"""
   out = {'long_control_state': None, 'v_cruise_kph': None}
@@ -598,6 +624,7 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
   reported_fields = False
   last_leads, t_rad = (lead_dict(None), lead_dict(None)), None
   last_plan, t_plan, last_long_ctrl = plan_dict(None), None, {'long_control_state': None, 'v_cruise_kph': None}
+  last_mode, t_mode = None, None          # MODELOG: ACC button mode, re-read every 2 s (you can change it while driving)
 
   # RECORDER: in --auto the output is a ChunkWriter opened when a drive starts and closed when it ends
   follows, shadow, last_car_t, last_plan_fcw, last_mm = [], None, None, False, None
@@ -671,7 +698,8 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
             fo.skip_to_end()
           if fcw_shadow is not None:
             shadow = fcw_shadow.ShadowCompare()
-          f.write(json.dumps({'src': 'meta', 'meta': 'drive start', 't': round(time.time(), 3), 'hz': hz, 'drive': f.drive}) + '\n')
+          f.write(json.dumps({'src': 'meta', 'meta': 'drive start', 't': round(time.time(), 3), 'hz': hz, 'drive': f.drive,
+                              'acc_mode': acc_mode(), 'planner_gap_patch': gap_patch_active()}) + '\n')
           log('driving_logger: drive %s started' % f.drive)
         elif not driving and f is not None:             # the drive ended: last chunk out, keep the disk in bounds
           f.write(json.dumps({'src': 'meta', 'meta': 'drive end', 't': round(time.time(), 3)}) + '\n')
@@ -769,6 +797,9 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
 
       # PLANLOG: what openpilot's longitudinal planner wants (the ACC redesign follows it) - None when older than 0.5 s
       sample['plan'] = last_plan if t_plan is not None and now_mono - t_plan < 0.5 else plan_dict(None)
+      if t_mode is None or now_mono - t_mode > 2.:
+        last_mode, t_mode = acc_mode(), now_mono
+      sample['acc_mode'] = last_mode
       sample.update(last_long_ctrl if t_ctrl is not None and now_mono - t_ctrl < STALE_S else long_ctrl_dict(None))
       sample['model'] = last_model
       sample['gps'] = last_gps

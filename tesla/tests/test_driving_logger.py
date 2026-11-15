@@ -277,6 +277,22 @@ class TestPlanLog(unittest.TestCase):
     self.assertEqual(d['v_start'], 3.0); self.assertIsNone(d['src']); self.assertIsNone(d['a_target'])
 
 
+class TestModeLog(unittest.TestCase):
+  def test_acc_mode_and_gap_patch(self):
+    import struct, tempfile, os
+    d = tempfile.mkdtemp(); b = os.path.join(d, 'buttons.msg'); p = os.path.join(d, 'planner.py')
+    with open(b, 'wb') as f:
+      for n, l, l2 in ((b'alca', b'ALC', b''), (b'acc', b'ACC', b'xnor'), (b'dsp', b'DSP', b'OFF')):
+        f.write(struct.pack('6s6s11s', n, l, l2))
+    self.assertEqual(DL.acc_mode(b), 'xnor')
+    self.assertIsNone(DL.acc_mode(os.path.join(d, 'missing')))
+    open(p, 'w').write('# GAPSHIFT (tesla/tools/patch_planner_gap.py): ...\n')
+    self.assertIs(DL.gap_patch_active(p), True)
+    open(p, 'w').write('class Planner(): pass\n')
+    self.assertIs(DL.gap_patch_active(p), False)
+    self.assertIsNone(DL.gap_patch_active(os.path.join(d, 'missing')))
+
+
 class TestRecorderPieces(unittest.TestCase):
   def setUp(self):
     import tempfile
