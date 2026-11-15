@@ -364,7 +364,7 @@ void cameras_init(DualCameraState *s) {
   // SETTLE (15 Nov 2026): every hang came when camerad opened the C920 in the middle of the boot rush (load 8-11); every
   // start after it worked. So first wait until the CPU is calm (openpilot finished starting; at most 90 s early in boot,
   // 30 s later). WATCHDOG: if opening it still hangs, camera_ext_c920.cc's alarm() ends camerad - and because the
-  // attempt is counted BEFORE trying, such a hang counts as a try too: after C920_BOOT_RETRIES the phone camera is used.
+  // attempt is counted BEFORE trying, such a hang counts as a try too. NOFALLBACK: never the phone camera (see below).
   g_ext = 0;
   if (ext_c920_wanted()) {
     double up = 1e9;
