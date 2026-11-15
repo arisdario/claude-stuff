@@ -1,6 +1,7 @@
 // End-to-end test of the format choice in camera_ext_c920.cc against a FAKE camera (the uvc_* calls are replaced with --wrap, everything else is the real file).
 //   ext_open_test SCENARIO CLIP.h264 FRAME.jpg      prints "RESULT ok=<selftest> started=<mjpeg|h264|none>"
 // scenarios: normal (camera offers both) | no_h264 (camera has no H.264 mode) | start_fails (H.264 mode negotiates but will not start) | garbage (H.264 frames are junk)
+#include <time.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -41,7 +42,10 @@ static void *feeder(void *) {
 
 uvc_error_t __wrap_uvc_init(uvc_context_t **ctx, struct libusb_context *) { *ctx = (uvc_context_t *)1; return UVC_SUCCESS; }
 uvc_error_t __wrap_uvc_find_device(uvc_context_t *, uvc_device_t **dev, int, int, const char *) { *dev = (uvc_device_t *)1; return UVC_SUCCESS; }
-uvc_error_t __wrap_uvc_open(uvc_device_t *, uvc_device_handle_t **h) { *h = (uvc_device_handle_t *)1; return UVC_SUCCESS; }
+uvc_error_t __wrap_uvc_open(uvc_device_t *, uvc_device_handle_t **h) {
+  if (!strcmp(g_scn, "hang_open")) for (;;) pause();             // 15 Nov 2026: the C920 stopped answering in the middle of opening
+  *h = (uvc_device_handle_t *)1; return UVC_SUCCESS;
+}
 void __wrap_uvc_close(uvc_device_handle_t *) {}
 void __wrap_uvc_unref_device(uvc_device_t *) {}
 void __wrap_uvc_exit(uvc_context_t *) {}
@@ -72,6 +76,10 @@ int main(int argc, char **argv) {
     if (g_clip[i] == 0 && g_clip[i + 1] == 0 && g_clip[i + 2] == 1 && (g_clip[i + 3] & 31) == 9) { st.push_back((i > 0 && g_clip[i - 1] == 0) ? i - 1 : i); i += 3; }
   st.push_back(g_clip.size());
   for (size_t i = 0; i + 1 < st.size(); i++) g_aus.push_back({st[i], st[i + 1] - st[i]});
+  if (!strcmp(g_scn, "settle")) {                                 // SETTLE: returns once the CPU is calm (or after the limit)
+    time_t t0 = time(NULL); ext_c920_wait_settled(8000);
+    printf("RESULT settled_in=%ld\n", (long)(time(NULL) - t0)); return 0;
+  }
   int ok = ext_c920_selftest(1500);
   printf("RESULT ok=%d started=%s\n", ok, g_started);
   return 0;

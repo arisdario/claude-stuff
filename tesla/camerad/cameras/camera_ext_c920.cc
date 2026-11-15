@@ -1,5 +1,7 @@
 #include "camera_ext_c920.h"
 
+static void watchdog(int seconds, const char *what);   // WATCHDOG: see its definition below
+
 #include <dirent.h>
 #include <pthread.h>
 #include <setjmp.h>
@@ -495,7 +497,10 @@ void profile_tick(uvc_device_handle_t *devh, double now_s) {
 void *capture_thread(void *) {
   g_dispatch = true;
   while (!g_stop && !do_exit) {
-    if (!ext_open()) { fprintf(stderr, "external camera: not available, retrying\n"); sleep(1); continue; }
+    watchdog(25, "opening the C920 for streaming");               // WATCHDOG: a hang here ends camerad (see watchdog())
+    bool opened = ext_open();
+    watchdog(0, NULL);
+    if (!opened) { fprintf(stderr, "external camera: not available, retrying\n"); sleep(1); continue; }
     g_flip = read_int_file(FLIP_FILE, 0) ? 1 : 0;
     g_prof.reopened();
     fprintf(stderr, "ROAD CAMERA: external C920 streaming %dx%d %s @ %d fps\n", SRC_W, SRC_H, g_h264 ? "H.264 (decoded here)" : "MJPEG", SRC_FPS);
@@ -534,7 +539,9 @@ void *capture_thread(void *) {
       fprintf(stderr, "external camera: H.264 gave no picture at all: MJPEG from now on\n");
     }
 #endif
+    watchdog(15, "closing the C920 after a stall");                 // WATCHDOG: closing a hung camera can block too
     ext_close();
+    watchdog(0, NULL);
   }
   ext_close();
   return NULL;
@@ -542,10 +549,53 @@ void *capture_thread(void *) {
 
 }  // namespace
 
+// WATCHDOG: a C920 that stops answering in the middle of a USB call (15 Nov 2026: 'can't re-read device descriptor
+// ... -110', camerad at 0 CPU for minutes) blocks camerad forever - its own timeouts never run and SIGTERM only sets
+// do_exit. alarm() turns such a hang into the end of the process (SIGALRM's default action; camerad has no handler):
+// the manager starts camerad again and the retry / phone-camera fallback of camera_qcom.c's BOOTWAIT can work.
+static void watchdog(int seconds, const char *what) {
+  if (seconds > 0) fprintf(stderr, "external camera: watchdog %d s for %s\n", seconds, what);
+  alarm(seconds > 0 ? (unsigned)seconds : 0);
+}
+
+static int read_cpu(unsigned long long *busy, unsigned long long *total) {
+  FILE *f = fopen("/proc/stat", "r");
+  if (!f) return 0;
+  unsigned long long v[8] = {0};
+  int n = fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu %llu", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]);
+  fclose(f);
+  if (n < 4) return 0;
+  *total = 0;
+  for (int i = 0; i < 8; i++) *total += v[i];
+  *busy = *total - v[3] - v[4];                                     // minus idle and iowait
+  return 1;
+}
+
+void ext_c920_wait_settled(int max_wait_ms) {
+  // SETTLE: wait until openpilot has finished starting before touching the C920 - the CPU at least SETTLE_IDLE idle for
+  // SETTLE_CALM_S seconds in a row (15 Nov: every hang came when camerad opened the camera in the middle of the boot
+  // rush, load 8-11; every start after the rush worked). At most max_wait_ms, then the camera is opened anyway.
+  const double SETTLE_IDLE = 0.40;
+  const int SETTLE_CALM_S = 3;
+  unsigned long long b0, t0, b1, t1;
+  if (!read_cpu(&b0, &t0)) return;
+  int calm = 0, waited = 0;
+  while (waited < max_wait_ms && !do_exit) {
+    sleep(1); waited += 1000;
+    if (!read_cpu(&b1, &t1)) return;
+    double idle = t1 > t0 ? 1.0 - (double)(b1 - b0) / (double)(t1 - t0) : 0.0;
+    b0 = b1; t0 = t1;
+    calm = idle >= SETTLE_IDLE ? calm + 1 : 0;
+    if (calm >= SETTLE_CALM_S) { fprintf(stderr, "external camera: system settled after %d s (CPU %.0f %% idle): opening the C920\n", waited / 1000, idle * 100.); return; }
+  }
+  fprintf(stderr, "external camera: system still busy after %d s: opening the C920 anyway\n", waited / 1000);
+}
+
 static int selftest_once(int timeout_ms) {
   g_dispatch = false;
   g_frames = 0;
-  if (!ext_open()) return 0;
+  watchdog(20 + timeout_ms / 1000 + 16, "the self-test");          // open + up to 8 s for H.264 + close, generously
+  if (!ext_open()) { watchdog(0, NULL); return 0; }
   int waited = 0;
   int limit = timeout_ms;
 #ifdef EXT_HAVE_AVCODEC
@@ -559,6 +609,7 @@ static int selftest_once(int timeout_ms) {
             g_dec.rx(), g_dec.decoded(), g_dec.errors(), g_dec.dropped(), waited);
 #endif
   ext_close();
+  watchdog(0, NULL);
   return ok;
 }
 

@@ -44,4 +44,17 @@ run('h264 asked, decoder library missing: MJPEG', with_h264, 'normal', dict(H, E
 run('h264 asked, H.264 stream will not start: MJPEG', with_h264, 'start_fails', H, 1, 'mjpeg')
 run('h264 asked, camera sends junk (no picture ever): MJPEG', with_h264, 'garbage', H, 1, 'mjpeg')
 run('build without H.264 support, h264 asked: MJPEG', without, 'normal', H, 1, 'mjpeg')
+import signal, time as _t
+# WATCHDOG: the camera hangs forever inside uvc_open (15 Nov 2026) -> camerad must END (SIGALRM), not freeze
+t0 = _t.time()
+r = subprocess.run([without, 'hang_open', clip, jpg], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=90)
+good = r.returncode == -signal.SIGALRM and 'watchdog' in r.stderr
+ok = ok and good
+print('%-66s %s   (exit %s after %.0f s)' % ('camera hangs in uvc_open: the watchdog ends the process', 'OK' if good else 'FAIL', r.returncode, _t.time() - t0))
+# SETTLE: on a calm machine it returns within a few seconds, never later than its limit (8 s here)
+r = subprocess.run([without, 'settle', clip, jpg], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
+res = [l for l in r.stdout.splitlines() if l.startswith('RESULT')]
+good = bool(res) and int(res[0].split('=')[1]) <= 9
+ok = ok and good
+print('%-66s %s   (%s; %s)' % ('settle wait returns, within its limit', 'OK' if good else 'FAIL', res[0] if res else r.stderr[-200:], r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ''))
 sys.exit(0 if ok else 1)

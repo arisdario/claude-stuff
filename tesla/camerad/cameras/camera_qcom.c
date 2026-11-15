@@ -361,30 +361,37 @@ void cameras_init(DualCameraState *s) {
   // (behind the case) lasted until the next camerad restart. Now: wait longer early in boot, and if it still fails, exit so
   // the openpilot manager starts camerad again (a restart finds the C920) - at most C920_BOOT_RETRIES times per boot (the
   // count lives in /dev, which is empty again after every reboot); only then use the phone camera, as before.
+  // SETTLE (15 Nov 2026): every hang came when camerad opened the C920 in the middle of the boot rush (load 8-11); every
+  // start after it worked. So first wait until the CPU is calm (openpilot finished starting; at most 90 s early in boot,
+  // 30 s later). WATCHDOG: if opening it still hangs, camera_ext_c920.cc's alarm() ends camerad - and because the
+  // attempt is counted BEFORE trying, such a hang counts as a try too: after C920_BOOT_RETRIES the phone camera is used.
   g_ext = 0;
   if (ext_c920_wanted()) {
     double up = 1e9;
     FILE *uf = fopen("/proc/uptime", "r");
     if (uf) { if (fscanf(uf, "%lf", &up) != 1) up = 1e9; fclose(uf); }
-    int present_wait_ms = up < 120. ? 40000 : 12000;
-    if (ext_c920_acquire(present_wait_ms, 3, 4000)) {
-      g_ext = 1;
-      ext_c920_configure(&s->rear);
-      unlink("/dev/c920_boot_retries");
-      LOG("*** ROAD CAMERA: external C920 (phone rear camera not used) ***");
+    const int C920_BOOT_RETRIES = 5;
+    int n = 0;
+    FILE *rf = fopen("/dev/c920_boot_retries", "r");
+    if (rf) { if (fscanf(rf, "%d", &n) != 1) n = 0; fclose(rf); }
+    if (n >= C920_BOOT_RETRIES) {
+      LOGE("*** external road camera requested but the C920 failed %d times since boot: using the phone's rear camera ***", n);
+      fprintf(stderr, "external camera: %d tries failed since boot: using the phone's rear camera (replug the C920 + pkill -9 camerad to try again)\n", n);
     } else {
-      const int C920_BOOT_RETRIES = 5;
-      int n = 0;
-      FILE *rf = fopen("/dev/c920_boot_retries", "r");
-      if (rf) { if (fscanf(rf, "%d", &n) != 1) n = 0; fclose(rf); }
-      if (n < C920_BOOT_RETRIES && !do_exit) {
-        rf = fopen("/dev/c920_boot_retries", "w");
-        if (rf) { fprintf(rf, "%d\n", n + 1); fclose(rf); }
+      rf = fopen("/dev/c920_boot_retries", "w");
+      if (rf) { fprintf(rf, "%d\n", n + 1); fclose(rf); }
+      ext_c920_wait_settled(up < 300. ? 90000 : 30000);
+      int present_wait_ms = up < 120. ? 40000 : 12000;
+      if (ext_c920_acquire(present_wait_ms, 3, 4000)) {
+        g_ext = 1;
+        ext_c920_configure(&s->rear);
+        unlink("/dev/c920_boot_retries");
+        LOG("*** ROAD CAMERA: external C920 (phone rear camera not used) ***");
+      } else if (!do_exit) {
         fprintf(stderr, "external camera: C920 not ready (try %d of %d): camerad exits so it is started again\n", n + 1, C920_BOOT_RETRIES);
         LOGE("*** external road camera not ready (try %d of %d): restarting camerad ***", n + 1, C920_BOOT_RETRIES);
         exit(1);
       }
-      LOGE("*** external road camera requested but the C920 is missing or gives no frames: using the phone's rear camera ***");
     }
   }
 }
