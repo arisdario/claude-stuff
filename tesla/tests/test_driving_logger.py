@@ -252,5 +252,48 @@ class TestLeadDict(unittest.TestCase):
       self.assertIsNone(d[f])
 
 
+
+class TestRecorderPieces(unittest.TestCase):
+  def setUp(self):
+    import tempfile
+    self.d = tempfile.mkdtemp()
+
+  def tearDown(self):
+    import shutil
+    shutil.rmtree(self.d)
+
+  def test_chunks_rotate_and_are_gzipped(self):
+    import glob, gzip
+    clock = [0.0]
+    w = DL.ChunkWriter(root=self.d, chunk_s=120, clock=lambda: clock[0], background=False)
+    for i in range(10):
+      w.write('{"i":%d}\n' % i); clock[0] += 30.0             # 300 s of writing -> chunks of 120 s
+    w.close()
+    files = sorted(glob.glob(os.path.join(w.dir, 'c*')))
+    self.assertEqual([os.path.basename(f) for f in files], ['c0001.jsonl.gz', 'c0002.jsonl.gz', 'c0003.jsonl.gz'])
+    lines = [l for f in files for l in gzip.open(f, 'rt').read().splitlines()]
+    self.assertEqual(lines, ['{"i":%d}' % i for i in range(10)])           # nothing lost, nothing doubled, in order
+
+  def test_follow_new_lines_only_and_file_switch(self):
+    p1 = os.path.join(self.d, 'acc_1.jsonl')
+    open(p1, 'w').write('[1]\n[2]\n')
+    f = DL.Follow(os.path.join(self.d, 'acc_*.jsonl')); f.skip_to_end()
+    self.assertEqual(f.read(), [])                                         # history before the drive is skipped
+    with open(p1, 'a') as h:
+      h.write('[3]\n[4')                                                   # a half-written line waits
+    self.assertEqual(f.read(), ['[3]'])
+    with open(p1, 'a') as h:
+      h.write(']\n')
+    import time as _t
+    p2 = os.path.join(self.d, 'acc_2.jsonl'); open(p2, 'w').write('[5]\n')
+    os.utime(p2, (_t.time() + 5, _t.time() + 5))                           # newer file (camerad/ACC restarted)
+    self.assertEqual(f.read(), ['[4]', '[5]'])
+
+  def test_leftover_part_is_finished(self):
+    os.makedirs(os.path.join(self.d, '20261115_120000'))
+    p = os.path.join(self.d, '20261115_120000', 'c0007.jsonl.part'); open(p, 'w').write('{"x":1}\n')
+    DL.finish_leftovers(self.d)
+    self.assertTrue(os.path.exists(p[:-5] + '.gz')); self.assertFalse(os.path.exists(p))
+
 if __name__ == '__main__':
   unittest.main()

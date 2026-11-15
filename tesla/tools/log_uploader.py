@@ -30,6 +30,12 @@ NOT as git commits: no 100 MB file limit, nothing piles up in git history, and a
             python3 log_uploader.py --once       one pass now, ignoring the off-road/Wi-Fi wait (still aborts when driving)
   log:      /data/log_upload.log
 
+LIVE (the one recorder, driving_logger.py --auto): its 2-minute chunks /data/drivelog/<drive>/cNNNN.jsonl.gz are sent
+right away, WHILE DRIVING, over any internet (the phone hotspot too), one release per drive (drive-<YYYYmmdd_HHMMSS>), and
+deleted locally once uploaded. Checked every LIVE_EVERY_S. The files the recorder merges into its chunks (maplog, acclog,
+drivelog_*, fcw_shadow) are sent separately only if they are older than the recorder's first drive (no double upload).
+  fresh start:  python3 log_uploader.py --clean-sent    deletes the local files that were already uploaded (sizes match)
+
 It never touches openpilot, its processes or its messages: it reads files and /proc only. Python 3.7 standard library.
 """
 import glob
@@ -59,6 +65,10 @@ GROWING = ['/data/fcw_shadow.jsonl']          # appended forever: snapshots, nev
 QUIET_S = 600                                 # a file not written for this long is finished
 OFFROAD_S = 120                               # controlsd gone for this long = parked
 PASS_EVERY_S = 300
+LIVE_GLOB = '/data/drivelog/*/c*.jsonl.gz'
+LIVE_EVERY_S = 20
+RECORDER_SINCE = '/data/drivelog/.since'      # written by the recorder at its first start: merged files after this are not sent alone
+MERGED = ('/data/maplog/', '/data/acclog/', '/data/drivelog_', '/data/fcw_shadow')
 API = 'https://api.github.com'
 GPS_KEYS = {'gps', 'lat', 'lon', 'latitude', 'longitude', 'MCU_locationStatus', 'MCU_locationStatus2', '0x3d8', '0x3D8', 'r0x3d8'}
 
@@ -166,6 +176,10 @@ def save_state(st):
 def pending(st, now=None, sources=None, growing=None):
   """[(path, asset_name, growing)] of finished files not uploaded in their current size"""
   now = time.time() if now is None else now
+  try:
+    since = os.path.getmtime(RECORDER_SINCE)
+  except OSError:
+    since = None
   out = []
   for pats, grow in ((SOURCES if sources is None else sources, False), (GROWING if growing is None else growing, True)):
     for pat in pats:
@@ -176,6 +190,8 @@ def pending(st, now=None, sources=None, growing=None):
           continue
         if s.st_size == 0 or now - s.st_mtime < QUIET_S:
           continue
+        if since is not None and s.st_mtime > since and p.startswith(MERGED):
+          continue                                   # the recorder already sent this data live, inside its chunks
         prev = st.get(p)
         if prev and prev.get('size') == s.st_size:
           continue
@@ -362,6 +378,47 @@ def run_pass(gh, st, stop, now=None):
   return sent, failed
 
 
+def run_live(gh, rels, log_fail=True):
+  """send every finished recorder chunk (oldest first), delete it locally once uploaded; returns (sent, failed)"""
+  sent = failed = 0
+  for p in sorted(glob.glob(LIVE_GLOB)):
+    drive = os.path.basename(os.path.dirname(p))
+    tag = 'drive-' + drive
+    try:
+      if tag not in rels:
+        rels[tag] = gh.release(tag)
+      a = gh.upload(rels[tag], os.path.basename(p), p, lambda: False)
+      rels[tag].setdefault('assets', []).append(a)
+      kb = os.path.getsize(p) // 1024
+      os.remove(p); sent += 1
+      log('live %s/%s (%d kB)' % (tag, os.path.basename(p), kb))
+    except AccessError as e:
+      failed += 1; log('STOPPED: %s' % e); break
+    except Exception as e:
+      failed += 1
+      if log_fail:
+        log('live upload failed (%s) - kept, retried later' % e)
+      break                                          # no internet right now: try again next round, keep the order
+  for d in glob.glob(os.path.dirname(os.path.dirname(LIVE_GLOB)) + '/*/'):
+    if not os.listdir(d):
+      try:
+        os.rmdir(d)                                  # a finished, fully uploaded drive
+      except OSError:
+        pass
+  return sent, failed
+
+
+def clean_sent():
+  """fresh start: delete the local files the state says were uploaded (same size as sent), never the growing ones"""
+  st, n, freed = load_state(), 0, 0
+  for p, info in sorted(st.items()):
+    if p in GROWING or not os.path.exists(p):
+      continue
+    if os.path.getsize(p) == info.get('size'):
+      freed += os.path.getsize(p); os.remove(p); n += 1
+  print('deleted %d uploaded files, %.1f MB freed (they stay in the repository)' % (n, freed / 1e6))
+
+
 def status():
   repo, token = read_config()
   print('repo:    %s' % (repo or 'NOT SET (%s)' % REPO_FILE))
@@ -381,6 +438,8 @@ def status():
 def main(argv):
   if '--status' in argv:
     status(); return 0
+  if '--clean-sent' in argv:
+    clean_sent(); return 0
   try:
     os.nice(19)
   except Exception:
@@ -392,9 +451,20 @@ def main(argv):
   once = '--once' in argv
   offroad_since = None if not once else 0.0
   log('started%s' % (' (one pass)' if once else ''))
+  rels, next_pass, live_failing = {}, 0., False
   while True:
     if os.path.exists(OFF) and not once:
       time.sleep(PASS_EVERY_S); continue
+    repo, token = read_config()
+    if repo:                                          # LIVE: recorder chunks, any network, even while driving
+      try:
+        s_, f_ = run_live(GitHub(repo, token), rels, log_fail=not live_failing)
+        live_failing = f_ > 0 and s_ == 0
+      except Exception as e:
+        log('live pass failed: %s' % e)
+    if not once and time.time() < next_pass:
+      time.sleep(LIVE_EVERY_S); continue
+    next_pass = time.time() + PASS_EVERY_S
     now = time.time()
     if onroad():
       offroad_since = None
@@ -416,7 +486,7 @@ def main(argv):
         log('pass failed: %s' % e)
     if once:
       return 0
-    time.sleep(PASS_EVERY_S)
+    time.sleep(LIVE_EVERY_S)
 
 
 if __name__ == '__main__':

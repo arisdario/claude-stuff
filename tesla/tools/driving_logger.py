@@ -123,10 +123,141 @@ steering_angle/das_commanded_angle, so you can see which one would have tracked 
 over-damping - without ever turning the layer on or changing a single frame actually sent to the car.
 """
 import argparse
+import glob
+import gzip
 import json
 import os
+import shutil
 import sys
+import threading
 import time
+
+# ---------------------------------------------------------------------------------------- RECORDER (--auto)
+# THE ONE LOGGER. `--auto` (started at boot, see launch line in the chat) runs forever and records every drive by
+# itself - a drive = carState is being published (openpilot started) - into /data/drivelog/<drive start>/c0001.jsonl.gz,
+# c0002 ..., one compressed chunk every CHUNK_S seconds. log_uploader.py sends each finished chunk to GitHub right away
+# (live, while driving) and deletes it locally. Every line is JSON with "src":
+#   car   this logger's own 20 Hz sample (everything below in the docstring: state, leads, model, GPS, ...)
+#   acc   ACC_module.py's decision line, followed from /data/acclog (button pressed + reason, see _acc_log there)
+#   map   radarweb's map/radar line, followed from /data/maplog (radar objects, raw CAN snapshot, ~1/s)
+#   fcw   fcw_shadow.py's comparison computed here (stock FCW vs fcw_v2 vs the model's) - the separate
+#         fcw_shadow process is no longer needed
+#   meta  drive start / end
+# Lines from the followed files are copied as text (no re-parsing): {"src":"acc","r":<line>} / {"src":"map","d":<line>}.
+DRIVE_ROOT = '/data/drivelog'
+CHUNK_S = 120.0
+DRIVE_END_S = 30.0            # no carState for this long = the drive ended (openpilot stopped)
+FOLLOW = (('acc', 'r', '/data/acclog/acc_*.jsonl'), ('map', 'd', '/data/maplog/map_*.jsonl'))
+MAPLOG_MAX_BYTES = 500 * 1024 * 1024   # radarweb's /data/maplog: oldest files deleted above this (all merged into chunks)
+DRIVELOG_MAX_BYTES = 1024 * 1024 * 1024  # chunks not uploaded yet (e.g. no internet for days): oldest deleted above this
+
+
+def gzip_file(src, dst):
+  """src -> dst.gz atomically (tmp + rename), then src removed. Empty src: just removed."""
+  if os.path.getsize(src) > 0:
+    tmp = dst + '.tmp'
+    with open(src, 'rb') as fi, gzip.open(tmp, 'wb', compresslevel=6) as fo:
+      shutil.copyfileobj(fi, fo, 1 << 20)
+    os.rename(tmp, dst)
+  os.remove(src)
+
+
+class ChunkWriter(object):
+  """one drive: <root>/<YYYYmmdd_HHMMSS>/cNNNN.jsonl.part, closed + gzipped (in a thread) every chunk_s seconds"""
+  def __init__(self, root=DRIVE_ROOT, chunk_s=CHUNK_S, clock=time.monotonic, background=True):
+    self.drive = time.strftime('%Y%m%d_%H%M%S')
+    self.dir = os.path.join(root, self.drive)
+    os.makedirs(self.dir, exist_ok=True)
+    self.chunk_s, self.clock, self.background, self.n, self.f = chunk_s, clock, background, 0, None
+    self._threads = []
+    self._open()
+
+  def _open(self):
+    self.n += 1
+    self.part = os.path.join(self.dir, 'c%04d.jsonl.part' % self.n)
+    self.f = open(self.part, 'w')
+    self.t0 = self.clock()
+
+  def _finish(self):
+    self.f.close()
+    part, dst = self.part, self.part[:-len('.part')] + '.gz'
+    if self.background:
+      th = threading.Thread(target=gzip_file, args=(part, dst)); th.start(); self._threads.append(th)
+    else:
+      gzip_file(part, dst)
+
+  def write(self, s):
+    self.f.write(s)
+    if self.clock() - self.t0 >= self.chunk_s:
+      self._finish(); self._open()
+
+  def flush(self):
+    self.f.flush()
+
+  def close(self):
+    self._finish()
+    for th in self._threads:
+      th.join()
+
+
+class Follow(object):
+  """follows the newest file matching a pattern like `tail -F`: returns complete new lines only"""
+  def __init__(self, pattern):
+    self.pattern, self.path, self.pos = pattern, None, 0
+
+  def _newest(self):
+    files = glob.glob(self.pattern)
+    return max(files, key=os.path.getmtime) if files else None
+
+  def skip_to_end(self):
+    self.path = self._newest()
+    self.pos = os.path.getsize(self.path) if self.path else 0
+
+  def read(self, max_bytes=4 << 20):
+    out = []
+    newest = self._newest()
+    if newest is None:
+      return out
+    if self.path is not None and newest != self.path:
+      out += self._read_from(self.path, max_bytes)       # finish the old file, then the new one from its start
+      self.path, self.pos = newest, 0
+    elif self.path is None:
+      self.path, self.pos = newest, 0
+    return out + self._read_from(self.path, max_bytes)
+
+  def _read_from(self, path, max_bytes):
+    try:
+      with open(path, 'rb') as f:
+        f.seek(self.pos)
+        data = f.read(max_bytes)
+    except OSError:
+      return []
+    end = data.rfind(b'\n')
+    if end < 0:
+      return []
+    self.pos += end + 1
+    return [l.decode('utf-8', 'replace') for l in data[:end].split(b'\n') if l.strip()]
+
+
+def cap_dir(pattern, max_bytes, keep=()):
+  """delete the oldest files matching pattern while their total is above max_bytes (never the ones in keep)"""
+  files = sorted((f for f in glob.glob(pattern) if f not in keep), key=os.path.getmtime)
+  total = sum(os.path.getsize(f) for f in files)
+  while files and total > max_bytes:
+    f = files.pop(0); total -= os.path.getsize(f)
+    try:
+      os.remove(f)
+    except OSError:
+      pass
+
+
+def finish_leftovers(root=DRIVE_ROOT):
+  """chunks left half-written by a reboot / crash: gzip them so they get uploaded too"""
+  for part in glob.glob(os.path.join(root, '*', 'c*.jsonl.part')):
+    try:
+      gzip_file(part, part[:-len('.part')] + '.gz')
+    except Exception:
+      pass
 
 # ---------------------------------------------------------------------------------------- 0x659 decode
 # Ground truth: teslacan.create_fake_DAS_msg() (the packer) and panda/board/safety/safety_tesla.h
@@ -299,11 +430,11 @@ def _load_steer_limits():
 
 
 # ---------------------------------------------------------------------------------------- the live loop
-def run(out_path, hz=20.0, duration=None, log=print):
+def run(out_path, hz=20.0, duration=None, log=print, auto=False):
   import cereal.messaging as messaging  # local import: keeps this file importable/testable off-car
   sl = _load_steer_limits()
 
-  topics = ('controlsState', 'carState', 'radarState', 'model', 'carControl', 'gpsLocationExternal')
+  topics = ('controlsState', 'carState', 'radarState', 'model', 'carControl', 'gpsLocationExternal') + (('plan',) if auto else ())
   subs = {t: messaging.sub_sock(t, conflate=True) for t in topics}
   sc = messaging.sub_sock('sendcan')    # drained in full every tick, like lightdash - a flood here never starves us
 
@@ -317,10 +448,24 @@ def run(out_path, hz=20.0, duration=None, log=print):
   prev_request, prev_t_659 = None, None     # for the steer_limits hypotheticals, see module docstring
   reported_fields = False
 
-  f = open(out_path, 'a')
-  f.write(json.dumps({'meta': 'driving_logger start', 't': time.time(), 'hz': hz,
-                       'note': 'read-only observational log; see module docstring for exact signal provenance'}) + '\n')
-  f.flush()
+  # RECORDER: in --auto the output is a ChunkWriter opened when a drive starts and closed when it ends
+  follows, shadow, last_car_t, last_plan_fcw, last_mm = [], None, None, False, None
+  if auto:
+    f = None
+    finish_leftovers()
+    follows = [(src, key, Follow(p)) for src, key, p in FOLLOW]
+    try:
+      sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+      import fcw_shadow
+      shadow = fcw_shadow.ShadowCompare()
+    except Exception as e:
+      fcw_shadow = None
+      log('driving_logger: FCW comparison not available (%r)' % (e,))
+  else:
+    f = open(out_path, 'a')
+    f.write(json.dumps({'meta': 'driving_logger start', 't': time.time(), 'hz': hz,
+                         'note': 'read-only observational log; see module docstring for exact signal provenance'}) + '\n')
+    f.flush()
 
   period = 1.0 / hz
   t_end = (time.monotonic() + duration) if duration else None
@@ -349,6 +494,32 @@ def run(out_path, hz=20.0, duration=None, log=print):
 
       car = messaging.recv_one_or_none(subs['carState'])
       rad = messaging.recv_one_or_none(subs['radarState'])
+      if auto:
+        pl = messaging.recv_one_or_none(subs['plan'])
+        if pl is not None:
+          try:
+            last_plan_fcw = bool(pl.plan.fcw)
+          except Exception:
+            pass
+        if car is not None:
+          last_car_t = now_mono
+        driving = last_car_t is not None and now_mono - last_car_t < DRIVE_END_S
+        if driving and f is None:                       # a drive starts: new chunk set, followed files from their end
+          f = ChunkWriter()
+          for _, _, fo in follows:
+            fo.skip_to_end()
+          if fcw_shadow is not None:
+            shadow = fcw_shadow.ShadowCompare()
+          f.write(json.dumps({'src': 'meta', 'meta': 'drive start', 't': round(time.time(), 3), 'hz': hz, 'drive': f.drive}) + '\n')
+          log('driving_logger: drive %s started' % f.drive)
+        elif not driving and f is not None:             # the drive ended: last chunk out, keep the disk in bounds
+          f.write(json.dumps({'src': 'meta', 'meta': 'drive end', 't': round(time.time(), 3)}) + '\n')
+          f.close(); log('driving_logger: drive %s ended, %d chunks' % (f.drive, f.n)); f = None
+          cap_dir('/data/maplog/map_*.jsonl', MAPLOG_MAX_BYTES)
+          cap_dir(os.path.join(DRIVE_ROOT, '*', 'c*.jsonl.gz'), DRIVELOG_MAX_BYTES)
+        if f is None:                                   # not driving: nothing to record, poll slowly
+          time.sleep(0.5); next_t = time.monotonic()
+          continue
       cc = messaging.recv_one_or_none(subs['carControl'])
       if cc is not None:
         try:
@@ -358,6 +529,7 @@ def run(out_path, hz=20.0, duration=None, log=print):
 
       mm = messaging.recv_one_or_none(subs['model'])
       if mm is not None:
+        last_mm = mm
         try:
           last_model = model_dict(mm.model)
         except Exception:
@@ -374,6 +546,8 @@ def run(out_path, hz=20.0, duration=None, log=print):
                           last_steer, None if t_659 is None else now_mono - t_659)
 
       sample = {'t': round(time.time(), 3), 'state': state}
+      if auto:
+        sample = {'src': 'car', 't': sample['t'], 'state': state}
       sample['ctrl_enabled'] = last_ctrl
       sample.update({'das_%s' % k: v for k, v in last_das.items()})
 
@@ -440,6 +614,20 @@ def run(out_path, hz=20.0, duration=None, log=print):
 
       f.write(json.dumps(sample) + '\n')
       n += 1
+      if auto:
+        for src, key, fo in follows:                     # ACC decisions + radar/map lines written since the last tick
+          for line in fo.read():
+            f.write('{"src":"%s","%s":%s}\n' % (src, key, line))
+        if shadow is not None and car is not None and rad is not None:   # FCW comparison (fcw_shadow.py's logic)
+          try:
+            l1, cs_ = rad.radarState.leadOne, car.carState
+            mf = fcw_shadow.model_fcw_from(last_mm.model, cs_.brakePressed) if last_mm is not None else None
+            for e in shadow.step(time.time(), cs_.vEgo, l1.status, l1.dRel, l1.vLead, l1.yRel,
+                                 cs_.leftBlinker or cs_.rightBlinker, last_plan_fcw, mf):
+              e['src'] = 'fcw'
+              f.write(json.dumps(e) + '\n')
+          except Exception:
+            pass
       if n % (int(hz) * 30) == 0:   # flush roughly every 30s of samples, not every line
         f.flush()
         log('driving_logger: %d samples written' % n)
@@ -451,9 +639,10 @@ def run(out_path, hz=20.0, duration=None, log=print):
       else:
         next_t = time.monotonic()
   finally:
-    f.flush()
-    f.close()
-    log('driving_logger: stopped, %d samples in %s' % (n, out_path))
+    if f is not None:
+      f.flush()
+      f.close()
+    log('driving_logger: stopped, %d samples in %s' % (n, DRIVE_ROOT if auto else out_path))
 
 
 def main(argv=None):
@@ -461,8 +650,20 @@ def main(argv=None):
   ap.add_argument('--out', default='/data/drivelog_%d.jsonl' % int(time.time()))
   ap.add_argument('--hz', type=float, default=20.0)
   ap.add_argument('--duration', type=float, default=None, help='seconds; default: run until Ctrl-C')
+  ap.add_argument('--auto', action='store_true', help='THE recorder: run forever, record every drive in chunks to %s' % DRIVE_ROOT)
   args = ap.parse_args(argv)
-  run(args.out, hz=args.hz, duration=args.duration)
+  if args.auto:
+    os.makedirs(DRIVE_ROOT, exist_ok=True)
+    since = os.path.join(DRIVE_ROOT, '.since')     # log_uploader: separate maplog/acclog files after this are already in the chunks
+    if not os.path.exists(since):
+      open(since, 'w').close()
+    import fcntl
+    lock = open(os.path.join(DRIVE_ROOT, '.lock'), 'w')
+    try:
+      fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)        # one recorder only (boot line + a manual start)
+    except OSError:
+      print('driving_logger: the recorder is already running'); return
+  run(args.out, hz=args.hz, duration=args.duration, auto=args.auto)
 
 
 if __name__ == '__main__':

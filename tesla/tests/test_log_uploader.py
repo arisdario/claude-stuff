@@ -129,5 +129,45 @@ class T(unittest.TestCase):
       srv.shutdown(); srv.server_close()
 
 
+
+  def test_live_chunks_sent_in_order_and_deleted(self):
+    srv = HTTPServer(('127.0.0.1', 0), Fake); threading.Thread(target=srv.serve_forever, daemon=True).start()
+    Fake.releases, Fake.assets, Fake.calls = {}, [], []
+    U.API = 'http://127.0.0.1:%d' % srv.server_port
+    orig = U.LIVE_GLOB
+    U.LIVE_GLOB = os.path.join(self.d, 'drivelog', '*', 'c*.jsonl.gz')
+    try:
+      dd = os.path.join(self.d, 'drivelog', '20261115_153000'); os.makedirs(dd)
+      for n in (2, 1):
+        with gzip.open(os.path.join(dd, 'c%04d.jsonl.gz' % n), 'wt') as g:
+          g.write('{"src":"car","n":%d}\n' % n)
+      open(os.path.join(dd, 'c0003.jsonl.part'), 'w').write('still writing')
+      sent, failed = U.run_live(U.GitHub('me/logs', 'tok', ctx=None), {})
+      self.assertEqual((sent, failed), (2, 0))
+      self.assertEqual([n for n, _ in Fake.assets], ['c0001.jsonl.gz', 'c0002.jsonl.gz'])   # oldest first, as uploaded (already gzip)
+      self.assertEqual(list(Fake.releases), ['drive-20261115_153000'])
+      self.assertEqual(os.listdir(dd), ['c0003.jsonl.part'])          # sent chunks deleted; the one being written stays
+    finally:
+      U.LIVE_GLOB = orig; srv.shutdown(); srv.server_close()
+
+  def test_merged_files_after_recorder_start_not_sent_twice(self):
+    orig = (U.RECORDER_SINCE, U.MERGED)
+    U.RECORDER_SINCE = os.path.join(self.d, '.since'); U.MERGED = (os.path.join(self.d, 'map_'),)
+    try:
+      old = self.mk('map_1.jsonl', 'x\n', age=7200)
+      open(U.RECORDER_SINCE, 'w').close(); t = time.time() - 3600; os.utime(U.RECORDER_SINCE, (t, t))
+      self.mk('map_2.jsonl', 'y\n', age=1800)                        # written after the recorder started: in its chunks
+      self.assertEqual([p for p, _, _ in U.pending({})], [old])
+    finally:
+      U.RECORDER_SINCE, U.MERGED = orig
+
+  def test_clean_sent(self):
+    a = self.mk('map_1.jsonl', 'abc\n'); b = self.mk('map_2.jsonl', 'defg\n')
+    U.save_state({a: {'size': os.path.getsize(a)}, b: {'size': 1}})  # b grew after it was sent: kept
+    import io, contextlib
+    with contextlib.redirect_stdout(io.StringIO()):
+      U.clean_sent()
+    self.assertFalse(os.path.exists(a)); self.assertTrue(os.path.exists(b))
+
 if __name__ == '__main__':
   unittest.main()
