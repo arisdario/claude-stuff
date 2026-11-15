@@ -447,6 +447,7 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
   t_ctrl = t_659 = None
   prev_request, prev_t_659 = None, None     # for the steer_limits hypotheticals, see module docstring
   reported_fields = False
+  last_leads, t_rad = (lead_dict(None), lead_dict(None)), None
 
   # RECORDER: in --auto the output is a ChunkWriter opened when a drive starts and closed when it ends
   follows, shadow, last_car_t, last_plan_fcw, last_mm = [], None, None, False, None
@@ -594,14 +595,16 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
         if request is not None:
           prev_request, prev_t_659 = request, t_659
 
+      # radarState comes at ~20 Hz, like this loop, so some ticks get no new message: keep the last leads ("sticky",
+      # like model / GPS) instead of writing all-None - that looked like the lead car flickering in and out.
       if rad is not None:
         try:
-          sample['lead1'] = lead_dict(rad.radarState.leadOne)
-          sample['lead2'] = lead_dict(rad.radarState.leadTwo)
+          last_leads = (lead_dict(rad.radarState.leadOne), lead_dict(rad.radarState.leadTwo))
         except Exception:
-          sample['lead1'] = sample['lead2'] = lead_dict(None)
-      else:
-        sample['lead1'] = sample['lead2'] = lead_dict(None)
+          last_leads = (lead_dict(None), lead_dict(None))
+        t_rad = now_mono
+      fresh = t_rad is not None and now_mono - t_rad < 0.5
+      sample['lead1'], sample['lead2'] = last_leads if fresh else (lead_dict(None), lead_dict(None))
 
       sample['model'] = last_model
       sample['gps'] = last_gps
