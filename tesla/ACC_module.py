@@ -12,7 +12,12 @@ ACC_LOG_OFF = '/data/acc_log_off'
 ACC_LOG_MAX_BYTES = 300 * 1024 * 1024
 FOLLOW_CLOSE_S = 12.0        # SMOOTHFOLLOW: close a gap error over ~12 s (12 m too far -> aim 3.6 km/h faster than the lead)
 FOLLOW_DEADBAND_KPH = 2.0   # press only when the set speed is this far from the target (slowing: when the gap is fine)
-FOLLOW_PRESS_MS = 1000      # speeding up: one +1 per second at most -> evenly spaced small steps = a smooth ramp
+FOLLOW_PRESS_MS = 1500      # speeding up: one +1 per 1.5 s at most -> evenly spaced small steps = a gentle ramp
+QUIET_GAP = (0.8, 1.5)      # QUIETFOLLOW: gap between 0.8x and 1.5x the wanted gap (2.0-3.75 s at 2.5 s) ...
+QUIET_SPEED_KPH = 3.0       # ... and the car ahead within 3 km/h of your speed: press NOTHING (a human holds the pedal;
+                            # 15 Nov: 33-40 set changes a minute while the gap barely moved = the restless feeling)
+DIST_SLOPE_S = 3.0          # the lead's speed from how the DISTANCE changes over the last 3 s (the radar's direct
+                            # relative speed read ~3 km/h low at 60-90 km/h, +-2 km/h scatter)
 FOLLOW_BIG_KPH = 6.0        # speeding up: target this far above AND the lead accelerating -> +5 (keeps up with a fast lead)
 FOLLOW_DECEL_PRESS_MS = 500 # slowing down: react quickly (the lead's CURRENT speed, a press every 0.5 s, -5 when far off)
 LEAD_SPEED_TAU_S = 2.0      # smoothing of the lead speed used for speeding up (radar vRel is noisy)
@@ -123,6 +128,7 @@ class ACCController():
     self.follow_target_kph = None
     self.lead_hist = []          # last 5 (lead speed kph, lead accel) - median against single radar blips
     self._last_lead = None       # (lead, time ms): held LEAD_HOLD_MS between radarState messages
+    self.dist_hist = []          # QUIETFOLLOW: (ms, lead distance) of the last DIST_SLOPE_S, for the true closing speed
     self._cap_since = None       # when the current uninterrupted curve limit started (ms)
     self._cap_hist = []          # (ms, cap kph) of that stretch, last CURVE_CONFIRM_MS
     self.follow_dir = 0          # +1 / -1: direction of the last follow press
@@ -361,6 +367,7 @@ class ACCController():
       lead_dist_m = sorted(h[2] for h in self.lead_hist)[mid]   # far leads jump 95 <-> 130 m (two cars): median too
     else:
       lead_speed_kph, a_lead_med = lead_speed_raw_kph, 0.
+    lead_est_kph = self._lead_speed_from_distance(CS, lead_dist_m)      # None until 1.5 s of steady distance
     # Relative velocity between the lead car and our set cruise speed.
     future_vrel_kph = lead_speed_kph - CS.v_cruise_actual
     # How much we can accelerate without exceeding the max allowed speed.
@@ -425,15 +432,25 @@ class ACCController():
           # asymmetric on purpose: speeding up uses the smoothed lead speed and is calm; slowing down uses the lead's
           # current speed (whichever is lower) and reacts quickly - a lead that brakes must never be followed lazily
           lead_kph_f = self._lead_speed_filtered(lead_speed_kph, current_time_ms)
+          # QUIETFOLLOW: the lead's speed from the distance change when available (unbiased), else the smoothed radar
+          lead_base_kph = lead_est_kph if lead_est_kph is not None else lead_kph_f
+          v_kph = CS.v_ego * CV.MS_TO_KPH
           gap_err_m = lead_dist_m - safe_dist_m
-          gap_kph = max(-8., min(8., gap_err_m / FOLLOW_CLOSE_S * CV.MS_TO_KPH))
+          gap_s = lead_dist_m / max(CS.v_ego, 1.)
+          in_band = QUIET_GAP[0] * follow_time_s <= gap_s <= QUIET_GAP[1] * follow_time_s
+          gap_kph = 0. if in_band else max(-8., min(8., gap_err_m / FOLLOW_CLOSE_S * CV.MS_TO_KPH))   # no gap chasing inside the band
           a_lead = a_lead_med
           ahead_kph = max(0., min(FOLLOW_ANTICIPATE_MAX, a_lead)) * FOLLOW_ANTICIPATE_S * CV.MS_TO_KPH   # only when it pulls away, capped
-          up_target_kph = min(lead_kph_f + ahead_kph + gap_kph, max_acc_speed_kph)
-          down_target_kph = min(lead_kph_f, lead_speed_kph) + gap_kph
+          up_target_kph = min(lead_base_kph + ahead_kph + gap_kph, max_acc_speed_kph)
+          # closer than wanted: the faster-reacting radar reading counts too (whichever is lower)
+          down_target_kph = (min(lead_base_kph, lead_speed_kph) if gap_err_m < 0 else lead_base_kph) + gap_kph
+          quiet = (in_band and abs(lead_base_kph - v_kph) < QUIET_SPEED_KPH
+                   and abs(CS.v_cruise_actual - v_kph) < QUIET_SPEED_KPH)   # gap fine, same speed, set speed = speed
           self.follow_target_kph = up_target_kph
           down_dead_kph = half_press_kph * 1.5 if gap_err_m < 0 else FOLLOW_DEADBAND_KPH   # closer than wanted: react sooner
           urgent = gap_err_m < -0.3 * safe_dist_m or lead_speed_kph < CS.v_ego * CV.MS_TO_KPH - 8.
+          if quiet and not urgent:
+            down_target_kph = up_target_kph = CS.v_cruise_actual             # nothing to do: hold the speed
           since_ms = current_time_ms - self.follow_dir_ms
           may_down = urgent or self.follow_dir != 1 or since_ms > FOLLOW_REVERSE_MS
           may_up = self.follow_dir != -1 or since_ms > FOLLOW_REVERSE_MS
@@ -527,6 +544,26 @@ class ACCController():
     if dist_m < 1.3 * safe_dist_m:
       return True
     return closing_ms > 0.5 and (dist_m - safe_dist_m) / closing_ms < 8.
+
+  def _lead_speed_from_distance(self, CS, dist_m):
+    """QUIETFOLLOW: the lead's speed = your speed + how fast the distance changes (least-squares slope over the last
+    DIST_SLOPE_S). Unbiased, unlike the radar's relative speed. None until 1.5 s of steady data (restarts on a jump)."""
+    now_ms = _current_time_millis()
+    if dist_m <= 0:
+      self.dist_hist = []
+      return None
+    if self.dist_hist and (abs(dist_m - self.dist_hist[-1][1]) > 4. or now_ms - self.dist_hist[-1][0] > 600):
+      self.dist_hist = []                               # another car / lost for a while: start again
+    self.dist_hist = [h for h in self.dist_hist if now_ms - h[0] <= DIST_SLOPE_S * 1000] + [(now_ms, dist_m)]
+    if len(self.dist_hist) < 10 or self.dist_hist[-1][0] - self.dist_hist[0][0] < 1500:
+      return None
+    n = len(self.dist_hist)
+    mt = sum(h[0] for h in self.dist_hist) / float(n); md = sum(h[1] for h in self.dist_hist) / float(n)
+    den = sum((h[0] - mt) ** 2 for h in self.dist_hist)
+    if den <= 0:
+      return None
+    slope_ms = sum((h[0] - mt) * (h[1] - md) for h in self.dist_hist) / den * 1000.   # m per s
+    return (CS.v_ego + slope_ms) * CV.MS_TO_KPH
 
   def _lead_speed_filtered(self, lead_kph, now_ms):
     """SMOOTHFOLLOW: lead speed smoothed with a ~1.5 s time constant; restarts if the lead was not seen for 2 s"""
