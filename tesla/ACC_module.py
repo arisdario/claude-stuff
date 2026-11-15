@@ -10,6 +10,14 @@ import time
 ACC_LOG_DIR = '/data/acclog'          # ACCLOG: one line per ACC cycle (20/s) while ACC is on - see _acc_log()
 ACC_LOG_OFF = '/data/acc_log_off'
 ACC_LOG_MAX_BYTES = 300 * 1024 * 1024
+FOLLOW_CLOSE_S = 12.0        # SMOOTHFOLLOW: close a gap error over ~12 s (12 m too far -> aim 3.6 km/h faster than the lead)
+FOLLOW_DEADBAND_KPH = 2.0   # press only when the set speed is this far from the target (slowing: when the gap is fine)
+FOLLOW_PRESS_MS = 1000      # speeding up: one +1 per second at most -> evenly spaced small steps = a smooth ramp
+FOLLOW_BIG_KPH = 6.0        # speeding up: target this far above AND the lead accelerating -> +5 (keeps up with a fast lead)
+FOLLOW_DECEL_PRESS_MS = 500 # slowing down: react quickly (the lead's CURRENT speed, a press every 0.5 s, -5 when far off)
+LEAD_SPEED_TAU_S = 2.0      # smoothing of the lead speed used for speeding up (radar vRel is noisy)
+FOLLOW_ANTICIPATE_S = 2.5   # aim at the lead's speed this many seconds ahead when it pulls away (its acceleration, capped)
+
 
 
 class ACCState():
@@ -101,6 +109,10 @@ class ACCController():
     self._log_buf = []
     self._log_check_t = 0.
     self._log_off = False
+    # SMOOTHFOLLOW state
+    self.lead_kph_f = None
+    self.lead_kph_t = 0
+    self.follow_target_kph = None
 
   # Updates the internal state of this controller based on user input,
   # specifically the steering wheel mounted cruise control stalk, and OpenPilot
@@ -370,31 +382,38 @@ class ACCController():
           msg =  "-1 (approaching too fast)"
           button = CruiseButtons.DECEL_SET
           self.new_speed = CS.v_ego * CV.MS_TO_KPH - half_press_kph
-        elif lead_dist_m < safe_dist_m and future_vrel_kph <= 0:
-          msg =  "-1 (Too close)"
-          button = CruiseButtons.DECEL_SET
-          self.new_speed = CS.v_ego * CV.MS_TO_KPH - half_press_kph
-        # Make slow adjustments if close to the safe distance.
-        # only adjust every 1 secs
-        elif (lead_dist_m < safe_dist_m * 1.3
-              and future_vrel_kph < -1 * half_press_kph
-              and self._no_action_for(milliseconds=1000)):
-          msg =  "-1 (Near safe distance)"
-          button = CruiseButtons.DECEL_SET
-          self.new_speed = CS.v_ego * CV.MS_TO_KPH - half_press_kph
+        # SMOOTHFOLLOW: instead of chasing the gap press by press (+1 up to 3x a second when the lead pulled away, then
+        # "-1 near safe distance" - felt as a push and a sag), aim the set speed at ONE target: the lead's smoothed speed
+        # plus a slow correction that closes / opens the gap towards safe_dist over FOLLOW_CLOSE_S. Press +1/-1 only when
+        # the car's set speed is FOLLOW_DEADBAND_KPH or more away from it, at most every FOLLOW_PRESS_MS. The danger cases
+        # above (much too close, closing fast, slow traffic) still act at once.
+        else:
+          # asymmetric on purpose: speeding up uses the smoothed lead speed and is calm; slowing down uses the lead's
+          # current speed (whichever is lower) and reacts quickly - a lead that brakes must never be followed lazily
+          lead_kph_f = self._lead_speed_filtered(lead_speed_kph, current_time_ms)
+          gap_err_m = lead_dist_m - safe_dist_m
+          gap_kph = max(-8., min(8., gap_err_m / FOLLOW_CLOSE_S * CV.MS_TO_KPH))
+          a_lead = getattr(lead_car, 'aLeadK', None)
+          if a_lead is None:
+            a_lead = getattr(lead_car, 'aRel', 0.) + getattr(CS, 'a_ego', 0.)
+          ahead_kph = max(0., min(1.5, a_lead)) * FOLLOW_ANTICIPATE_S * CV.MS_TO_KPH   # only when it pulls away, capped
+          up_target_kph = min(lead_kph_f + ahead_kph + gap_kph, max_acc_speed_kph)
+          down_target_kph = min(lead_kph_f, lead_speed_kph) + gap_kph
+          self.follow_target_kph = up_target_kph
+          down_dead_kph = half_press_kph * 1.5 if gap_err_m < 0 else FOLLOW_DEADBAND_KPH   # closer than wanted: react sooner
+          if (down_target_kph <= CS.v_cruise_actual - down_dead_kph
+              and self._no_action_for(milliseconds=FOLLOW_DECEL_PRESS_MS) and self._no_human_action_for(milliseconds=1000)):
+            big = down_target_kph <= CS.v_cruise_actual - full_press_kph
+            msg = "%s (follow: aim %.0f)" % ("-5" if big else "-1", down_target_kph)
+            button = CruiseButtons.DECEL_2ND if big else CruiseButtons.DECEL_SET
+            self.new_speed = CS.v_cruise_actual - (full_press_kph if big else half_press_kph)
+          elif (up_target_kph - CS.v_cruise_actual >= FOLLOW_DEADBAND_KPH and available_speed_kph >= half_press_kph
+                and self._no_action_for(milliseconds=FOLLOW_PRESS_MS) and self._no_human_action_for(milliseconds=1000)):
+            big = up_target_kph - CS.v_cruise_actual >= FOLLOW_BIG_KPH and a_lead > 0.3 and available_speed_kph >= full_press_kph
+            msg = "%s (follow: aim %.0f)" % ("+5" if big else "+1", up_target_kph)
+            button = CruiseButtons.RES_ACCEL_2ND if big else CruiseButtons.RES_ACCEL
+            self.new_speed = CS.v_cruise_actual + (full_press_kph if big else half_press_kph)
 
-        ### Speed up ###
-        elif (available_speed_kph > half_press_kph
-              and lead_dist_m > safe_dist_m
-              and self._no_human_action_for(milliseconds=1000)):
-          lead_is_far = lead_dist_m > safe_dist_m * 1.75
-          closing = future_vrel_kph < -2
-          lead_is_pulling_away = future_vrel_kph > 4
-          if lead_is_far and not closing or lead_is_pulling_away:
-            msg =  "+1 (Beyond safe distance and speed)"
-            button = CruiseButtons.RES_ACCEL
-            self.new_speed = CS.v_ego * CV.MS_TO_KPH + half_press_kph
-          
       # If lead_dist is reported as 0, no one is detected in front of you so you
       # can speed up. Only accel on straight-aways; vision radar often
       # loses lead car in a turn.
@@ -463,6 +482,16 @@ class ACCController():
       return sys.maxsize
     return abs(float(lead_car.dRel) / lead_car.vRel)
     
+  def _lead_speed_filtered(self, lead_kph, now_ms):
+    """SMOOTHFOLLOW: lead speed smoothed with a ~1.5 s time constant; restarts if the lead was not seen for 2 s"""
+    if self.lead_kph_f is None or now_ms - self.lead_kph_t > 2000:
+      self.lead_kph_f = lead_kph
+    else:
+      k = min(1., (now_ms - self.lead_kph_t) / 1000. / LEAD_SPEED_TAU_S)
+      self.lead_kph_f += (lead_kph - self.lead_kph_f) * k
+    self.lead_kph_t = now_ms
+    return self.lead_kph_f
+
   def _curve_cap_kph(self, CS):
     """CURVEACC: the speed (kph) the curve ahead allows now (999 = no curve). Ignored while signalling / changing lane
     (the camera path bends then without a curve). Warns once every 3 s when far too fast for the buttons alone."""
