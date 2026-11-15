@@ -492,6 +492,37 @@ def lead_dict(lead):
   return out
 
 
+PLAN_FIELDS = (('src', 'longitudinalPlanSource'), ('v_start', 'vStart'), ('a_start', 'aStart'), ('v_target', 'vTarget'),
+               ('a_target', 'aTarget'), ('v_target_future', 'vTargetFuture'), ('v_cruise', 'vCruise'), ('a_cruise', 'aCruise'),
+               ('has_lead', 'hasLead'))
+
+
+def plan_dict(p):
+  """PLANLOG: the planner's output (m/s, m/s2). Any field missing on this schema -> None, never a crash."""
+  out = {}
+  for k, name in PLAN_FIELDS:
+    try:
+      v = getattr(p, name)
+      out[k] = str(v) if k == 'src' else bool(v) if k == 'has_lead' else round(float(v), 3)
+    except Exception:
+      out[k] = None
+  return out
+
+
+def long_ctrl_dict(c):
+  """PLANLOG: openpilot's longitudinal state (the planner only plans in 'pid') and the set speed it plans for (km/h)"""
+  out = {'long_control_state': None, 'v_cruise_kph': None}
+  try:
+    out['long_control_state'] = str(c.longControlState)
+  except Exception:
+    pass
+  try:
+    out['v_cruise_kph'] = round(float(c.vCruise), 1)
+  except Exception:
+    pass
+  return out
+
+
 def sl_hypotheticals(sl, request, prev_request, measured, v_ego, t_659=None, prev_t_659=None):
   """pure wrapper around steer_limits.limit_angle() for the two candidate strengths; see module
   docstring (STEER_LIMITS HYPOTHETICALS). None in, None out - never raises, never applied anywhere."""
@@ -566,6 +597,7 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
   prev_request, prev_t_659 = None, None     # for the steer_limits hypotheticals, see module docstring
   reported_fields = False
   last_leads, t_rad = (lead_dict(None), lead_dict(None)), None
+  last_plan, t_plan, last_long_ctrl = plan_dict(None), None, {'long_control_state': None, 'v_cruise_kph': None}
 
   # RECORDER: in --auto the output is a ChunkWriter opened when a drive starts and closed when it ends
   follows, shadow, last_car_t, last_plan_fcw, last_mm = [], None, None, False, None
@@ -617,6 +649,7 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
           last_ctrl = bool(cs.controlsState.enabled)
         except Exception:
           last_ctrl = None
+        last_long_ctrl = long_ctrl_dict(cs.controlsState)
         t_ctrl = now_mono
 
       car = rx('carState')
@@ -628,6 +661,7 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
             last_plan_fcw = bool(pl.plan.fcw)
           except Exception:
             pass
+          last_plan, t_plan = plan_dict(pl.plan), now_mono
         if car is not None:
           last_car_t = now_mono
         driving = last_car_t is not None and now_mono - last_car_t < DRIVE_END_S
@@ -733,6 +767,9 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
       fresh = t_rad is not None and now_mono - t_rad < 0.5
       sample['lead1'], sample['lead2'] = last_leads if fresh else (lead_dict(None), lead_dict(None))
 
+      # PLANLOG: what openpilot's longitudinal planner wants (the ACC redesign follows it) - None when older than 0.5 s
+      sample['plan'] = last_plan if t_plan is not None and now_mono - t_plan < 0.5 else plan_dict(None)
+      sample.update(last_long_ctrl if t_ctrl is not None and now_mono - t_ctrl < STALE_S else long_ctrl_dict(None))
       sample['model'] = last_model
       sample['gps'] = last_gps
 
