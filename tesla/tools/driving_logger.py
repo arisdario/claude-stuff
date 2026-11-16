@@ -591,6 +591,45 @@ MODEL_LEAD_FIELDS = (('prob', 'lead.prob'), ('dist', 'lead.dist'), ('std', 'lead
                      ('rel_y', 'lead.relY'), ('future_prob', 'leadFuture.prob'), ('future_dist', 'leadFuture.dist'))
 PATH_FIELDS = (('d_poly', 'dPoly'), ('lane_width', 'laneWidth'), ('l_prob', 'lProb'), ('r_prob', 'rProb'),
                ('angle_des', 'angleSteers'), ('mpc_valid', 'mpcSolutionValid'))
+MODEL_FCW_AT = 69      # model.freePath: 69 road-edge values, then the 0.8.12 adapter's [hard brake 1/0 (-1 = none), P(5), P(3)]
+
+
+def model_plan_dict(m):
+  """MODELPLAN: what the camera model itself plans and predicts - published by the 0.8.12 adapter but never read by the
+  0.7.5 planner, so it is logged to compare with what the car really did (does the model ease off earlier than radar +
+  MPC when the lead changes lane in front of a slower car? does it ever plan to slow for nothing?).
+    v / a     : the ego speed (m/s, absolute) / acceleration (m/s2) the model plans at t = 0, 1, .. 9 s (model.longitudinal)
+    p_brake / p_gas / p_steer : the model's probability that the driver brakes / presses gas / steers (meta, now)
+    p_engaged : the model's probability that openpilot is engaged
+    hard_brake, p_brake5, p_brake3 : the model FCW (0.8.12 only): hard brake predicted, P(braking 5 / 3 m/s2)
+  Anything missing -> None; never raises."""
+  out = {'v': None, 'a': None, 'p_brake': None, 'p_gas': None, 'p_steer': None, 'p_engaged': None,
+         'hard_brake': None, 'p_brake5': None, 'p_brake3': None}
+  if m is None:
+    return out
+  try:
+    v = [round(float(x), 2) for x in m.longitudinal.speeds]
+    a = [round(float(x), 2) for x in m.longitudinal.accelerations]
+    if v and len(v) == len(a):
+      out['v'], out['a'] = v, a
+  except Exception:
+    pass
+  for k, attr in (('p_brake', 'brakeDisengageProb'), ('p_gas', 'gasDisengageProb'), ('p_steer', 'steerOverrideProb'),
+                  ('p_engaged', 'engagedProb')):
+    try:
+      out[k] = round(float(getattr(m.meta, attr)), 3)
+    except Exception:
+      pass
+  try:
+    fp = list(m.freePath)
+    if len(fp) >= MODEL_FCW_AT + 3 and fp[0] == 1.0 and fp[MODEL_FCW_AT] >= 0:
+      out['hard_brake'] = fp[MODEL_FCW_AT] == 1.0
+      out['p_brake5'], out['p_brake3'] = round(float(fp[MODEL_FCW_AT + 1]), 3), round(float(fp[MODEL_FCW_AT + 2]), 3)
+  except Exception:
+    pass
+  return out
+
+
 ALERT_FIELDS = (('text1', 'alertText1'), ('text2', 'alertText2'), ('status', 'alertStatus'), ('type', 'alertType'))
 
 
@@ -858,6 +897,7 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
   last_tracks, t_tracks = None, None      # RADAR OBJECTS: last liveTracks list
   last_ctrl_x, last_cc_x = fields_dict(None, CTRL_FIELDS), fields_dict(None, CC_FIELDS)    # CLASSIFIED EXTRAS (LOG_FORMAT.md)
   last_model_lead, last_path = fields_dict(None, MODEL_LEAD_FIELDS), fields_dict(None, PATH_FIELDS)
+  last_model_plan, t_model = model_plan_dict(None), None       # MODELPLAN: the model's own speed plan / predictions
   last_alert, written_alert = None, None
   sysm, kmsg, t_sys = (SysSampler(), Kmsg(), -1e9) if auto else (None, None, -1e9)          # MODELOG: ACC button mode, re-read every 2 s (you can change it while driving)
 
@@ -966,6 +1006,7 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
         except Exception:
           pass
         last_model_lead = fields_dict(mm.model, MODEL_LEAD_FIELDS)
+        last_model_plan, t_model = model_plan_dict(mm.model), now_mono
       gp = rx('gpsLocationExternal')
       if gp is not None:
         try:
@@ -1049,6 +1090,8 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
         sample['cc'] = last_cc_x                   # what openpilot sent: pcm_speed (speed to cruise), HUD lead ...
         sample['model_lead'] = last_model_lead     # the CAMERA model's own lead (prob < 0.5 -> no camera lead)
         sample['path'] = last_path                 # predicted path / lanes (pathPlan) - places radar objects
+        sample['model_plan'] = (last_model_plan if t_model is not None and now_mono - t_model < 0.5
+                                else model_plan_dict(None))   # MODELPLAN: the model's own speed plan (unused by the planner)
       sample['gps'] = last_gps
 
       if not reported_fields and car is not None and rad is not None:

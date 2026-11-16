@@ -37,6 +37,7 @@ the name says `kph`. A field the message does not have is `null` (never a crash)
 | `cc` | `pcm_speed` (speed openpilot asks cruise for), `accel_override`, `cancel`, `hud_lead`, `hud_set_speed`, `gas`, `brake` | carControl |
 | leads | `lead1`, `lead2` {`status`, `dRel`, `vRel`, `yRel`, `aRel`, `vLead`, `vLeadK`, `aLeadK`, `aLeadTau`, `modelProb`, `radar`, `fcw`} — `radar` False = camera-only lead, `modelProb` 0 = radar-only lead (radard patch), `lead2` = the car beyond the lead with the patch | radarState |
 | `model_lead` | the CAMERA model's own lead: `prob` (below 0.5 openpilot does not accept a car), `dist`, `std`, `rel_vel`, `rel_y`, `future_prob`, `future_dist` | model |
+| `model_plan` | what the camera model ITSELF plans — the 0.7.5 planner never reads it, it is logged to compare: `v` / `a` = the speed (m/s, absolute) / acceleration it plans at t = 0, 1 … 9 s; `p_brake`, `p_gas`, `p_steer` = its probability that the driver brakes / presses gas / steers; `p_engaged`; model FCW `hard_brake`, `p_brake5`, `p_brake3` (P of braking 5 / 3 m/s²). All `null` when the model message is older than 0.5 s | model (0.8.12 adapter) |
 | `model` | path / lane points every 4 m to 100 m, lane probabilities | model |
 | `path` | `d_poly` (predicted path, used to place radar objects), `lane_width`, `l_prob`, `r_prob`, `angle_des`, `mpc_valid` | pathPlan |
 | `gps` | `latitude`, `longitude`, `altitude`, `accuracy`, `speed`, `bearingDeg` (the car's own GPS) | gpsLocationExternal |

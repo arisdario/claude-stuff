@@ -306,6 +306,26 @@ class TestClassifiedExtras(unittest.TestCase):
     p = NS(); p.dPoly = [0.001, -0.02, 0.3, 0.1]; p.laneWidth = 3.4
     d = DL.fields_dict(p, DL.PATH_FIELDS); self.assertEqual(d['d_poly'], [0.001, -0.02, 0.3, 0.1]); self.assertEqual(d['lane_width'], 3.4)
 
+  def test_model_plan(self):
+    NS = type('NS', (), {})
+    self.assertTrue(all(v is None for v in DL.model_plan_dict(None).values()))
+    m = NS(); m.longitudinal = NS(); m.meta = NS()
+    m.longitudinal.speeds = [33.333, 33.1, 32.6, 31.9, 31.0, 30.2, 29.6, 29.2, 29.0, 28.9]
+    m.longitudinal.accelerations = [-0.1, -0.25, -0.5, -0.7, -0.8, -0.7, -0.5, -0.3, -0.2, -0.1]
+    m.meta.brakeDisengageProb, m.meta.gasDisengageProb, m.meta.steerOverrideProb, m.meta.engagedProb = 0.41234, 0.01, 0.02, 0.9
+    m.freePath = [1.0] + [0.0] * 68 + [0.0, 0.05, 0.3]               # 69 road-edge values, then the model FCW
+    d = DL.model_plan_dict(m)
+    self.assertEqual(d['v'][0], 33.33); self.assertEqual(len(d['v']), 10); self.assertEqual(d['a'][4], -0.8)
+    self.assertEqual(d['p_brake'], 0.412); self.assertEqual(d['p_engaged'], 0.9)
+    self.assertIs(d['hard_brake'], False); self.assertEqual(d['p_brake5'], 0.05); self.assertEqual(d['p_brake3'], 0.3)
+    m.freePath = [1.0] + [0.0] * 68 + [-1.0, 0.0, 0.0]               # 0.8.3: no model FCW -> None, not False
+    self.assertIsNone(DL.model_plan_dict(m)['hard_brake'])
+    m.longitudinal.speeds, m.longitudinal.accelerations = [], []     # stock model without a speed plan -> None
+    self.assertIsNone(DL.model_plan_dict(m)['v'])
+    e = NS()                                                         # fields missing entirely: None, no crash
+    self.assertTrue(all(v is None for v in DL.model_plan_dict(e).values()))
+    json.dumps(d)
+
   def test_lead_dict_has_source_flags(self):
     L = type('L', (), dict(status=True, dRel=130., vRel=-1., yRel=0.2, aRel=0., vLeadK=30., aLeadK=0., vLead=30., aLeadTau=1.5,
                            modelProb=0.0, radar=True, fcw=False))
