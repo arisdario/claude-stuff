@@ -6,6 +6,7 @@
 #include "common/util.h"
 #include "snpemodel.h"
 #ifdef USE_THNEED
+#include "../thneed/thneed.h"
 #include "../thneed/input_map.h"
 #endif
 
@@ -140,11 +141,11 @@ std::unique_ptr<zdl::DlSystem::IUserBuffer> SNPEModel::addExtra(float *state, in
 // from then on (0.8.3 stopped modeld). This frame's output is valid either way.
 int SNPEModel::thneed_start(float *net_input_buf) {
   if (access("/data/thneed_off", F_OK) == 0 || getenv("THNEED_OFF") != NULL) {
-    printf("thneed: switched off (/data/thneed_off or THNEED_OFF) - plain SNPE\n");
+    fprintf(stderr, "thneed: switched off (/data/thneed_off or THNEED_OFF) - plain SNPE\n");
     return -1;
   }
   if (!recurrent || !trafficConvention || !desire || !output_buf || input_floats == 0) {
-    printf("thneed: this model does not have the 4 inputs thneed expects - plain SNPE\n");
+    fprintf(stderr, "thneed: this model does not have the 4 inputs thneed expects - plain SNPE\n");
     return -1;
   }
   assert(inputBuffer->setBufferAddress(net_input_buf));
@@ -164,12 +165,12 @@ int SNPEModel::thneed_start(float *net_input_buf) {
   float *ourp[4] = {net_input_buf, recurrent, desire, trafficConvention};
   int perm[4];
   if (thneed->failed) {
-    printf("thneed: recording unusable (%s) - plain SNPE\n", thneed->why_failed.c_str());
+    fprintf(stderr, "thneed: recording unusable (%s) - plain SNPE\n", thneed->why_failed.c_str());
   } else if (thneed->inputs.size() != 4 || thneed->output == NULL ||
              !thneed_match_inputs(thneed->input_sizes.data(), 4, ours, 4, perm)) {
-    printf("thneed: found %zu inputs (want 4), output %s - not this SNPE's layout - plain SNPE\n",
+    fprintf(stderr, "thneed: found %zu inputs (want 4), output %s - not this SNPE's layout - plain SNPE\n",
            thneed->inputs.size(), thneed->output ? "found" : "NOT found");
-    for (size_t i = 0; i < thneed->input_sizes.size(); i++) printf("  thneed input %zu: %zu bytes\n", i, thneed->input_sizes[i]);
+    for (size_t i = 0; i < thneed->input_sizes.size(); i++) fprintf(stderr, "  thneed input %zu: %zu bytes\n", i, thneed->input_sizes[i]);
   } else {
     for (int i = 0; i < 4; i++) {
       thneed_in[i] = ourp[perm[i]]; thneed_in_bytes[i] = ours[perm[i]];
@@ -179,14 +180,14 @@ int SNPEModel::thneed_start(float *net_input_buf) {
     memset(recurrent, 0, recurrent_size*sizeof(float));
     bool ran = thneed->execute(thneed_in, thneed_in_bytes, output_buf);
     if (ran && memcmp(output_buf, golden, output_floats*sizeof(float)) == 0) {
-      printf("thneed selftest passed (%zu GPU commands replayed)\n", thneed->cmds.size());
+      fprintf(stderr, "thneed selftest passed (%zu GPU commands replayed)\n", thneed->cmds.size());
       result = 1;
     } else {
       size_t bad = 0; float worst = 0.f;
       for (size_t i = 0; i < output_floats; i++) {
         if (output_buf[i] != golden[i]) { bad++; float d = fabsf(output_buf[i] - golden[i]); if (d > worst) worst = d; }
       }
-      printf("thneed selftest FAILED (replay %s, %zu of %zu outputs differ, largest difference %g) - plain SNPE\n",
+      fprintf(stderr, "thneed selftest FAILED (replay %s, %zu of %zu outputs differ, largest difference %g) - plain SNPE\n",
              ran ? "ran" : "did not run", bad, output_floats, worst);
     }
   }
@@ -205,7 +206,7 @@ void SNPEModel::execute(float *net_input_buf, int buf_size) {
     } else {
       thneed_in[thneed_image] = net_input_buf;
       if (thneed->execute(thneed_in, thneed_in_bytes, output_buf)) return;
-      printf("thneed: replay failed - plain SNPE from now on\n");
+      fprintf(stderr, "thneed: replay failed - plain SNPE from now on\n");
       thneed_state = -1;
     }
   }

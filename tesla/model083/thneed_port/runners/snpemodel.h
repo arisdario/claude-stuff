@@ -13,9 +13,11 @@
 
 #include "runmodel.h"
 
-#ifdef USE_THNEED
-#include "../thneed/thneed.h"   // THNEED (tesla/model083/thneed_port): replay of the recorded GPU commands, see THNEED.md
-#endif
+// THNEED (tesla/model083/thneed_port, THNEED.md). The class below has THE SAME LAYOUT with or without USE_THNEED:
+// driving.cc creates the object, snpemodel.cc builds it, and they are not compiled with the same flags (16 Nov 2026:
+// a layout that depended on USE_THNEED made driving.cc allocate a smaller object than the constructor wrote -> SIGBUS).
+// So: no #ifdef inside the class, and Thneed is only declared here (its header is included by snpemodel.cc).
+class Thneed;
 
 #define USE_CPU_RUNTIME 0
 #define USE_GPU_RUNTIME 1
@@ -32,18 +34,14 @@ public:
   void addDesire(float *state, int state_size);
   void execute(float *net_input_buf, int buf_size);
 private:
-#ifdef USE_THNEED
   // THNEED: 0 = not tried yet, 1 = running on the replay, -1 = plain SNPE (switched off, or the self-test failed)
   int thneed_state = 0;
   Thneed *thneed = NULL;
-  float *thneed_in[4];
-  size_t thneed_in_bytes[4];
+  float *thneed_in[4] = {NULL, NULL, NULL, NULL};
+  size_t thneed_in_bytes[4] = {0, 0, 0, 0};
   int thneed_image = -1;                 // which of thneed's inputs is the camera image (its pointer is set every frame)
-  int thneed_start(float *net_input_buf); // records + self-tests on the first frame; returns the new thneed_state
-#endif
-#ifdef QCOM
-  zdl::DlSystem::Runtime_t runtime_used;
-#endif
+  int thneed_start(float *net_input_buf); // records + self-tests on the first frame (defined only with USE_THNEED)
+  zdl::DlSystem::Runtime_t runtime_used = zdl::DlSystem::Runtime_t::CPU;
   float *output_buf = NULL;              // THNEED needs these (0.7.5 did not keep them)
   size_t output_floats = 0;
   size_t input_floats = 0;

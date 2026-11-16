@@ -45,8 +45,16 @@ class T(unittest.TestCase):
     self.assertIn(']+common, LIBS=libs)', dm)                            # driver monitoring: plain SNPE objects
     self.assertIn(']+modeld_objs, LIBS=libs)', s[s.index("lenv.Program('_modeld'"):])
 
+  def test_class_layout_does_not_depend_on_the_macro(self):
+    # 16 Nov 2026: members under #ifdef USE_THNEED -> driving.cc (built without it) allocated 168 bytes, the constructor
+    # (built with it) wrote 248 -> SIGBUS at modeld start. No preprocessor line may sit inside the class.
+    h = read('runners/snpemodel.h')
+    body = h[h.index('class SNPEModel'):h.index('};', h.index('class SNPEModel'))]
+    self.assertFalse([l for l in body.split('\n') if l.strip().startswith('#')])
+    self.assertIn('class Thneed;', h); self.assertNotIn('thneed/thneed.h', h)
+
   def test_runner_thneed_only_behind_the_macro(self):
-    s = read('runners/snpemodel.cc') + read('runners/snpemodel.h')
+    s = read('runners/snpemodel.cc')        # the header declares the thneed fields always (same layout), the CODE is behind the macro
     depth, inside = 0, []
     for line in s.split('\n'):
       if line.startswith('#ifdef USE_THNEED'):
@@ -89,7 +97,8 @@ class T(unittest.TestCase):
       'unusable': 'thneed: recording unusable: x - plain SNPE\nX: 40.0 ms per run, CPU 30.0 ms per run (user+sys, all threads), output checksum 00000000deadbeef',
       'differs': 'thneed selftest passed (9 GPU commands replayed)\nX: 30.0 ms per run, CPU 8.0 ms per run (user+sys, all threads), output checksum 1111111111111111',
     }
-    for scenario, kept in (('works', True), ('crash', False), ('unusable', False), ('differs', False)):
+    BENCH['modeld_died'] = BENCH['works']      # the bench passes, but the REAL modeld dies at start (16 Nov 2026)
+    for scenario, kept in (('works', True), ('crash', False), ('unusable', False), ('differs', False), ('modeld_died', False)):
       d = tempfile.mkdtemp()
       try:
         M = os.path.join(d, 'op', 'selfdrive', 'modeld')
@@ -97,6 +106,9 @@ class T(unittest.TestCase):
         os.makedirs(os.path.join(M, 'models'), exist_ok=True)
         open(os.path.join(M, 'models', 'model0812_adapter.h'), 'w').close()
         open(os.path.join(M, '_modeld'), 'w').write('OLD')
+        open(os.path.join(M, 'modeld'), 'w').write('#!/bin/sh\necho "loaded model with size: 1"\n' +
+                                                   ('exit 1\n' if scenario == 'modeld_died' else 'sleep 30\n'))
+        os.chmod(os.path.join(M, 'modeld'), 0o755)
         bindir = os.path.join(d, 'bin'); os.makedirs(bindir)
         plain = 'X: 40.0 ms per run, CPU 30.0 ms per run (user+sys, all threads), output checksum 00000000deadbeef'
         bench = '#!/bin/sh\nif [ -n "$THNEED_OFF" ]; then echo "%s"; else printf "%s\\n"; fi\n' % (plain, BENCH[scenario])
@@ -106,7 +118,7 @@ class T(unittest.TestCase):
           % (M, bench.replace("'", "'\\''"), M, M, M))
         open(os.path.join(bindir, 'pgrep'), 'w').write('#!/bin/sh\nexit 1\n')
         for f in ('scons', 'pgrep'): os.chmod(os.path.join(bindir, f), 0o755)
-        env = dict(os.environ, OP=os.path.join(d, 'op'), BK=os.path.join(d, 'bk'), PATH=bindir + ':' + os.environ['PATH'])
+        env = dict(os.environ, OP=os.path.join(d, 'op'), BK=os.path.join(d, 'bk'), PATH=bindir + ':' + os.environ['PATH'], THNEED_GATE_S='1')
         r = subprocess.run(['sh', os.path.join(ROOT, 'install_thneed.sh'), '--yes'], env=env, cwd=d,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
         modeld = open(os.path.join(M, '_modeld')).read().strip()

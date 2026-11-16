@@ -67,7 +67,9 @@ int ioctl(int filedes, unsigned long request, void *argp) {
   }
 
   int ret = my_ioctl(filedes, request, argp);
-  if (ret != 0) printf("ioctl returned %d with errno %d\n", ret, errno);
+  // PORT: only the GPU driver's failures are reported (0.8.3 printed every failed ioctl in the process, e.g. errno 25
+  // from devices that are not the GPU - 44 lines of noise per start on this EON)
+  if (ret != 0 && ((request >> 8) & 0xff) == KGSL_IOC_TYPE) fprintf(stderr, "thneed: GPU ioctl 0x%lx returned %d, errno %d\n", request, ret, errno);
   return ret;
 }
 

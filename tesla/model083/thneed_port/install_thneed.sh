@@ -13,10 +13,13 @@ M=$OP/selfdrive/modeld
 HERE=$(cd "$(dirname "$0")" && pwd)
 BK=${BK:-/data/thneed_backup}
 SNPE_LIB=/data/pythonpath/phonelibs/snpe/aarch64
+GATE_S=${THNEED_GATE_S:-20}     # how long the real modeld must survive its start
 FILES="SConscript runners/snpemodel.cc runners/snpemodel.h"
 NEW="thneed/thneed.cc thneed/thneed.h thneed/input_map.h thneed/bench.cc thneed/include/msm_kgsl.h"
 # the car's files this port was made from (Tinkla 0.7.5.a, /data/openpilot as uploaded on 15 Nov 2026)
 WANT="SConscript:1a889cc27436bd023d3104283131354a runners/snpemodel.cc:eeedef0912cbbaa343b2295bd61e34a3 runners/snpemodel.h:464e4477b48c9592d23ffa4b4623a269"
+# the first version of this port (73a76e3, 16 Nov 2026 - crashed modeld at start: class layout differed between files)
+OLDPORT="SConscript:6534d7877e5b19ac589bc01c2628f6e5 runners/snpemodel.cc:f5afcb88d2a92a81173ae32649409ac4 runners/snpemodel.h:bae049c4cb271b8b0717a3d4722f80a3"
 
 [ -d "$M" ] || { echo "STOP: $M not found (set OP=...)"; exit 1; }
 md5() { md5sum "$1" 2>/dev/null | cut -d' ' -f1; }
@@ -66,7 +69,8 @@ if [ "$1" = "--bench" ]; then bench; exit 0; fi
 echo "will copy into $M:"; for f in $FILES $NEW; do echo "  $f"; done
 for pair in $WANT; do
   f=${pair%%:*}; want=${pair#*:}; have=$(md5 "$M/$f"); port=$(md5 "$HERE/$f")
-  if [ "$have" != "$want" ] && [ "$have" != "$port" ]; then
+  old=$(for o in $OLDPORT; do [ "${o%%:*}" = "$f" ] && echo "${o#*:}"; done; true)   # (true: set -e would end the script here)
+  if [ "$have" != "$want" ] && [ "$have" != "$port" ] && [ "$have" != "$old" ]; then
     echo "STOP: $M/$f is not the file this port was made from (md5 $have, expected $want) - nothing changed. Send me the file."; exit 1
   fi
 done
@@ -100,11 +104,28 @@ if grep -q "modeld: thneed is built in" /tmp/thneed_build.log; then
   BENCH=none
   bench
   if [ "$BENCH" = works ]; then
+    # GATE 2 (added after 16 Nov 2026): the REAL _modeld must start and load the model (the bench alone missed a crash
+    # in modeld's own start). With openpilot stopped it then waits for camera frames - alive after 20 s = it started.
+    echo "real modeld: starting it for $GATE_S s ..."
+    cd "$M"
+    ./modeld > /tmp/thneed_modeld.log 2>&1 &
+    MP=$!
+    sleep $GATE_S
+    if kill -0 $MP 2>/dev/null && grep -q "loaded model" /tmp/thneed_modeld.log; then
+      kill -INT $MP 2>/dev/null; sleep 2; kill -9 $MP 2>/dev/null || true
+      echo "  real modeld started and loaded the model"
+    else
+      kill -9 $MP 2>/dev/null || true
+      tail -5 /tmp/thneed_modeld.log | sed 's/^/  /'
+      echo "RESULT: the real modeld did not survive its start"; BENCH=modeld_died
+    fi
+  fi
+  if [ "$BENCH" = works ]; then
     echo "KEPT: the new modeld uses thneed. Reboot to use it."
   else
     for f in $FILES; do cp "$BK/$f" "$M/$f"; done
     cp "$BK/_modeld" "$M/_modeld" && chmod +x "$M/_modeld"
-    echo "RESTORED: the previous modeld is back (nothing changes in the car). Send me /tmp/thneed_build.log /tmp/thneed_plain.log /tmp/thneed_on.log"
+    echo "RESTORED: the previous modeld is back (nothing changes in the car). Send me /tmp/thneed_build.log /tmp/thneed_plain.log /tmp/thneed_on.log /tmp/thneed_modeld.log"
   fi
 else
   grep "modeld: thneed" /tmp/thneed_build.log || true
