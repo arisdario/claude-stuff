@@ -45,6 +45,27 @@ class T(unittest.TestCase):
     self.assertIn("counter steps {1: 399}", text)
     self.assertIn('OUT (high on) 10.0 s', text)
 
+  def test_ctrl_c_keeps_what_was_recorded(self):
+    import types
+    calls = {'n': 0}
+    def drain(sock, wait_for_one=False):
+      calls['n'] += 1
+      if calls['n'] > 3:
+        raise KeyboardInterrupt
+      c = types.SimpleNamespace(src=0, address=0x45, dat=lever_frame(0, 1, calls['n'])[3])
+      return [types.SimpleNamespace(can=[c, c])]
+    m = types.ModuleType('cereal.messaging'); m.sub_sock = lambda name: None; m.drain_sock = drain
+    pkg = types.ModuleType('cereal'); pkg.messaging = m
+    old = {k: sys.modules.get(k) for k in ('cereal', 'cereal.messaging')}
+    sys.modules['cereal'], sys.modules['cereal.messaging'] = pkg, m
+    try:
+      frames = C.capture(10., [])
+    finally:
+      for k, v in old.items():
+        if v is None: sys.modules.pop(k, None)
+        else: sys.modules[k] = v
+    self.assertEqual(len(frames), 6)                       # 3 batches of 2 frames, then Ctrl+C: kept
+
   def test_lever_decoding(self):
     self.assertEqual(C.lever_of(lever_frame(0, 1, 0)[3]), 1)
     self.assertEqual(C.lever_of(lever_frame(0, 2, 0)[3]), 2)

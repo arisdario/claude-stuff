@@ -105,8 +105,17 @@ def analyse(frames, out=print):
 def capture(seconds, guide):
   import cereal.messaging as messaging
   sock = messaging.sub_sock('can')
-  frames, t0, said = [], time.monotonic(), -1
-  last_lever, last_print, warned = None, 0., False
+  frames, t0 = [], time.monotonic()
+  try:
+    _capture_loop(messaging, sock, frames, t0, seconds, guide)
+  except KeyboardInterrupt:                        # Ctrl+C: stop early, but keep and analyse what was recorded
+    print('\n  stopped early (Ctrl+C) - saving and analysing the %d frames recorded' % len(frames), flush=True)
+  print()
+  return frames
+
+
+def _capture_loop(messaging, sock, frames, t0, seconds, guide):
+  said, last_lever, last_print, warned = -1, None, 0., False
   while True:
     t = time.monotonic() - t0
     if t >= seconds:
@@ -131,8 +140,6 @@ def capture(seconds, guide):
       last_print = t
       sys.stdout.write('\r  %4.0f s  frames %7d  lever: %-16s' % (t, len(frames), NAMES.get(last_lever, '-')))
       sys.stdout.flush()
-  print()
-  return frames
 
 
 def main():
