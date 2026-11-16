@@ -44,6 +44,17 @@ class TestStalkBuilder(unittest.TestCase):
     self.assertEqual(real['HiBmLvr_Stat'], 0)                         # the caller's copy of the real stalk is not modified
 
 
+class TestParserFloats(unittest.TestCase):
+  def test_floats_from_the_can_parser(self):
+    # openpilot's CAN parser gives FLOATS; the test path (spdCtrlLvr_stat=None) copies them (16 Nov 2026: crashed controlsd)
+    real = {k: float(v) for k, v in REAL.items()}
+    _, _, raw, _ = teslacan.create_cruise_adjust_msg(None, None, dict(real), hiBmLvr_Stat=0)
+    self.assertEqual(len(bytes(raw)), 8)
+    a = teslacan.create_cruise_adjust_msg(16, 0, dict(real))                 # the ACC's own call: unchanged
+    b = teslacan.create_cruise_adjust_msg(16, 0, dict(REAL))
+    self.assertEqual(a, b)
+
+
 class CS(object):
   def __init__(self, v=0., hibm=0, turn=0, cruise=0):
     self.v_ego = v

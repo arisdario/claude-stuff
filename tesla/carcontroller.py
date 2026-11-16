@@ -23,6 +23,7 @@ from selfdrive.car.tesla.uds_relay import UdsRelay
 from selfdrive.car.tesla import ic_raw_lanes   # IC raw-lanes view (display only, off unless /data/ic_raw_lanes exists)
 from selfdrive.car.tesla import steer_limits   # opt-in angle-limit layer (off unless /data/steer_limits_on exists)
 from selfdrive.car.tesla.ahb_stalk import StalkHighBeamTest   # AHBSTALK: one-shot parked test, off unless /data/ahb_stalk_test exists
+from selfdrive.car.tesla import ahb_stalk as ahb_stalk_mod
 from selfdrive.car.tesla import sign_detect_reader   # optional vision stop-sign display (off unless camerad's own /data/sign_detect_on is set; see camerad/cameras/SIGN_DETECT.md)
 import cereal.messaging as messaging
 
@@ -757,13 +758,25 @@ class CarController():
           # Send this CAN msg first because it is racing against the real stalk.
           can_sends.insert(0, cruise_msg)
           stalk_busy = True
-    if frame % 5 == 0:
+    if frame % 5 == 0 and self.ahb_stalk is not None:
       # AHBSTALK: one-shot PARKED test - does a short light-lever push keep the high beams on? (tesla/ahb_stalk.py)
-      hibm = self.ahb_stalk.update(CS, enabled, busy=stalk_busy)
-      if hibm is not None and CS.steering_wheel_stalk:
-        can_sends.insert(0, teslacan.create_cruise_adjust_msg(spdCtrlLvr_stat=None, turnIndLvr_Stat=None,
-                                                              real_steering_wheel_stalk=CS.steering_wheel_stalk,
-                                                              hiBmLvr_Stat=hibm))
+      # Never allowed to stop controlsd: any error switches the test off (16 Nov 2026: a float in the copied stalk
+      # message crashed struct.pack in teslacan -> controlsd died -> red "take control").
+      try:
+        hibm = self.ahb_stalk.update(CS, enabled, busy=stalk_busy)
+        if hibm is not None and CS.steering_wheel_stalk:
+          can_sends.insert(0, teslacan.create_cruise_adjust_msg(spdCtrlLvr_stat=None, turnIndLvr_Stat=None,
+                                                                real_steering_wheel_stalk=CS.steering_wheel_stalk,
+                                                                hiBmLvr_Stat=hibm))
+      except Exception as e:
+        print("AHBSTALK test disabled after an error: %r" % (e,))
+        try:
+          os.rename(ahb_stalk_mod.TEST_FILE, ahb_stalk_mod.TEST_FILE + '.error')
+          with open(ahb_stalk_mod.LOG_FILE, 'w') as f:
+            f.write('AHBSTALK test stopped by an error (controlsd kept running): %r\n' % (e,))
+        except Exception:
+          pass
+        self.ahb_stalk = None
     apply_accel = 0.
     if self.PCC.pcc_available and frame % 5 == 0: # pedal processed at 20Hz
       pedalcan = 2
