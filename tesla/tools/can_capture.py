@@ -86,6 +86,10 @@ def analyse(frames, out=print):
   if sent:
     out('stalk frames SENT BY OPENPILOT: %d, %.2f-%.2f s, lever values %s' % (len(sent), sent[0][0], sent[-1][0],
         dict(collections.Counter(NAMES.get(v, v) for _, v in sent))))
+  else:
+    n_tx = sum(1 for f in frames if f[1] >= 128)
+    out('stalk frames SENT BY OPENPILOT: none (all frames openpilot sent: %d) - %s' % (n_tx,
+        'is controlsd running? ps -ef | grep controlsd' if n_tx < 100 else 'the test did not send'))
   # every bit of every (bus, address): share of frames with the bit set, per lever state. Fast on the EON: first count
   # the DISTINCT payloads per (bus, address, state) - one dict step per frame - then expand those to bits.
   times = [tc for tc, _ in tl]

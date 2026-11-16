@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <math.h>
+#include <algorithm>
 #include "common/util.h"
 #include "snpemodel.h"
 #ifdef USE_THNEED
@@ -171,6 +172,9 @@ int SNPEModel::thneed_start(float *net_input_buf) {
     fprintf(stderr, "thneed: found %zu inputs (want 4), output %s - not this SNPE's layout - plain SNPE\n",
            thneed->inputs.size(), thneed->output ? "found" : "NOT found");
     for (size_t i = 0; i < thneed->input_sizes.size(); i++) fprintf(stderr, "  thneed input %zu: %zu bytes\n", i, thneed->input_sizes[i]);
+  } else if (!std::any_of(perm, perm + 4, [](int p) { return p == 0; })) {
+    // (guard: thneed_image stayed -1 if no input mapped to the camera slot, and execute() then wrote thneed_in[-1])
+    fprintf(stderr, "thneed: the camera image has no input slot - plain SNPE\n");
   } else {
     for (int i = 0; i < 4; i++) {
       thneed_in[i] = ourp[perm[i]]; thneed_in_bytes[i] = ours[perm[i]];

@@ -45,6 +45,11 @@ class T(unittest.TestCase):
     self.assertIn("counter steps {1: 399}", text)
     self.assertIn('OUT (high on) 10.0 s', text)
 
+  def test_says_when_openpilot_sent_no_stalk_frame(self):
+    lines = []
+    C.analyse([f for f in self.scenario() if f[1] < 128], out=lines.append)
+    self.assertIn('stalk frames SENT BY OPENPILOT: none (all frames openpilot sent: 0) - is controlsd running?', '\n'.join(lines))
+
   def test_ctrl_c_keeps_what_was_recorded(self):
     import types
     calls = {'n': 0}
