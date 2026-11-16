@@ -72,6 +72,20 @@ def analyse(frames, out=print):
     # how long each lever position was held (latched vs momentary)
     held = ['%s %.1f s' % (NAMES.get(v, v), (tl[i + 1][0] if i + 1 < len(tl) else frames[-1][0]) - t) for i, (t, v) in enumerate(tl)]
     out('lever held: ' + ', '.join(held))
+  # HIGH-BEAM STATUS (found 16 Nov 2026): 0x30A byte 0 on bus 0 - bit 3 = high beams on, bit 2 = flash - set by the
+  # module that acts on the lever (6-31 ms after STW_ACTN_RQ). Its timeline, and the stalk frames openpilot sent
+  # (bus 128+: e.g. the ahb_stalk.py dip test), show whether the car accepted an injected lever change.
+  hb, last = [], None
+  for t, bus, addr, data in frames:
+    if bus == 0 and addr == 0x30A and data:
+      v = (data[0] >> 2) & 3
+      if v != last:
+        hb.append((t, v)); last = v
+  out('high-beam status 0x30A (on/flash bits): ' + (', '.join('%.2f s %s' % (t, {0: 'off', 2: 'ON', 1: 'FLASH', 3: 'on+flash'}[v]) for t, v in hb) or '-'))
+  sent = [(t, lever_of(data)) for t, bus, addr, data in frames if bus >= 128 and addr == LEVER_ADDR]
+  if sent:
+    out('stalk frames SENT BY OPENPILOT: %d, %.2f-%.2f s, lever values %s' % (len(sent), sent[0][0], sent[-1][0],
+        dict(collections.Counter(NAMES.get(v, v) for _, v in sent))))
   # every bit of every (bus, address): share of frames with the bit set, per lever state. Fast on the EON: first count
   # the DISTINCT payloads per (bus, address, state) - one dict step per frame - then expand those to bits.
   times = [tc for tc, _ in tl]
