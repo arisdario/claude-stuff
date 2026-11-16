@@ -137,7 +137,62 @@ def analyse(frames, out=print):
     out('  %-22s bus %d  0x%03x  byte %d bit %d   set: normal %.2f  out %s  pulled %s%s' % (
       what, bus, addr, i, k, p.get(0, float('nan')), '%.2f' % p[1] if 1 in p else '-', '%.2f' % p[2] if 2 in p else '-',
       '   (SENT BY OPENPILOT, not the car)' if bus >= 128 else ''))
+  extras(frames, out)
   return found
+
+
+TURN_NAMES = {0: 'idle', 1: 'LEFT', 2: 'RIGHT', 3: 'SNA'}
+
+
+def extras(frames, out=print):
+  """for the flash-HOLD test: (1) the turn-signal lever (STW_ACTN_RQ byte 2 bits 0-1) - its changes, the bits on any
+  bus that follow it (blinking lamps give ~0.5, so >= 0.4 is reported), and what openpilot's own stalk frames carried;
+  (2) message IDs that appear only later in the capture (a fault / diagnostic message would)."""
+  tl, last = [], None
+  for t, bus, addr, data in frames:
+    if bus == LEVER_BUS and addr == LEVER_ADDR and len(data) > 2:
+      v = data[2] & 3
+      if v != last:
+        tl.append((t, v)); last = v
+  out('turn-signal lever (real): ' + ', '.join('%.2f s %s' % (t, TURN_NAMES[v]) for t, v in tl))
+  sent = [(t, data[2] & 3) for t, bus, addr, data in frames if bus >= 128 and addr == LEVER_ADDR and len(data) > 2]
+  if sent:
+    out('turn-signal values in the stalk frames SENT BY OPENPILOT: %s' % dict(collections.Counter(TURN_NAMES[v] for _, v in sent)))
+  if len(tl) > 1:
+    times = [tc for tc, _ in tl]
+    payloads = collections.defaultdict(collections.Counter)
+    for t, bus, addr, data in frames:
+      if bus >= 128 or addr in (LEVER_ADDR, 0x219):
+        continue
+      st = state_at(tl, t, times)
+      if st is not None:
+        payloads[(bus, addr, st)][data] += 1
+    acc = collections.defaultdict(lambda: collections.defaultdict(lambda: [0, 0]))
+    for (bus, addr, st), cnt in payloads.items():
+      for data, n in cnt.items():
+        for i, b in enumerate(data):
+          for k in range(8):
+            c = acc[(bus, addr, i, k)][st]
+            c[0] += n * ((b >> k) & 1); c[1] += n
+    hits = []
+    for (bus, addr, i, k), d in acc.items():
+      if bus == 0 and addr == 0x30A and i == 0 and k in (2, 3):
+        continue                                     # the known high-beam bits (held during a HOLD test, not the turn signal)
+      p = {st: c[0] / c[1] for st, c in d.items() if c[1] >= 3}
+      for st in (1, 2):
+        if 0 in p and st in p and abs(p[st] - p[0]) >= 0.4:
+          hits.append((bus, addr, i, k, st, p))
+    out('bits that follow the turn-signal lever: %d' % len(hits))
+    for bus, addr, i, k, st, p in sorted(hits)[:20]:
+      out('  %-5s bus %d  0x%03x  byte %d bit %d   set: idle %.2f  left %s  right %s%s' % (
+        TURN_NAMES[st], bus, addr, i, k, p[0], '%.2f' % p[1] if 1 in p else '-', '%.2f' % p[2] if 2 in p else '-',
+        '   (blinks)' if abs(p[st] - p[0]) < 0.9 else ''))
+  first = {}
+  for t, bus, addr, data in frames:
+    if bus < 128 and (bus, addr) not in first:
+      first[(bus, addr)] = t
+  late = sorted((t, bus, addr) for (bus, addr), t in first.items() if t > 3.0)
+  out('message IDs that first appeared after 3 s: ' + (', '.join('bus %d 0x%03x at %.1f s' % (b, a, t) for t, b, a in late[:20]) or 'none'))
 
 
 def capture(seconds, guide):

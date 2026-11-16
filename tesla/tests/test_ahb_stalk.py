@@ -96,6 +96,22 @@ class TestParkedTest(unittest.TestCase):
     out = self.run_for(8, CS())
     self.assertEqual(sum(1 for x in out if x == 2), 10)
 
+  def test_hold_flash_10_s_and_turn_signal_allowed(self):
+    open(self.trig, 'w').write('hold')
+    out = self.run_for(3, CS(hibm=0))                                      # 3 s holding flash
+    self.assertTrue(all(x == 2 for x in out))
+    out += self.run_for(4, CS(hibm=0, turn=1))                             # you signal left during the hold: it goes on
+    out += self.run_for(8, CS(hibm=0))
+    self.assertEqual(sum(1 for x in out if x == 2), 200)                   # 10 s at 20 Hz
+    self.assertTrue(os.path.exists(self.trig + '.done'))
+    self.assertIn('real_turn=1', open(self.log).read())
+
+  def test_hold_stops_when_you_move_the_light_lever(self):
+    open(self.trig, 'w').write('hold')
+    self.run_for(1, CS(hibm=0))
+    self.assertTrue(all(x is None for x in self.run_for(1, CS(hibm=1))))   # you push it out: the test stops at once
+    self.assertTrue(os.path.exists(self.trig + '.aborted'))
+
   def test_dip_needs_the_lever_out(self):
     open(self.trig, 'w').write('dip')
     self.assertTrue(all(x is None for x in self.run_for(3, CS(hibm=0))))   # lever normal: waits

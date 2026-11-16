@@ -33,8 +33,15 @@ PRESS_S = 0.5           # how long the lever is "held" - like one cruise click (
 OBSERVE_S = 4.0         # logging after the press: do the beams stay on or drop back?
 WAIT_MAX_S = 60.        # conditions not met within this -> give up
 CHECK_EVERY_S = 1.0     # the trigger file is looked for once a second (controlsd CPU)
-LEVER = {'push': 1, 'pull': 2, 'dip': 0}   # HiBmLvr_Stat: 0 IDLE (normal), 1 HIBM_ON_PSD (pushed out), 2 HIBM_FLSH_ON_PSD (pulled)
-NEEDS = {'push': 0, 'pull': 0, 'dip': 1}    # where YOUR lever must be for each test
+LEVER = {'push': 1, 'pull': 2, 'dip': 0, 'hold': 2}   # HiBmLvr_Stat: 0 IDLE (normal), 1 HIBM_ON_PSD (out), 2 HIBM_FLSH_ON_PSD (pulled)
+NEEDS = {'push': 0, 'pull': 0, 'dip': 1, 'hold': 0}    # where YOUR lever must be for each test
+# HOLD (16 Nov 2026, the driver's idea): your lever stays NORMAL, openpilot holds FLASH -> high beams on; stopping = low
+# beams again, also if openpilot dies (fail-safe). 10 s, and the turn signal may be used during it: does it still work?
+HOLD_S = 10.0
+
+
+def press_s(kind):
+  return HOLD_S if kind == 'hold' else PRESS_S
 
 
 def _lever(stalk, name):
@@ -75,8 +82,8 @@ class StalkHighBeamTest(object):
 
   def _log(self, now, phase, sent, CS):
     stalk = getattr(CS, 'steering_wheel_stalk', None) or {}
-    self.lines.append('%6.2f %-9s sent_lever=%s real_lever=%s body:HiBm_On=%s LoBm_On_Rq=%s LgtSens_Night=%s' % (
-      now - (self.t0 if self.t0 is not None else now), phase, sent, _lever(stalk, 'HiBmLvr_Stat'),
+    self.lines.append('%6.2f %-9s sent_lever=%s real_lever=%s real_turn=%s body:HiBm_On=%s LoBm_On_Rq=%s LgtSens_Night=%s' % (
+      now - (self.t0 if self.t0 is not None else now), phase, sent, _lever(stalk, 'HiBmLvr_Stat'), _lever(stalk, 'TurnIndLvr_Stat'),
       getattr(CS, 'ahbHiBeamOn', None), getattr(CS, 'ahbLoBeamOn', None), getattr(CS, 'ahbNightMode', None)))
 
   def _finish(self, result, note=''):
@@ -110,7 +117,8 @@ class StalkHighBeamTest(object):
         word = open(self.path).read().strip().lower()
       except Exception:
         word = ''
-      self.kind = 'pull' if word.startswith('pull') else ('dip' if word.startswith('dip') else 'push')
+      self.kind = ('hold' if word.startswith('hold') else 'pull' if word.startswith('pull') else
+                   'dip' if word.startswith('dip') else 'push')
       self.state, self.t_wait, self.lines = 'waiting', now, []
     if self.state == 'waiting':
       why = self._why_not(CS, enabled)
@@ -124,11 +132,16 @@ class StalkHighBeamTest(object):
         self._finish('aborted', '(car moved or openpilot engaged)')
         return None
     if self.state == 'pressing':
-      if self._levers(CS) != self.levers0:           # you touched a lever: stop sending, you win
+      lv = self._levers(CS)
+      if self.kind == 'hold':                        # the turn signal MAY be used during a hold (that is the test)
+        lv, ref = (lv[0], lv[2]), (self.levers0[0], self.levers0[2])
+      else:
+        ref = self.levers0
+      if lv != ref:                                  # you touched a lever: stop sending, you win
         self._log(now, 'driver', None, CS)
         self._finish('aborted', '(a lever was moved during the test)')
         return None
-      if now - self.t0 < PRESS_S - 1e-3:            # (tolerance: the 20 Hz clock is not exact)
+      if now - self.t0 < press_s(self.kind) - 1e-3:  # (tolerance: the 20 Hz clock is not exact)
         if busy:
           self._log(now, 'skip', None, CS)
           return None
@@ -137,7 +150,7 @@ class StalkHighBeamTest(object):
       self.state = 'observing'
     if self.state == 'observing':
       self._log(now, 'observe', None, CS)
-      if now - self.t0 >= PRESS_S + OBSERVE_S:
+      if now - self.t0 >= press_s(self.kind) + OBSERVE_S:
         self._finish('done')
       return None
     return None
