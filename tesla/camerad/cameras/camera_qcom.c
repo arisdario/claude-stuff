@@ -365,8 +365,12 @@ void cameras_init(DualCameraState *s) {
   // start after it worked. So first wait until the CPU is calm (openpilot finished starting; at most 90 s early in boot,
   // 30 s later). WATCHDOG: if opening it still hangs, camera_ext_c920.cc's alarm() ends camerad - and because the
   // attempt is counted BEFORE trying, such a hang counts as a try too. NOFALLBACK: never the phone camera (see below).
+  // RESTART IN PLACE (16 Nov 2026): "exit so the manager starts camerad again" never happened - Tinkla 0.7.5's manager
+  // does not restart a car-started process that died while the car is on (a dead camerad stayed dead for the drive).
+  // camerad now re-executes itself instead (same process id; camera_ext_c920.cc), for a failed try AND a watchdog hang.
   g_ext = 0;
   if (ext_c920_wanted()) {
+    if (!ext_c920_enable_restart()) fprintf(stderr, "external camera: could not set up the in-place restart - a failed try ends camerad\n");
     double up = 1e9;
     FILE *uf = fopen("/proc/uptime", "r");
     if (uf) { if (fscanf(uf, "%lf", &up) != 1) up = 1e9; fclose(uf); }
@@ -391,10 +395,10 @@ void cameras_init(DualCameraState *s) {
         unlink("/dev/c920_boot_retries");
         LOG("*** ROAD CAMERA: external C920 (phone rear camera not used) ***");
       } else if (!do_exit) {
-        fprintf(stderr, "external camera: C920 not ready (try %d): camerad exits so it is started again\n", n + 1);
+        fprintf(stderr, "external camera: C920 not ready (try %d): camerad restarts itself to try again\n", n + 1);
         LOGE("*** external road camera not ready (try %d): restarting camerad ***", n + 1);
         if (n + 1 > C920_BOOT_RETRIES) sleep(20);                    // NOFALLBACK: after 5 quick tries, one every ~20 s
-        exit(1);
+        ext_c920_restart();                                          // RESTART IN PLACE (exits only if openpilot is stopping camerad)
       }
     }
   }

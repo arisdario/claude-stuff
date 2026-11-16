@@ -51,6 +51,23 @@ r = subprocess.run([without, 'hang_open', clip, jpg], stdout=subprocess.PIPE, st
 good = r.returncode == -signal.SIGALRM and 'watchdog' in r.stderr
 ok = ok and good
 print('%-66s %s   (exit %s after %.0f s)' % ('camera hangs in uvc_open: the watchdog ends the process', 'OK' if good else 'FAIL', r.returncode, _t.time() - t0))
+# RESTART IN PLACE (16 Nov 2026): Tinkla 0.7.5's manager never restarts a car-started process that died while the car is on,
+# so camerad re-executes itself (same process id) for a failed try and for a watchdog hang - never by exiting
+def restart_case(label, scn, want_rc, want):
+    global ok
+    t0 = _t.time()
+    e = dict(os.environ)
+    for k in ('EXT_RESTART_GEN', 'EXT_TEST_FD', 'EXT_FIRST_PID'): e.pop(k, None)
+    r = subprocess.run([without, scn, clip, jpg], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, env=e, timeout=120)
+    res = [l for l in r.stdout.splitlines() if l.startswith('RESULT')]
+    good = r.returncode == want_rc and (res[-1] if res else '') == want
+    ok = ok and good
+    print('%-66s %s   (exit %s after %.0f s; %s)' % (label, 'OK' if good else 'FAIL', r.returncode, _t.time() - t0, res[-1] if res else r.stderr.strip()[-160:]))
+restart_case('C920 not ready: camerad restarts itself, same pid, fds closed', 'restart_call', 0,
+             'RESULT restarted gen=2 same_pid=1 alarm_blocked=0 inherited_fd_open=0')
+restart_case('hang: watchdog restarts camerad; a 2nd hang restarts it again', 'restart_hang', 0,
+             'RESULT restarted gen=3 same_pid=1 alarm_blocked=0 inherited_fd_open=0')
+restart_case('openpilot stopping camerad: it exits, no restart', 'restart_stopping', 1, '')
 # SETTLE: on a calm machine it returns within a few seconds, never later than its limit (8 s here)
 r = subprocess.run([without, 'settle', clip, jpg], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
 res = [l for l in r.stdout.splitlines() if l.startswith('RESULT')]

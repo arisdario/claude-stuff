@@ -1,7 +1,10 @@
 // End-to-end test of the format choice in camera_ext_c920.cc against a FAKE camera (the uvc_* calls are replaced with --wrap, everything else is the real file).
 //   ext_open_test SCENARIO CLIP.h264 FRAME.jpg      prints "RESULT ok=<selftest> started=<mjpeg|h264|none>"
 // scenarios: normal (camera offers both) | no_h264 (camera has no H.264 mode) | start_fails (H.264 mode negotiates but will not start) | garbage (H.264 frames are junk)
+// RESTART IN PLACE: restart_call (a failed try restarts) | restart_hang (watchdog restart, then a second hang must restart again) | restart_stopping (openpilot stopping: exit, no restart)
+//   these print "RESULT restarted gen=N same_pid=0|1 alarm_blocked=0|1 inherited_fd_open=0|1" from the last generation
 #include <time.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -76,6 +79,35 @@ int main(int argc, char **argv) {
     if (g_clip[i] == 0 && g_clip[i + 1] == 0 && g_clip[i + 2] == 1 && (g_clip[i + 3] & 31) == 9) { st.push_back((i > 0 && g_clip[i - 1] == 0) ? i - 1 : i); i += 3; }
   st.push_back(g_clip.size());
   for (size_t i = 0; i + 1 < st.size(); i++) g_aus.push_back({st[i], st[i + 1] - st[i]});
+  if (!strncmp(g_scn, "restart_", 8)) {                           // RESTART IN PLACE (camera_ext_c920.cc)
+    const char *gs = getenv("EXT_RESTART_GEN");
+    int gen = gs ? atoi(gs) : 1;
+    if (!ext_c920_enable_restart()) { printf("RESULT enable_failed\n"); return 5; }   // as camerad: every generation sets it up
+    if (gen == 1) {
+      int p[2];
+      if (pipe(p) != 0) return 3;                                  // an inherited descriptor (no close-on-exec), like a USB handle
+      char b[32];
+      snprintf(b, sizeof b, "%d", p[0]); setenv("EXT_TEST_FD", b, 1);
+      snprintf(b, sizeof b, "%d", (int)getpid()); setenv("EXT_FIRST_PID", b, 1);
+      setenv("EXT_RESTART_GEN", "2", 1);
+      if (!strcmp(g_scn, "restart_hang")) { g_scn = "hang_open"; ext_c920_selftest(1500); }   // hangs in uvc_open: only the watchdog gets out
+      if (!strcmp(g_scn, "restart_stopping")) do_exit = 1;
+      ext_c920_restart();
+      printf("RESULT not_restarted\n"); return 4;
+    }
+    if (gen == 2 && !strcmp(g_scn, "restart_hang")) {           // a second hang after the restart: the watchdog must work again
+      setenv("EXT_RESTART_GEN", "3", 1);
+      alarm(2);
+      for (;;) pause();
+    }
+    sigset_t cur;
+    pthread_sigmask(SIG_BLOCK, NULL, &cur);
+    const char *fs = getenv("EXT_TEST_FD"), *ps = getenv("EXT_FIRST_PID");
+    int fd = fs ? atoi(fs) : -1;
+    printf("RESULT restarted gen=%d same_pid=%d alarm_blocked=%d inherited_fd_open=%d\n", gen, ps && atoi(ps) == (int)getpid(),
+           sigismember(&cur, SIGALRM), fd >= 0 && fcntl(fd, F_GETFD) != -1);
+    return 0;
+  }
   if (!strcmp(g_scn, "settle")) {                                 // SETTLE: returns once the CPU is calm (or after the limit)
     time_t t0 = time(NULL); ext_c920_wait_settled(8000);
     printf("RESULT settled_in=%ld\n", (long)(time(NULL) - t0)); return 0;

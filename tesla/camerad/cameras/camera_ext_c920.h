@@ -14,6 +14,8 @@ int ext_c920_present(void);                     // 1 if a C920 (046d:082d) is on
 int ext_c920_selftest(int timeout_ms);          // opens it, streams, waits for a frame, closes: 1 = it works
 int ext_c920_acquire(int present_wait_ms, int attempts, int timeout_ms);   // startup: wait for the camera to appear, then self-test with retries: 1 = it works
 void ext_c920_wait_settled(int max_wait_ms);   // SETTLE: wait until the CPU is calm (openpilot finished starting), at most max_wait_ms
+int ext_c920_enable_restart(void);              // RESTART IN PLACE: from now on the watchdog re-executes camerad (same process id) instead of ending it; 1 = set up
+void ext_c920_restart(void);                    // re-executes camerad now (exits instead if restart is not set up or openpilot is stopping it)
 void ext_c920_configure(CameraState *rear);     // gives the rear CameraState the geometry of a 1164x874 BGR picture
 int ext_c920_start(CameraState *rear, VisionBuf *bufs);   // starts the capture thread (it dispatches frames into rear->camera_tb); 0 = ok
 void ext_c920_stop(void);

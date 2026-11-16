@@ -12,6 +12,7 @@ static void watchdog(int seconds, const char *what);   // WATCHDOG: see its defi
 #include <strings.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/resource.h>
 
 #include <jpeglib.h>
 #include <sys/stat.h>
@@ -560,11 +561,76 @@ void *capture_thread(void *) {
 
 // WATCHDOG: a C920 that stops answering in the middle of a USB call (15 Nov 2026: 'can't re-read device descriptor
 // ... -110', camerad at 0 CPU for minutes) blocks camerad forever - its own timeouts never run and SIGTERM only sets
-// do_exit. alarm() turns such a hang into the end of the process (SIGALRM's default action; camerad has no handler):
-// the manager starts camerad again and the retry / phone-camera fallback of camera_qcom.c's BOOTWAIT can work.
+// do_exit. alarm() turns such a hang into a restart of camerad (see RESTART IN PLACE below; without it, SIGALRM's
+// default action ends the process).
 static void watchdog(int seconds, const char *what) {
   if (seconds > 0) fprintf(stderr, "external camera: watchdog %d s for %s\n", seconds, what);
   alarm(seconds > 0 ? (unsigned)seconds : 0);
+}
+
+// RESTART IN PLACE (16 Nov 2026): camerad used to EXIT (C920 not ready at boot, or the watchdog's SIGALRM) so that
+// "the manager starts it again". Tinkla 0.7.5's manager never does that while the car is on: camerad is a car-started
+// process, and start_managed_process() returns at once for a name still in `running` - a dead camerad stayed dead for
+// the whole drive (no road camera, no model) until the car was switched off. Now camerad re-executes ITSELF: a fresh
+// program (as a restart would give: new libuvc / USB state), the same process id (the manager still sees it running).
+// Before exec every inherited descriptor above stderr is closed (a hung USB handle must not keep the C920 claimed).
+static char g_self_exe[512];
+static char g_self_args[2048];
+static char *g_self_argv[32];
+static int g_self_maxfd = 1024;
+static volatile sig_atomic_t g_restart_on = 0;
+
+static void restart_now(void) {               // async-signal-safe: close, write, execv, _exit only
+  for (int fd = 3; fd < g_self_maxfd; fd++) close(fd);
+  execv(g_self_exe, g_self_argv);
+  static const char m[] = "external camera: restart failed (execv) - camerad ends\n";
+  if (write(2, m, sizeof m - 1) < 0) {}
+  _exit(1);
+}
+
+static void on_watchdog_alarm(int) {
+  if (do_exit) _exit(1);                      // openpilot is stopping camerad anyway
+  static const char m[] = "external camera: watchdog expired - camerad restarts itself (same process id)\n";
+  if (write(2, m, sizeof m - 1) < 0) {}
+  restart_now();
+}
+
+extern "C" int ext_c920_enable_restart(void) {
+  ssize_t n = readlink("/proc/self/exe", g_self_exe, sizeof g_self_exe - 1);
+  if (n <= 0 || n >= (ssize_t)sizeof g_self_exe - 1) return 0;
+  g_self_exe[n] = 0;
+  FILE *f = fopen("/proc/self/cmdline", "rb");
+  if (!f) return 0;
+  size_t len = fread(g_self_args, 1, sizeof g_self_args - 1, f);
+  fclose(f);
+  if (len == 0 || len >= sizeof g_self_args - 1) return 0;
+  g_self_args[len] = 0;
+  int argc = 0;
+  for (size_t i = 0; i < len && argc < 31; i += strlen(g_self_args + i) + 1) g_self_argv[argc++] = g_self_args + i;
+  g_self_argv[argc] = NULL;
+  struct rlimit rl;
+  if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY) g_self_maxfd = rl.rlim_cur < 4096 ? (int)rl.rlim_cur : 4096;
+  // the signal mask survives exec: a camerad restarted from the alarm handler must not start with SIGALRM blocked,
+  // or its next watchdog could never fire
+  sigset_t s;
+  sigemptyset(&s); sigaddset(&s, SIGALRM);
+  pthread_sigmask(SIG_UNBLOCK, &s, NULL);
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = on_watchdog_alarm;
+  sa.sa_flags = SA_NODEFER;
+  sigemptyset(&sa.sa_mask);
+  if (sigaction(SIGALRM, &sa, NULL) != 0) return 0;
+  g_restart_on = 1;
+  return 1;
+}
+
+extern "C" void ext_c920_restart(void) {
+  alarm(0);                                   // a pending alarm would survive exec
+  if (!g_restart_on || do_exit) exit(1);      // (restart not set up, or openpilot is stopping camerad)
+  fprintf(stderr, "external camera: camerad restarts itself (same process id)\n");
+  fflush(stdout); fflush(stderr);
+  restart_now();
 }
 
 static int read_cpu(unsigned long long *busy, unsigned long long *total) {

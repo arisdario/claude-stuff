@@ -29,6 +29,7 @@ The picture geometry was checked against ffmpeg on a real C920 frame (black bars
 ## Limits - read before driving
 - NOT built or run on an EON yet by the author: camera_qcom.c cannot be compiled off the phone. The new file was syntax-checked against stock openpilot 0.7.5 headers; the install/restore script was tested on a fake tree.
 - If the C920 stops mid-drive there is NO live fallback to the phone camera (its sensor is not powered in external mode): openpilot loses the road picture until you restart. The thread tries to reopen the C920 every second.
+- If the C920 is not ready at startup, or a USB call hangs (the watchdog), camerad **restarts itself in place** (same process id). It does not exit: Tinkla 0.7.5's manager never restarts a car-started process that died while the car is on, so an exited camerad stayed dead until the car was switched off (fixed 16 Nov 2026). Log lines: `camerad restarts itself` / `watchdog expired - camerad restarts itself`.
 - The C920 sees 43 deg vertically (the EON camera 51 deg): the model gets a narrower view with black bars above and below. After switching, openpilot's calibration must re-learn the vanishing point (drive straight for a few minutes; if it is wildly off, remove /data/params/d/CalibrationParams and reboot).
 - Not tested yet: panda + C920 on the EON's USB at the same time in the car; day/night exposure; heat. Test parked first, then a short drive with a passenger watching the screen.
 - Nothing here changes steering, braking or acceleration code.
