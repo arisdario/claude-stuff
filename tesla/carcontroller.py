@@ -22,6 +22,7 @@ from selfdrive.car.tesla.AHB_module import AHBController
 from selfdrive.car.tesla.uds_relay import UdsRelay
 from selfdrive.car.tesla import ic_raw_lanes   # IC raw-lanes view (display only, off unless /data/ic_raw_lanes exists)
 from selfdrive.car.tesla import steer_limits   # opt-in angle-limit layer (off unless /data/steer_limits_on exists)
+from selfdrive.car.tesla.ahb_stalk import StalkHighBeamTest   # AHBSTALK: one-shot parked test, off unless /data/ahb_stalk_test exists
 from selfdrive.car.tesla import sign_detect_reader   # optional vision stop-sign display (off unless camerad's own /data/sign_detect_on is set; see camerad/cameras/SIGN_DETECT.md)
 import cereal.messaging as messaging
 
@@ -125,6 +126,7 @@ class CarController():
     self.HSO = HSOController(self)
     self.GYRO = GYROController()
     self.AHB = AHBController(self)
+    self.ahb_stalk = StalkHighBeamTest()      # AHBSTALK (tesla/ahb_stalk.py)
     self.UDS = UdsRelay()          # radarweb's read-only diagnostic requests, parked only (off unless /data/uds_read)
     # MAPCURVE: start the road-aware map curve-speed daemon (mapcurved.py) with the stack, if /data/mapcurve.sqlite
     # exists. Guarded + never raises, so it can't affect the car; disable with /data/mapcurve_off. (Not in the
@@ -742,6 +744,7 @@ class CarController():
         can_sends.append(teslacan.create_enabled_eth_msg(1))
     if frame % 5 == 0:
       self._speed_limit_warning(CS)
+    stalk_busy = False                    # AHBSTALK: a cruise press owns the stalk message in this frame
     if (not self.PCC.pcc_available) and frame % 5 == 0: # acc processed at 20Hz
       cruise_btn = self.ACC.update_acc(enabled, CS, frame, actuators, pcm_speed, \
                     self.speed_limit_ms * CV.MS_TO_KPH,
@@ -753,6 +756,14 @@ class CarController():
             real_steering_wheel_stalk=CS.steering_wheel_stalk)
           # Send this CAN msg first because it is racing against the real stalk.
           can_sends.insert(0, cruise_msg)
+          stalk_busy = True
+    if frame % 5 == 0:
+      # AHBSTALK: one-shot PARKED test - does a short light-lever push keep the high beams on? (tesla/ahb_stalk.py)
+      hibm = self.ahb_stalk.update(CS, enabled, busy=stalk_busy)
+      if hibm is not None and CS.steering_wheel_stalk:
+        can_sends.insert(0, teslacan.create_cruise_adjust_msg(spdCtrlLvr_stat=None, turnIndLvr_Stat=None,
+                                                              real_steering_wheel_stalk=CS.steering_wheel_stalk,
+                                                              hiBmLvr_Stat=hibm))
     apply_accel = 0.
     if self.PCC.pcc_available and frame % 5 == 0: # pedal processed at 20Hz
       pedalcan = 2

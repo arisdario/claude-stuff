@@ -237,7 +237,7 @@ def create_fake_DAS_warning(DAS_211_accNoSeatBelt, DAS_canErrors, \
   return [msg_id,0,msg.raw,0]
 
 
-def create_cruise_adjust_msg(spdCtrlLvr_stat, turnIndLvr_Stat, real_steering_wheel_stalk):
+def create_cruise_adjust_msg(spdCtrlLvr_stat, turnIndLvr_Stat, real_steering_wheel_stalk, hiBmLvr_Stat=None):
   """Creates a CAN message from the cruise control stalk.
   Simluates pressing the cruise control stalk (STW_ACTN_RQ.SpdCtrlLvr_Stat) 
   and turn signal stalk (STW_ACTN_RQ.TurnIndLvr_Stat)
@@ -250,6 +250,8 @@ def create_cruise_adjust_msg(spdCtrlLvr_stat, turnIndLvr_Stat, real_steering_whe
     TurnIndLvr_Stat: Int value of dbc entry STW_ACTN_RQ.TurnIndLvr_Stat
       (allowing us to simulate pressing the turn signal up or down)
       None means no change
+    hiBmLvr_Stat: Int value of dbc entry STW_ACTN_RQ.HiBmLvr_Stat (1 pushed, 2 pulled) - AHBSTALK parked test
+      (tesla/ahb_stalk.py). None (default) copies the real lever, as before.
     real_steering_wheel_stalk: Previous STW_ACTN_RQ message sent by the real
       stalk. When sending these artifical messages for cruise control, we want
       to mimic whatever windshield wiper and highbeam settings the car is
@@ -271,6 +273,8 @@ def create_cruise_adjust_msg(spdCtrlLvr_stat, turnIndLvr_Stat, real_steering_whe
     fake_stalk['SpdCtrlLvr_Stat'] = spdCtrlLvr_stat
   if turnIndLvr_Stat is not None:
     fake_stalk['TurnIndLvr_Stat'] = turnIndLvr_Stat
+  if hiBmLvr_Stat is not None:
+    fake_stalk['HiBmLvr_Stat'] = hiBmLvr_Stat
   # message count should be 1 more than the previous (and loop after 16)
   fake_stalk['MC_STW_ACTN_RQ'] = (int(round(fake_stalk['MC_STW_ACTN_RQ'])) + 1) % 16
   # CRC should initially be 0 before a new one is calculated.
