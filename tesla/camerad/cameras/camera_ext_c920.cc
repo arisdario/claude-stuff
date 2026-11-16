@@ -21,6 +21,9 @@ static void watchdog(int seconds, const char *what);   // WATCHDOG: see its defi
 #ifdef EXT_WANT_SIGN_DETECT
 #include "sign_detect_io.h"   // optional stop-sign/traffic-light detection: compiled in only when the build's OpenCV trial-compile succeeds (see SConscript) AND only acts when /data/sign_detect_on exists; see SIGN_DETECT.md
 #endif
+#ifdef EXT_WANT_AHB_VISION
+#include "ahb_vision.h"       // optional SHADOW auto-high-beam vision: compiled in only when its trial compile succeeds (see SConscript) AND only acts when /data/ahb_vision_on exists; see AHB_VISION.md
+#endif
 
 #ifndef EXT_C920_TEST
 #include "common/buffering.h"
@@ -202,6 +205,9 @@ void on_frame(uvc_frame_t *f, void *) {
 #ifdef EXT_WANT_SIGN_DETECT
   sign_detect_tick(g_rgb, SRC_W, SRC_H);                                        // optional, off unless /data/sign_detect_on exists - see SIGN_DETECT.md
 #endif
+#ifdef EXT_WANT_AHB_VISION
+  ahb_vision_tick(g_rgb, SRC_W, SRC_H);                                         // optional shadow auto-high-beam vision, off unless /data/ahb_vision_on exists - see AHB_VISION.md
+#endif
   if (g_frames % 20 == 0) {                                                     // ~1 per second at 20 fps: a sparse sample of the lower 55% (the road), after the flip
     long sum = 0, n = 0;
     for (int y = SRC_H * 45 / 100; y < SRC_H * 90 / 100; y += 12)
@@ -284,6 +290,9 @@ void on_frame_h264(uvc_frame_t *f, void *) {
   }
 #ifdef EXT_WANT_SIGN_DETECT
   sign_detect_tick(g_rgb, SRC_W, SRC_H);                                        // optional, off unless /data/sign_detect_on exists - see SIGN_DETECT.md
+#endif
+#ifdef EXT_WANT_AHB_VISION
+  ahb_vision_tick(g_rgb, SRC_W, SRC_H);                                         // optional shadow auto-high-beam vision, off unless /data/ahb_vision_on exists - see AHB_VISION.md
 #endif
   if (g_frames % 20 == 0) {                                                     // ~1 per second at 20 fps: a sparse sample of the lower 55% (the road), after the flip
     long sum = 0, n = 0;

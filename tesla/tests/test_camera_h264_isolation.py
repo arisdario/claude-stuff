@@ -9,7 +9,7 @@ CC = open(os.path.join(ROOT, 'cameras', 'camera_ext_c920.cc')).read()
 HDR = open(os.path.join(ROOT, 'cameras', 'camera_h264.h')).read()
 SC = open(os.path.join(ROOT, 'SConscript')).read()
 INST = open(os.path.join(ROOT, 'install_external_camera.sh')).read()
-FROZEN_SHA = '94943ab2bcaa3b81050e3c7b329c0cfa6cda06b8dfa4564589604d3611211050'  # updated: sign_detect_tick() added to the tail, see SIGN_DETECT.md (gated by EXT_WANT_SIGN_DETECT; identical in both on_frame and on_frame_h264 - test_tails_are_identical still passes)
+FROZEN_SHA = '48f8b1bcf98b52769cd2b3a7c9eb7e174d15ec94883a2beaf1483334b8db5751'  # updated: ahb_vision_tick() added to the tail after sign_detect_tick(), see AHB_VISION.md (gated by EXT_WANT_AHB_VISION; identical in both on_frame and on_frame_h264 - test_tails_are_identical still passes)
 
 
 def func(src, head):

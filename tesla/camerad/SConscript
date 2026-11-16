@@ -53,6 +53,28 @@ if arch == "aarch64":
       print("camerad: sign/light detection NOT built in (no cameras/sign_detect.cc): unchanged camerad")
   except Exception as e:
     print("camerad: sign/light detection NOT built in (%s): unchanged camerad" % e)
+  # OPTIONAL shadow auto-high-beam vision (cameras/ahb_vision.cc, opt-in at run time with /data/ahb_vision_on - see
+  # AHB_VISION.md). Plain C++, no libraries. Same rule as above: compiled in ONLY if a trial compile+link of the finder
+  # succeeds right here. Any doubt = camerad is built exactly as before, with no high-beam code path.
+  try:
+    av_dir = Dir('#selfdrive/camerad/cameras').abspath
+    if os.path.exists(os.path.join(av_dir, 'ahb_vision.cc')):
+      trial = env.Clone()
+      conf = Configure(trial)
+      trial_src = ('#include "%s"\n' % os.path.join(av_dir, 'ahb_vision.cc')) + \
+                  'int main() { static uint8_t px[64 * 64 * 3]; return detect_lights(px, 64, 64, 32).n; }\n'
+      trial_ok = conf.TryCompile(trial_src, '.cc') and conf.TryLink(trial_src, '.cc')
+      conf.Finish()
+      if trial_ok:
+        env.Append(CXXFLAGS = ['-DEXT_WANT_AHB_VISION'])
+        cameras += ['cameras/ahb_vision.cc']
+        print("camerad: shadow auto-high-beam vision is built in (opt-in: touch /data/ahb_vision_on)")
+      else:
+        print("camerad: shadow auto-high-beam vision NOT built in (the trial compile/link failed): unchanged camerad")
+    else:
+      print("camerad: shadow auto-high-beam vision NOT built in (no cameras/ahb_vision.cc): unchanged camerad")
+  except Exception as e:
+    print("camerad: shadow auto-high-beam vision NOT built in (%s): unchanged camerad" % e)
 elif arch == "larch64":
   libs += []
   cameras = ['cameras/camera_qcom2.c']

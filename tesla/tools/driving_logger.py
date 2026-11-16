@@ -166,6 +166,9 @@ FRAMES_PRIORITY_EXTRA = 12    # moments that matter most (FRAME_PRIORITY) may us
 FRAME_PRIORITY = ('lead_out', 'lead_in', 'gap_short', 'cancel', 'fcw')   # ... and get the full window before/after;
                               # routine moments (ACC press, |accel| > 0.5) get one frame before and one after
                               # (15 Nov 19:47: the 12 were used up by 19:47:14, nothing of the 0.5 s-gap approach after)
+FRAME_AHB = ('ahb_dip', 'ahb_high')   # AHB SHADOW moments (ahb_shadow.py): their own budget, so ACC presses cannot crowd them out
+FRAMES_AHB_PER_CHUNK = 12
+AHB_HZ = 5                    # AHB SHADOW decisions per second (camerad's light finder runs at 5 Hz)
 GAP_SHORT_S = 1.5             # picture trigger: following closer than this (lead seen, above 36 km/h)
 # RADAR OBJECTS: radard's liveTracks (every object the radar tracks, not only openpilot's two leads) are written
 # TRACKS_HZ times a second as {"src":"tracks","t":..,"o":[[trackId, dRel m, yRel m, vRel m/s], ...]}, within TRACKS_MAX_M
@@ -200,18 +203,25 @@ class ChunkWriter(object):
     self.f = open(self.part, 'w')
     self.t0 = self.clock()
     self.frames = 0
+    self.ahb_frames = 0
 
   def add_frame(self, t_wall, data, why):
     """PICTURES: one camera frame for this chunk (at most FRAMES_PER_CHUNK, + FRAMES_PRIORITY_EXTRA for the moments in
     FRAME_PRIORITY); returns True if kept"""
-    if self.frames >= FRAMES_PER_CHUNK + (FRAMES_PRIORITY_EXTRA if why in FRAME_PRIORITY else 0):
+    if why in FRAME_AHB:
+      if getattr(self, 'ahb_frames', 0) >= FRAMES_AHB_PER_CHUNK:
+        return False
+    elif self.frames >= FRAMES_PER_CHUNK + (FRAMES_PRIORITY_EXTRA if why in FRAME_PRIORITY else 0):
       return False
     d = os.path.join(self.dir, 'c%04d.frames' % self.n)
     os.makedirs(d, exist_ok=True)
     name = '%s_%s.jpg' % (time.strftime('%H%M%S', time.localtime(t_wall)) + ('%.1f' % (t_wall % 1))[1:], why)
     with open(os.path.join(d, name), 'wb') as h:
       h.write(data)
-    self.frames += 1
+    if why in FRAME_AHB:
+      self.ahb_frames = getattr(self, 'ahb_frames', 0) + 1
+    else:
+      self.frames += 1
     return True
 
   def _finish(self):
@@ -903,6 +913,7 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
 
   # RECORDER: in --auto the output is a ChunkWriter opened when a drive starts and closed when it ends
   follows, shadow, last_car_t, last_plan_fcw, last_mm = [], None, None, False, None
+  ahb = None                              # AHB SHADOW (ahb_shadow.py)
   if auto:
     f = None
     finish_leftovers()
@@ -916,6 +927,12 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
     except Exception as e:
       fcw_shadow = None
       log('driving_logger: FCW comparison not available (%r)' % (e,))
+    try:
+      import ahb_shadow
+      ahb = ahb_shadow.AhbShadow()
+    except Exception as e:
+      ahb = None
+      log('driving_logger: AHB shadow not available (%r)' % (e,))
   else:
     f = open(out_path, 'a')
     f.write(json.dumps({'meta': 'driving_logger start', 't': time.time(), 'hz': hz,
@@ -976,7 +993,8 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
           if fcw_shadow is not None:
             shadow = fcw_shadow.ShadowCompare()
           f.write(json.dumps({'src': 'meta', 'meta': 'drive start', 't': round(time.time(), 3), 'hz': hz, 'drive': f.drive,
-                              'acc_mode': acc_mode(), 'planner_gap_patch': gap_patch_active(), 'versions': versions()}) + '\n')
+                              'acc_mode': acc_mode(), 'planner_gap_patch': gap_patch_active(), 'versions': versions(),
+                              'ahb_vision_on': os.path.exists('/data/ahb_vision_on')}) + '\n')
           log('driving_logger: drive %s started' % f.drive)
         elif not driving and f is not None:             # the drive ended: last chunk out, keep the disk in bounds
           f.write(json.dumps({'src': 'meta', 'meta': 'drive end', 't': round(time.time(), 3)}) + '\n')
@@ -1131,6 +1149,20 @@ def run(out_path, hz=20.0, duration=None, log=print, auto=False):
           last_tracks, t_tracks = lt_.liveTracks, now_mono
         if last_tracks is not None and now_mono - t_tracks < 0.5 and n % max(1, int(hz / TRACKS_HZ)) == 0:
           f.write(tracks_line(last_tracks, time.time()) + '\n')
+        # AHB SHADOW (ahb_shadow.py): what a camera auto-high-beam WOULD do - only while camerad's light finder runs
+        if ahb is not None and n % max(1, int(hz / AHB_HZ)) == 0:
+          try:
+            now_wa = time.time()
+            lights_, fresh_ = ahb_shadow.read_lights(now_wa)
+            if lights_ is not None:
+              l1a = sample.get('lead1') or {}
+              lead_da = l1a.get('dRel') if l1a.get('status') else None
+              st_a, _, changed_a = ahb.step(now_mono, sample.get('v_ego'), lead_da, lights_, fresh_)
+              f.write(ahb.line(now_wa, sample.get('v_ego'), lead_da, lights_) + '\n')
+              if changed_a and trig in (None, 'acc_press'):
+                trig = 'ahb_high' if st_a == 'high' else 'ahb_dip'
+          except Exception:
+            pass
         # ALERT class: what openpilot showed you, when it changes
         if last_alert is not None and last_alert != written_alert:
           written_alert = last_alert

@@ -15,11 +15,13 @@ the name says `kph`. A field the message does not have is `null` (never a crash)
 | `sys` | 1 / s | the EON's health: processes, CPU, heat, memory, disk, camera frames |
 | `kernel` | when it happens | kernel messages about USB / camera / heat / memory |
 | `fcw` | on events | FCW shadow comparison (`fcw_shadow.py`) |
+| `ahb` | 5 / s while `/data/ahb_vision_on` exists | what a camera automatic high beam WOULD do (shadow, nothing switched) |
 | `map` | as written | radarweb map lines (only when radarweb runs) |
 
 ## `meta`
 `{"src":"meta","meta":"drive start","t","hz","drive","acc_mode","planner_gap_patch","versions":{...}}` and `"drive end"`.
 - `acc_mode`: the ACC button's mode (`follow`, `auto`, `cc`, `xnor`).
+- `ahb_vision_on`: whether camerad's light finder was switched on for this drive.
 - `planner_gap_patch` / `versions.radard_lead_patch`: whether those patches are installed.
 - `versions`: md5 of the installed `acc` (ACC_module.py), `carcontroller`, `planner`, `radard`, `controlsd`, `camerad`
   + `claude_stuff` (commit of /data/claude-stuff). Compare with git to know exactly which code drove.
@@ -65,7 +67,15 @@ ACC's own text (`xnor: -1 (plan 112 -> aim 110.5)`, `xnor: cancel (braking neede
 `{"src":"kernel","t","lines":[...]}` — new kernel messages about usb / uvc / xhci / camera / thermal / out-of-memory
 (e.g. `usb 1-1.3: ... -110` = the C920 stopped answering, `usb_submit_urb returned -12` = USB transfer memory full).
 
+## `ahb` (5 / s, only while camerad's light finder runs - `tesla/camerad/AHB_VISION.md`)
+`{"src":"ahb","t","state","why","v","lead_d","n","lamps","luma","horizon","lights":[[x,y,area,halo],...]}`
+- `state`: `high` / `dip` = what it would do. `why`: `clear`, or the first reason to dip: `no_camera`, `slow`
+  (< 30 km/h; high again from 40), `headlights`, `car_ahead` (openpilot's lead < 150 m), `lit_road` (> 2 street lamps
+  above the horizon), `bright` (band brightness > 90). High only after 3 s of `clear`.
+- `n`: light sources near the horizon; `lights`: their full-res pixel (upright frame), core area, halo share.
+
 ## Pictures (`cNNNN.frames.tar`)
 `HHMMSS.s_<why>.jpg` (EON local time; the raw C920 frame is upside down — rotate 180°). Priority moments (`lead_out`,
 `lead_in`, `gap_short` = following closer than 1.5 s, `cancel`, `fcw`) get ±10 s / +6 s of pictures and 12 extra per
 chunk; routine ones (`acc_press`, `accel`, `decel`) one before and one after; plus one `periodic` per minute.
+`ahb_dip` / `ahb_high` (the shadow high-beam decision changed) have their own 12 per chunk.
