@@ -1,0 +1,76 @@
+Import('env', 'arch', 'messaging', 'zmq', 'common', 'gpucommon', 'visionipc')
+import os
+lenv = env.Clone()
+
+libs = [messaging, common, 'OpenCL', 'capnp', zmq, 'kj', 'yuv', gpucommon, visionipc]
+
+common_src = [
+  "models/commonmodel.c",
+  "runners/snpemodel.cc",
+  "transforms/loadyuv.c",
+  "transforms/transform.c"]
+
+if arch == "jarch64":
+  libs += ['pthread']
+  # for tensorflow support
+  common_src = [
+  "models/commonmodel.c",
+  "transforms/loadyuv.c",
+  "transforms/transform.c"]
+  common_src += ['runners/tfmodel.cc']
+  # tell runners to use it
+  lenv['CFLAGS'].append("-DUSE_TF_MODEL")
+  lenv['CXXFLAGS'].append("-DUSE_TF_MODEL")
+elif arch == "aarch64":
+  libs += ['SNPE', 'gsl', 'CB', 'gnustl_shared']
+elif arch == "larch64":
+  libs += ['SNPE', 'gsl', 'CB', 'symphony-cpu', 'pthread']  
+else:
+  libs += ['SNPE', 'symphony-cpu', 'pthread']
+  # for tensorflow support
+  common_src += ['runners/tfmodel.cc']
+  # tell runners to use it
+  lenv['CFLAGS'].append("-DUSE_TF_MODEL")
+  lenv['CXXFLAGS'].append("-DUSE_TF_MODEL")
+
+common = lenv.Object(common_src)
+
+# THNEED (tesla/model083/thneed_port, from openpilot 0.8.3): replays the model's recorded GPU commands instead of
+# running SNPE every frame. EON only, _modeld only (driver monitoring keeps plain SNPE). Same rule as camerad's options:
+# built in ONLY if a trial compile of thneed succeeds right here - any doubt = _modeld is built exactly as before.
+# At run time: self-test at the first frame, plain SNPE on any problem; touch /data/thneed_off switches it off.
+modeld_objs = common
+if arch == "aarch64":
+  try:
+    th_src = File('thneed/thneed.cc').srcnode().abspath
+    if os.path.exists(th_src):
+      import ctypes
+      libdl = ctypes.PyDLL('libdl.so')                      # as 0.8.3: offset of the real dlsym, measured on this EON
+      dlsym_offset = ctypes.cast(libdl.dlsym, ctypes.c_void_p).value - ctypes.cast(libdl.dlopen, ctypes.c_void_p).value
+      tenv = lenv.Clone()
+      tenv.Append(CXXFLAGS=['-DUSE_THNEED', '-DDLSYM_OFFSET=%d' % dlsym_offset])
+      conf = Configure(tenv.Clone())
+      trial_ok = conf.TryCompile('#include "%s"\n' % th_src, '.cc')
+      conf.Finish()
+      if trial_ok:
+        th_objs = list(tenv.Object('runners/snpemodel_thneed', 'runners/snpemodel.cc')) + list(tenv.Object('thneed/thneed', 'thneed/thneed.cc'))
+        modeld_objs = [o for o in common if 'snpemodel' not in str(o)] + th_objs
+        tenv.Program('thneed/thneed_bench', ['thneed/bench.cc'] + modeld_objs, LIBS=libs)
+        print("modeld: thneed is built in (dlsym offset %d; off switch: touch /data/thneed_off)" % dlsym_offset)
+      else:
+        print("modeld: thneed NOT built in (the trial compile failed): plain SNPE, unchanged _modeld")
+    else:
+      print("modeld: thneed NOT built in (no thneed/thneed.cc): unchanged _modeld")
+  except Exception as e:
+    print("modeld: thneed NOT built in (%s): unchanged _modeld" % e)
+
+lenv.Program('_dmonitoringmodeld', [
+    "dmonitoringmodeld.cc",
+    "models/dmonitoring.cc",
+  ]+common, LIBS=libs)
+
+lenv.Program('_modeld', [
+    "modeld.cc",
+    "models/driving.cc",
+  ]+modeld_objs, LIBS=libs)
+
