@@ -2,7 +2,8 @@
 # THNEED for Tinkla 0.7.5.a's modeld (port of openpilot 0.8.3's thneed) - see THNEED.md. Stop openpilot first:
 #   tmux kill-session -t comma
 #   sh install_thneed.sh             shows what would happen (changes nothing)
-#   sh install_thneed.sh --yes       checks, backs up once, copies, builds _modeld (+ the bench), runs the bench both ways
+#   sh install_thneed.sh --yes       checks, backs up once, copies, builds _modeld (+ the bench), runs the bench both ways;
+#                                    the new _modeld is KEPT ONLY IF the bench says it works, otherwise restored at once
 #   sh install_thneed.sh --bench     runs only the bench again
 #   sh install_thneed.sh --restore   puts the previous files and _modeld back (no build needed), then reboot
 # Switch thneed off without uninstalling: touch /data/thneed_off (modeld then runs plain SNPE, as before).
@@ -37,15 +38,19 @@ bench() {
   echo "bench: thneed, 50 runs ..."
   LD_LIBRARY_PATH=$SNPE_LIB:$LD_LIBRARY_PATH ./thneed/thneed_bench ../../models/supercombo.dlc "$N" 50 > /tmp/thneed_on.log 2>&1 || true
   P=$(grep "per run" /tmp/thneed_plain.log | tail -1); T=$(grep "per run" /tmp/thneed_on.log | tail -1)
+  if [ -z "$P" ] || [ -z "$T" ]; then
+    tail -5 /tmp/thneed_plain.log /tmp/thneed_on.log | sed 's/^/  /'
+    echo "RESULT: the bench did not finish (crash?) - this build must not run in the car"; BENCH=crashed; return 0
+  fi
   echo "  $P"; echo "  $T"
   grep -E "thneed selftest|thneed:|Thneed::stop" /tmp/thneed_on.log | sed 's/^/  /' | head -8
   CP=$(echo "$P" | sed -n 's/.*checksum \([0-9a-f]*\).*/\1/p'); CT=$(echo "$T" | sed -n 's/.*checksum \([0-9a-f]*\).*/\1/p')
   if grep -q "thneed selftest passed" /tmp/thneed_on.log && [ -n "$CP" ] && [ "$CP" = "$CT" ]; then
-    echo "RESULT: thneed works on this EON - same output as plain SNPE after 50 runs. Reboot to use it."
+    echo "RESULT: thneed works on this EON - same output as plain SNPE after 50 runs."; BENCH=works
   elif grep -q "thneed selftest passed" /tmp/thneed_on.log; then
-    echo "RESULT: self-test passed but the 50-run output DIFFERS from plain SNPE - do NOT use it: touch /data/thneed_off (or --restore) and send me /tmp/thneed_*.log"
+    echo "RESULT: self-test passed but the 50-run output DIFFERS from plain SNPE - not usable"; BENCH=differs
   else
-    echo "RESULT: thneed cannot be used on this EON (see the lines above) - modeld falls back to plain SNPE by itself. Send me /tmp/thneed_on.log; --restore if you prefer the old build."
+    echo "RESULT: thneed cannot be used on this EON (see the lines above)"; BENCH=unusable
   fi
   echo "full logs: /tmp/thneed_plain.log /tmp/thneed_on.log"
 }
@@ -89,8 +94,18 @@ if grep -q "BUILD FAILED\|scons: building terminated because of errors" /tmp/thn
   echo "BUILD FAILED - put the previous modeld back before rebooting: sh $0 --restore"; exit 1
 fi
 if grep -q "modeld: thneed is built in" /tmp/thneed_build.log; then
+  grep "modeld: thneed is built in" /tmp/thneed_build.log | sed 's/^/  /'
+  echo "  (comma's own NEOS 14 thneed, openpilot 0.7.6, used dlsym offset -724)"
   scons -j2 selfdrive/modeld/thneed/thneed_bench 2>&1 | tail -3
+  BENCH=none
   bench
+  if [ "$BENCH" = works ]; then
+    echo "KEPT: the new modeld uses thneed. Reboot to use it."
+  else
+    for f in $FILES; do cp "$BK/$f" "$M/$f"; done
+    cp "$BK/_modeld" "$M/_modeld" && chmod +x "$M/_modeld"
+    echo "RESTORED: the previous modeld is back (nothing changes in the car). Send me /tmp/thneed_build.log /tmp/thneed_plain.log /tmp/thneed_on.log"
+  fi
 else
   grep "modeld: thneed" /tmp/thneed_build.log || true
   echo "thneed was NOT built in: _modeld was rebuilt exactly as before (plain SNPE). Send me /tmp/thneed_build.log."

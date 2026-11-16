@@ -78,6 +78,45 @@ class T(unittest.TestCase):
     self.assertEqual(len(re.findall(r'\b[0-9a-f]{32}\b', s.split('WANT=')[1].split('\n')[0])), 3)
     self.assertIn('pgrep -f _modeld', s); self.assertIn('--restore', s); self.assertIn('THNEED_OFF=1', s)
 
+  def test_installer_keeps_only_a_working_build(self):
+    """--yes with fake scons / pgrep / bench: the new _modeld stays only when the bench says it works"""
+    car = os.environ.get('THNEED_CAR_TREE') or os.path.join(ROOT, 'test', 'car075')   # the car's original files (fixture)
+    if not car:
+      self.skipTest('set THNEED_CAR_TREE to the car files the port was made from')
+    BENCH = {
+      'works': 'thneed selftest passed (9 GPU commands replayed)\nX: 30.0 ms per run, CPU 8.0 ms per run (user+sys, all threads), output checksum 00000000deadbeef',
+      'crash': 'Segmentation fault',
+      'unusable': 'thneed: recording unusable: x - plain SNPE\nX: 40.0 ms per run, CPU 30.0 ms per run (user+sys, all threads), output checksum 00000000deadbeef',
+      'differs': 'thneed selftest passed (9 GPU commands replayed)\nX: 30.0 ms per run, CPU 8.0 ms per run (user+sys, all threads), output checksum 1111111111111111',
+    }
+    for scenario, kept in (('works', True), ('crash', False), ('unusable', False), ('differs', False)):
+      d = tempfile.mkdtemp()
+      try:
+        M = os.path.join(d, 'op', 'selfdrive', 'modeld')
+        shutil.copytree(car, M)
+        os.makedirs(os.path.join(M, 'models'), exist_ok=True)
+        open(os.path.join(M, 'models', 'model0812_adapter.h'), 'w').close()
+        open(os.path.join(M, '_modeld'), 'w').write('OLD')
+        bindir = os.path.join(d, 'bin'); os.makedirs(bindir)
+        plain = 'X: 40.0 ms per run, CPU 30.0 ms per run (user+sys, all threads), output checksum 00000000deadbeef'
+        bench = '#!/bin/sh\nif [ -n "$THNEED_OFF" ]; then echo "%s"; else printf "%s\\n"; fi\n' % (plain, BENCH[scenario])
+        open(os.path.join(bindir, 'scons'), 'w').write(
+          '#!/bin/sh\ncase "$*" in *thneed_bench*) mkdir -p %s/thneed; printf \'%s\' > %s/thneed/thneed_bench; chmod +x %s/thneed/thneed_bench;;\n'
+          '*) echo "modeld: thneed is built in (dlsym offset -724; off switch: touch /data/thneed_off)"; echo NEW > %s/_modeld;; esac\n'
+          % (M, bench.replace("'", "'\\''"), M, M, M))
+        open(os.path.join(bindir, 'pgrep'), 'w').write('#!/bin/sh\nexit 1\n')
+        for f in ('scons', 'pgrep'): os.chmod(os.path.join(bindir, f), 0o755)
+        env = dict(os.environ, OP=os.path.join(d, 'op'), BK=os.path.join(d, 'bk'), PATH=bindir + ':' + os.environ['PATH'])
+        r = subprocess.run(['sh', os.path.join(ROOT, 'install_thneed.sh'), '--yes'], env=env, cwd=d,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        modeld = open(os.path.join(M, '_modeld')).read().strip()
+        self.assertEqual(modeld, 'NEW' if kept else 'OLD', scenario + '\n' + r.stdout)
+        self.assertIn('KEPT' if kept else 'RESTORED', r.stdout, scenario)
+        if not kept:   # the sources are back too
+          self.assertEqual(open(os.path.join(M, 'runners', 'snpemodel.cc')).read(), open(os.path.join(car, 'runners', 'snpemodel.cc')).read())
+      finally:
+        shutil.rmtree(d)
+
 
 if __name__ == '__main__':
   unittest.main()
