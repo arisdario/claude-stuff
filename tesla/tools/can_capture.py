@@ -106,7 +106,7 @@ def capture(seconds, guide):
   import cereal.messaging as messaging
   sock = messaging.sub_sock('can')
   frames, t0, said = [], time.monotonic(), -1
-  last_lever, last_print = None, 0.
+  last_lever, last_print, warned = None, 0., False
   while True:
     t = time.monotonic() - t0
     if t >= seconds:
@@ -115,7 +115,13 @@ def capture(seconds, guide):
       if i > said and t >= ts:
         said = i
         print('\n>>> %4.0f s: %s' % (t, text), flush=True)
-    for m in messaging.drain_sock(sock, wait_for_one=True):
+    msgs = messaging.drain_sock(sock)              # never blocks (16 Nov 2026: waiting here froze the prompts with no CAN)
+    if not msgs:
+      time.sleep(0.005)
+    if t > 3. and not frames and not warned:
+      warned = True
+      print('\n  NO CAN DATA after 3 s - is openpilot running? (boardd provides the CAN): ps -A | grep boardd', flush=True)
+    for m in msgs:
       tm = time.monotonic() - t0
       for c in m.can:
         frames.append((tm, c.src, c.address, bytes(c.dat)))
