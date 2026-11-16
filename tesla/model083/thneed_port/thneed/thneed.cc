@@ -37,12 +37,19 @@ int ioctl(int filedes, unsigned long request, void *argp) {
   // save the fd
   if (request == IOCTL_KGSL_GPUOBJ_ALLOC) g_fd = filedes;
 
-  // note that this runs always, even without a thneed object (0.8.3: the model's GPU work gets top priority)
+  // note that this runs always, even without a thneed object (0.8.3: the model's GPU work gets top priority).
+  // PORT: comma's NEOS 14 thneed (0.7.7-0.7.9) did not do this; if this kernel refuses the priority flag, the context
+  // is created again with SNPE's own flags, so SNPE can always start.
   if (request == IOCTL_KGSL_DRAWCTXT_CREATE) {
     struct kgsl_drawctxt_create *create = (struct kgsl_drawctxt_create *)argp;
+    const unsigned int orig_flags = create->flags;
     create->flags &= ~KGSL_CONTEXT_PRIORITY_MASK;
     create->flags |= 1 << KGSL_CONTEXT_PRIORITY_SHIFT;   // priority from 1-15, 1 is max priority
-    printf("IOCTL_KGSL_DRAWCTXT_CREATE: creating context with flags 0x%x\n", create->flags);
+    int r = my_ioctl(filedes, request, argp);
+    printf("IOCTL_KGSL_DRAWCTXT_CREATE: context with flags 0x%x: %s\n", create->flags, r == 0 ? "ok" : "refused, retrying with SNPE's flags");
+    if (r == 0) return 0;
+    create->flags = orig_flags;
+    return my_ioctl(filedes, request, argp);
   }
 
   if (thneed != NULL && (thneed->record & THNEED_RECORD)) {
