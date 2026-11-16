@@ -117,6 +117,22 @@ class TestParkedTest(unittest.TestCase):
       out.append(t2.update(CS(hibm=0), False)); self.now[0] += 0.05
     self.assertEqual(sum(1 for x in out if x == 2), 600)
 
+  def test_fast_hold_sends_every_frame(self):
+    open(self.trig, 'w').write('hold 2 fast')
+    out = []
+    for f in range(800):                                                   # 8 s of carcontroller frames at 100 Hz
+      out.append(self.t.update(CS(hibm=0), False, frame=f)); self.now[0] += 0.01
+    self.assertEqual(sum(1 for x in out if x == 2), 200)                   # 2 s x 100 Hz
+    n = sum(1 for l in open(self.log) if ' press ' in l)
+    self.assertEqual(n, 40)                                                # logged every 5th
+
+  def test_normal_hold_stays_20_hz_with_frames(self):
+    open(self.trig, 'w').write('hold 2')
+    out = []
+    for f in range(400):
+      out.append(self.t.update(CS(hibm=0), False, frame=f)); self.now[0] += 0.01
+    self.assertEqual(sum(1 for x in out if x == 2), 40)                    # 2 s x 20 Hz
+
   def test_hold_stops_when_you_move_the_light_lever(self):
     open(self.trig, 'w').write('hold')
     self.run_for(1, CS(hibm=0))

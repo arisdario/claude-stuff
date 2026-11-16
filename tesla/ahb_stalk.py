@@ -57,7 +57,7 @@ def _lever(stalk, name):
 class StalkHighBeamTest(object):
   def __init__(self, path=TEST_FILE, log=LOG_FILE, clock=time.monotonic):
     self.path, self.logp, self.clock = path, log, clock
-    self.state, self.kind, self.lines, self.hold_s = 'idle', None, [], None
+    self.state, self.kind, self.lines, self.hold_s, self.fast, self.n_press = 'idle', None, [], None, False, 0
     self.next_check = 0.
     self.t_wait = self.t0 = None
     self.levers0 = None
@@ -106,9 +106,13 @@ class StalkHighBeamTest(object):
     self.state, self.lines, self.t0, self.t_wait = 'idle', [], None, None
 
   # ------------------------------------------------------------------ main
-  def update(self, CS, enabled, busy=False):
-    """called at 20 Hz from carcontroller. Returns the HiBmLvr_Stat value to inject in THIS frame's stalk message, or
-    None (nothing to send). busy = a cruise press goes out in this frame (then this frame is skipped)."""
+  def update(self, CS, enabled, busy=False, frame=None):
+    """called from carcontroller - every frame (100 Hz) with `frame`, or at 20 Hz without it (tests). Returns the
+    HiBmLvr_Stat value to inject in THIS frame's stalk message, or None. busy = a cruise press goes out in this frame.
+    FAST ('hold 10 fast', 16 Nov 2026): while holding, a frame EVERY cycle (100 Hz instead of 20 Hz), so a real
+    'normal' from the steering column is the latest message for at most ~10 ms - does the lamp then stop chattering?"""
+    if frame is not None and frame % 5 != 0 and not (self.fast and self.state == 'pressing'):
+      return None
     now = self.clock()
     if self.state == 'idle':
       if now < self.next_check:
@@ -124,11 +128,13 @@ class StalkHighBeamTest(object):
                    'dip' if word.startswith('dip') else 'push')
       self.hold_s = None
       parts = word.split()
-      if self.kind == 'hold' and len(parts) > 1:
-        try:
-          self.hold_s = min(HOLD_MAX_S, max(1.0, float(parts[1])))
-        except ValueError:
-          pass
+      self.fast = self.kind == 'hold' and 'fast' in parts[2:] + parts[1:2]
+      if self.kind == 'hold':
+        for w in parts[1:]:
+          try:
+            self.hold_s = min(HOLD_MAX_S, max(1.0, float(w)))
+          except ValueError:
+            pass
       self.state, self.t_wait, self.lines = 'waiting', now, []
     if self.state == 'waiting':
       why = self._why_not(CS, enabled)
@@ -155,7 +161,9 @@ class StalkHighBeamTest(object):
         if busy:
           self._log(now, 'skip', None, CS)
           return None
-        self._log(now, 'press', LEVER[self.kind], CS)
+        self.n_press += 1
+        if not self.fast or self.n_press % 5 == 1:     # fast: log every 5th frame (the log stays readable)
+          self._log(now, 'press', LEVER[self.kind], CS)
         return LEVER[self.kind]
       self.state = 'observing'
     if self.state == 'observing':

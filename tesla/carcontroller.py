@@ -758,12 +758,12 @@ class CarController():
           # Send this CAN msg first because it is racing against the real stalk.
           can_sends.insert(0, cruise_msg)
           stalk_busy = True
-    if frame % 5 == 0 and self.ahb_stalk is not None:
+    if self.ahb_stalk is not None:                  # every frame: the test itself decides (20 Hz, or 100 Hz 'fast')
       # AHBSTALK: one-shot PARKED test - does a short light-lever push keep the high beams on? (tesla/ahb_stalk.py)
       # Never allowed to stop controlsd: any error switches the test off (16 Nov 2026: a float in the copied stalk
       # message crashed struct.pack in teslacan -> controlsd died -> red "take control").
       try:
-        hibm = self.ahb_stalk.update(CS, enabled, busy=stalk_busy)
+        hibm = self.ahb_stalk.update(CS, enabled, busy=stalk_busy, frame=frame)
         if hibm is not None and CS.steering_wheel_stalk:
           can_sends.insert(0, teslacan.create_cruise_adjust_msg(spdCtrlLvr_stat=None, turnIndLvr_Stat=None,
                                                                 real_steering_wheel_stalk=CS.steering_wheel_stalk,
