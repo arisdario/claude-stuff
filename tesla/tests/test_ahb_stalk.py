@@ -106,6 +106,17 @@ class TestParkedTest(unittest.TestCase):
     self.assertTrue(os.path.exists(self.trig + '.done'))
     self.assertIn('real_turn=1', open(self.log).read())
 
+  def test_hold_length_from_the_file(self):
+    open(self.trig, 'w').write('hold 20')
+    out = self.run_for(26, CS(hibm=0))
+    self.assertEqual(sum(1 for x in out if x == 2), 400)                   # 20 s at 20 Hz
+    t2 = ahb_stalk.StalkHighBeamTest(self.trig + 'b', self.log, clock=lambda: self.now[0])
+    open(self.trig + 'b', 'w').write('hold 999')                          # capped at 30 s
+    out = []
+    for _ in range(40 * 20):
+      out.append(t2.update(CS(hibm=0), False)); self.now[0] += 0.05
+    self.assertEqual(sum(1 for x in out if x == 2), 600)
+
   def test_hold_stops_when_you_move_the_light_lever(self):
     open(self.trig, 'w').write('hold')
     self.run_for(1, CS(hibm=0))

@@ -40,8 +40,11 @@ NEEDS = {'push': 0, 'pull': 0, 'dip': 1, 'hold': 0}    # where YOUR lever must b
 HOLD_S = 10.0
 
 
-def press_s(kind):
-  return HOLD_S if kind == 'hold' else PRESS_S
+HOLD_MAX_S = 30.0      # "hold N" in the trigger file: N seconds (1-30), default HOLD_S
+
+
+def press_s(kind, hold_s=None):
+  return (hold_s or HOLD_S) if kind == 'hold' else PRESS_S
 
 
 def _lever(stalk, name):
@@ -54,7 +57,7 @@ def _lever(stalk, name):
 class StalkHighBeamTest(object):
   def __init__(self, path=TEST_FILE, log=LOG_FILE, clock=time.monotonic):
     self.path, self.logp, self.clock = path, log, clock
-    self.state, self.kind, self.lines = 'idle', None, []
+    self.state, self.kind, self.lines, self.hold_s = 'idle', None, [], None
     self.next_check = 0.
     self.t_wait = self.t0 = None
     self.levers0 = None
@@ -119,6 +122,13 @@ class StalkHighBeamTest(object):
         word = ''
       self.kind = ('hold' if word.startswith('hold') else 'pull' if word.startswith('pull') else
                    'dip' if word.startswith('dip') else 'push')
+      self.hold_s = None
+      parts = word.split()
+      if self.kind == 'hold' and len(parts) > 1:
+        try:
+          self.hold_s = min(HOLD_MAX_S, max(1.0, float(parts[1])))
+        except ValueError:
+          pass
       self.state, self.t_wait, self.lines = 'waiting', now, []
     if self.state == 'waiting':
       why = self._why_not(CS, enabled)
@@ -141,7 +151,7 @@ class StalkHighBeamTest(object):
         self._log(now, 'driver', None, CS)
         self._finish('aborted', '(a lever was moved during the test)')
         return None
-      if now - self.t0 < press_s(self.kind) - 1e-3:  # (tolerance: the 20 Hz clock is not exact)
+      if now - self.t0 < press_s(self.kind, self.hold_s) - 1e-3:  # (tolerance: the 20 Hz clock is not exact)
         if busy:
           self._log(now, 'skip', None, CS)
           return None
@@ -150,7 +160,7 @@ class StalkHighBeamTest(object):
       self.state = 'observing'
     if self.state == 'observing':
       self._log(now, 'observe', None, CS)
-      if now - self.t0 >= press_s(self.kind) + OBSERVE_S:
+      if now - self.t0 >= press_s(self.kind, self.hold_s) + OBSERVE_S:
         self._finish('done')
       return None
     return None
