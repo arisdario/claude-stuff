@@ -15,6 +15,7 @@ It only LISTENS (openpilot's own 'can' stream). Writes /data/can_capture_<name>_
 and prints the analysis. Copy the file to your computer to keep it: scp -P 8022 root@<eon>:/data/can_capture_*.csv.gz .
 """
 import argparse
+import bisect
 import collections
 import gzip
 import os
@@ -50,16 +51,13 @@ def lever_timeline(frames):
   return out
 
 
-def state_at(timeline, t):
+def state_at(timeline, t, _times=None):
   """lever state at time t, or None inside SETTLE_S after a change (or before the first message)"""
-  cur = None
-  for tc, v in timeline:
-    if tc > t:
-      break
-    cur = (tc, v)
-  if cur is None or t - cur[0] < SETTLE_S:
+  times = _times if _times is not None else [tc for tc, _ in timeline]
+  i = bisect.bisect_right(times, t) - 1
+  if i < 0 or t - timeline[i][0] < SETTLE_S:
     return None
-  return cur[1]
+  return timeline[i][1]
 
 
 def analyse(frames, out=print):
@@ -74,19 +72,24 @@ def analyse(frames, out=print):
     # how long each lever position was held (latched vs momentary)
     held = ['%s %.1f s' % (NAMES.get(v, v), (tl[i + 1][0] if i + 1 < len(tl) else frames[-1][0]) - t) for i, (t, v) in enumerate(tl)]
     out('lever held: ' + ', '.join(held))
-  # every bit of every (bus, address): share of frames with the bit set, per lever state
-  acc = collections.defaultdict(lambda: collections.defaultdict(lambda: [0, 0]))   # (bus, addr, byte, bit) -> state -> [set, n]
+  # every bit of every (bus, address): share of frames with the bit set, per lever state. Fast on the EON: first count
+  # the DISTINCT payloads per (bus, address, state) - one dict step per frame - then expand those to bits.
+  times = [tc for tc, _ in tl]
+  payloads = collections.defaultdict(collections.Counter)            # (bus, addr, state) -> Counter(payload)
   for t, bus, addr, data in frames:
     if addr in (LEVER_ADDR, 0x219):                 # the lever itself and the panda's copy of it for the radar
       continue
-    st = state_at(tl, t)
-    if st is None:
-      continue
-    for i, b in enumerate(data):
-      for k in range(8):
-        c = acc[(bus, addr, i, k)][st]
-        c[0] += (b >> k) & 1
-        c[1] += 1
+    st = state_at(tl, t, times)
+    if st is not None:
+      payloads[(bus, addr, st)][data] += 1
+  acc = collections.defaultdict(lambda: collections.defaultdict(lambda: [0, 0]))   # (bus, addr, byte, bit) -> state -> [set, n]
+  for (bus, addr, st), cnt in payloads.items():
+    for data, n in cnt.items():
+      for i, b in enumerate(data):
+        for k in range(8):
+          c = acc[(bus, addr, i, k)][st]
+          c[0] += n * ((b >> k) & 1)
+          c[1] += n
   found = []
   for key, d in acc.items():
     p = {s: c[0] / c[1] for s, c in d.items() if c[1] >= 3}
@@ -95,6 +98,27 @@ def analyse(frames, out=print):
     elif 0 in p and 2 in p and abs(p[2] - p[0]) >= 0.9:
       found.append(('follows PULL (flash)', key, p))
   out('bits that follow the lever (other than the lever message itself): %d' % len(found))
+  # TIMING: how long after each lever change does the bit change too? A status from another module (e.g. the body
+  # controller reporting the lamps) lags by tens of ms; a copy of the lever changes within a few ms.
+  by_key = collections.defaultdict(list)
+  for t, bus, addr, data in frames:
+    by_key[(bus, addr)].append((t, data))
+  for what, (bus, addr, i, k), p in found:
+    if bus >= 128:
+      continue
+    want = 1 if 'OUT' in what else 2
+    seq, delays = by_key[(bus, addr)], []
+    for j, (tc, v) in enumerate(tl[1:], 1):
+      if v != want and tl[j - 1][1] != want:
+        continue                                  # only changes into or out of the state this bit follows
+      target = 1 if v == want else 0
+      for t, data in seq:
+        if t >= tc - 0.5 and len(data) > i and ((data[i] >> k) & 1) == target and t >= tc - 0.05:
+          delays.append((t - tc) * 1000.)
+          break
+    rate = (len(seq) - 1) / max(1e-6, seq[-1][0] - seq[0][0]) if len(seq) > 1 else 0.
+    out('  timing  bus %d 0x%03x byte %d bit %d (%.0f messages/s): changes %s ms after the lever' % (
+      bus, addr, i, k, rate, ', '.join('%+.0f' % d for d in delays) or '-'))
   for what, (bus, addr, i, k), p in sorted(found, key=lambda x: (x[1][0], x[1][1], x[1][2], x[1][3]))[:40]:
     out('  %-22s bus %d  0x%03x  byte %d bit %d   set: normal %.2f  out %s  pulled %s%s' % (
       what, bus, addr, i, k, p.get(0, float('nan')), '%.2f' % p[1] if 1 in p else '-', '%.2f' % p[2] if 2 in p else '-',
@@ -147,7 +171,18 @@ def main():
   ap.add_argument('--guide', choices=['hibeam'], help='print what to do when (hibeam: on, off, flash x2)')
   ap.add_argument('--seconds', type=float, default=None)
   ap.add_argument('--name', default=None)
+  ap.add_argument('--analyse', metavar='FILE', help='analyse a saved capture (.csv.gz) again, no recording')
   a = ap.parse_args()
+  if a.analyse:
+    frames = []
+    with gzip.open(a.analyse, 'rt') as f:
+      next(f)
+      for line in f:
+        t, bus, addr, data = line.strip().split(',')
+        frames.append((float(t), int(bus), int(addr, 16), bytes.fromhex(data)))
+    print('%d frames from %s' % (len(frames), a.analyse))
+    analyse(frames)
+    return
   guide = GUIDE_HIBEAM if a.guide == 'hibeam' else []
   seconds = a.seconds or (GUIDE_HIBEAM_S if a.guide == 'hibeam' else 30.)
   name = a.name or (a.guide or 'free')
@@ -160,6 +195,7 @@ def main():
       f.write('%.4f,%d,0x%03x,%s\n' % (t, bus, addr, data.hex()))
   buses = collections.Counter(b for _, b, _, _ in frames)
   print('saved %d frames to %s (frames per bus: %s)' % (len(frames), path, dict(sorted(buses.items()))))
+  print('analysing ...', flush=True)
   analyse(frames)
 
 
