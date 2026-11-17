@@ -26,13 +26,12 @@ class Thneed;
 class SNPEModel : public RunModel {
 public:
   SNPEModel(const char *path, float *output, size_t output_size, int runtime);
-  ~SNPEModel() {
-    if (model_data) free(model_data);
-  }
+  ~SNPEModel();                          // out of line (snpemodel.cc): with thneed it deletes the Thneed, a complete type there
   void addRecurrent(float *state, int state_size);
   void addTrafficConvention(float *state, int state_size);
   void addDesire(float *state, int state_size);
-  void execute(float *net_input_buf, int buf_size);
+  void execute(float *net_input_buf, int buf_size);   // buf_size: a number of FLOATS (driving.cc, dmonitoring.cc, tfmodel.cc)
+  int thneed_mode() const { return thneed_state; }    // 0 not tried yet, 1 replaying, -1 plain SNPE (always -1/0 without thneed)
 private:
   // THNEED: 0 = not tried yet, 1 = running on the replay, -1 = plain SNPE (switched off, or the self-test failed)
   int thneed_state = 0;
@@ -40,7 +39,9 @@ private:
   float *thneed_in[4] = {NULL, NULL, NULL, NULL};
   size_t thneed_in_bytes[4] = {0, 0, 0, 0};
   int thneed_image = -1;                 // which of thneed's inputs is the camera image (its pointer is set every frame)
-  int thneed_start(float *net_input_buf); // records + self-tests on the first frame (defined only with USE_THNEED)
+  bool thneed_start(float *net_input_buf); // records + self-tests on the first frame; true = this frame's output is done
+  void thneed_drop();                     // deletes the Thneed (it gives back everything it holds); idempotent
+  void thneed_give_up(const char *why);   // plain SNPE for the rest of this process (these three: only with USE_THNEED)
   zdl::DlSystem::Runtime_t runtime_used = zdl::DlSystem::Runtime_t::CPU;
   float *output_buf = NULL;              // THNEED needs these (0.7.5 did not keep them)
   size_t output_floats = 0;

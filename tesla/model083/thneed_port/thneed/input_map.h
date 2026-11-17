@@ -24,3 +24,13 @@ inline bool thneed_match_inputs(const size_t *theirs, int n_theirs, const size_t
   }
   return true;
 }
+
+// Which of thneed's inputs receives the camera image (the runner's input 0): its index in `perm`, or -1 if none does.
+// The runner never replays with -1 (it would index thneed_in[-1]); with a valid thneed_match_inputs() perm it cannot
+// happen, this is the check that keeps it so.
+inline int thneed_image_slot(const int *perm, int n) {
+  for (int i = 0; i < n; i++) {
+    if (perm[i] == 0) return i;
+  }
+  return -1;
+}
